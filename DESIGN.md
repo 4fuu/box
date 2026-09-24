@@ -183,20 +183,22 @@ A portal is a hostname routed to one TCP port inside one container. The containe
 
 `new` does not register a hostname. Until the container claims one, the server's fixed HTTP port has nothing to route for it.
 
-From inside the container:
+The parent domain is set when the server starts. It is not chosen by the container, and an agent does not invent one. `box domain` prints it.
 
 ```
-box portal check app.example.com
+box domain
+box.example.com
+box portal check web
 free
-box portal add app.example.com 3000
-http://app.example.com
+box portal add web 3000
+http://web.box.example.com
 box portal ls
 HOST                 PORT
-app.example.com      3000
-box portal rm app.example.com
+web                  3000
+box portal rm web
 ```
 
-`check` asks the server whether that hostname is already claimed. It does not claim it. `add` checks again and claims it in one step. If it is taken, `add` refuses and names the container that holds it. A container can hold several hostnames. Each hostname points at one port. Two hostnames may point at the same port.
+`check` and `add` take a label, not a full hostname. The server joins the label to the configured domain. `web` becomes `web.box.example.com`. A label cannot contain a dot, so a container cannot claim a name outside that domain. `check` asks whether that hostname is already claimed. It does not claim it. `add` checks again and claims it in one step. If it is taken, `add` refuses and names the container that holds it. A container can hold several labels. Each label points at one port. Two labels may point at the same port.
 
 The guest CLI talks only to the controller, over a socket mounted into that container. The socket is bound to that container. A request cannot name a different container. The controller asks the server to claim the hostname. The server is the only place that knows every claim, including claims on other nodes. If the server accepts, the controller points that hostname's frp HTTP proxy at the container's bridge address and the requested port. If the server refuses, nothing is registered.
 
@@ -212,7 +214,7 @@ There is no login wall and no certificate issuance. The operator's edge terminat
 
 Non-HTTP ports are not given hostnames. SSH does not go through this port. A database stays inside the container unless the operator publishes it some other way. The first version is HTTP only, because that is what frp's host routing does.
 
-A skill ships in the base image at `/home/box/.agents/skills/box/SKILL.md`. It tells an agent to claim a portal with `box portal`, to listen on `0.0.0.0`, and not to edit proxy config or publish a host port. The skill does not contain credentials.
+A skill ships in the base image at `/home/box/.agents/skills/box/SKILL.md`. It tells an agent to read the domain with `box domain`, claim a label with `box portal`, listen on `0.0.0.0`, and not to invent a domain or edit proxy config. The skill does not contain credentials. The domain is not baked into the image. The controller fetches it from the server and answers `box domain` from that.
 
 ## Images
 

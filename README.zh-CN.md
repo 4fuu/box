@@ -10,7 +10,7 @@ box 是一台自托管的持久 Linux 计算机。客户端就是你机器上已
 `ssh box.example.com` 打开控制 REPL。`new` 在你配对过的部署节点上创建一台计算机。
 `ssh web@box.example.com` 进入名为 `web` 的容器。
 
-参照是 [exe.dev](https://exe.dev)。在那里，一条命令得到一台计算机，磁盘在重启后还在，这台计算机上的网站会有一个主机名。你用 SSH 进去，你是 root，用户态是带 `systemd` 的普通系统。box 保留这个形状，并把它跑在你自己的机器上。账单、账号、邮件、网页编程助手，以及每台计算机一个公网 IP，留在 exe.dev。它们不属于这个项目。
+参照是 [exe.dev](https://exe.dev)。在那里，一条命令得到一台计算机，磁盘在重启后还在，这台计算机上的网站会有一个主机名。你用 SSH 进去，你是 root，用户态是带 `systemd` 的普通系统。box 保留这个形状，并把它跑在你自己的机器上。
 
 一个节点跑多台计算机。每台计算机是一个 rootful 的 [Podman](https://podman.io) 容器，有自己的卷，也有自己的 sshd。会话在容器里，不在节点上。节点可以在 NAT 后面。[frp](https://github.com/fatedier/frp) 在服务器和节点之间运送命令、SSH 和 HTTP。
 

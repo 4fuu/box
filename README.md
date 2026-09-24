@@ -14,9 +14,7 @@ opens a shell in the container named `web`.
 The reference is [exe.dev](https://exe.dev). There, one command yields a
 computer, the disk survives restarts, and a site on that computer gets a
 hostname. You SSH in, you are root, and you have a normal userspace with
-`systemd`. box keeps that shape and runs it on hardware you operate. Billing,
-accounts, email, the web coding agent, and a public IP per computer stay on
-exe.dev. They are not part of this project.
+`systemd`. box keeps that shape and runs it on hardware you operate.
 
 One node runs many computers. Each computer is a rootful
 [Podman](https://podman.io) container with its own volume and its own sshd.

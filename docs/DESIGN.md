@@ -2,7 +2,7 @@
 
 A self-hosted persistent Linux computer. The client is the `ssh` already installed on the operator's machine. The server is the only public SSH entry. A deploy node is a controller on a machine the operator owns. It may sit behind NAT. The controller runs each computer as a Podman container. One node runs many containers. There is no microVM and no second SSH hop.
 
-The reference is [exe.dev](https://exe.dev): one command yields a computer, the disk survives restarts, and a website on that computer gets a hostname. Billing, accounts, email, the web agent, and per-VM public IPs are out of scope. This is a private deployment, not a hosted service. A container shares the node's kernel. That is accepted. A private node does not need a hardware VM boundary.
+The reference is [exe.dev](https://exe.dev): one command yields a computer, the disk survives restarts, and a website on that computer gets a hostname. This is a private deployment, not a hosted service. A container shares the node's kernel. That is accepted. A private node does not need a hardware VM boundary.
 
 ## Status
 

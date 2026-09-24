@@ -1,6 +1,6 @@
 # Design
 
-A self-hosted persistent Linux computer. The client is the `ssh` already installed on the operator's machine. The server is the only public SSH entry. A deploy node is a controller on a machine the operator owns. It may sit behind NAT. The controller runs each computer as a Podman container. There is no microVM and no second SSH hop.
+A self-hosted persistent Linux computer. The client is the `ssh` already installed on the operator's machine. The server is the only public SSH entry. A deploy node is a controller on a machine the operator owns. It may sit behind NAT. The controller runs each computer as a Podman container. One node runs many containers. There is no microVM and no second SSH hop.
 
 The reference is [exe.dev](https://exe.dev): one command yields a computer, the disk survives restarts, and a website on that computer gets a hostname. Billing, accounts, email, the web agent, and per-VM public IPs are out of scope. This is a private deployment, not a hosted service. A container shares the node's kernel. That is accepted. A private node does not need a hardware VM boundary.
 
@@ -56,7 +56,7 @@ From outside the REPL, the same computer is:
 ssh web@box.example.com
 ```
 
-The username is the computer's name. `scp`, `rsync`, and VS Code Remote-SSH use that destination. The login user inside the computer is always `box`, with passwordless sudo. The username does not select that user. It selects the computer.
+The username is the container's name. The server looks up which node runs that container and splices the TCP connection to that container's sshd. The session is inside the container, not on the controller. `scp`, `rsync`, and VS Code Remote-SSH use that destination. The login user inside the container is `box`, from the image. The username does not select that user. It selects the container.
 
 A node that has just started cannot create a computer. Pull the image first:
 
@@ -71,22 +71,22 @@ client                      server                         deploy node
 OpenSSH                     public SSH entry               operator's machine
 
 ssh box.example.com         control REPL
-ssh web@box                 key check, username is the name
+ssh web@box                 username is the container; splice to its sshd
                             fixed HTTP port, route by Host
                                      │
                                      │ frp, node dials out
                                      ▼
                             commands ──────────────▶  controller
-                            SSH TCP    ──────────────▶  podman container
-                            HTTP by Host ───────────▶  sshd on loopback
+                            SSH TCP    ──────────────▶  that container's sshd
+                            HTTP by Host ───────────▶  that container's HTTP port
                                                        HTTP port on loopback
 ```
 
 The client is not a program we ship.
 
-The server checks the key, serves the control REPL, and forwards an authorized SSH TCP connection to the node that owns the computer. It also routes HTTP by the `Host` header. It does not run the user's processes.
+The server checks the key, serves the control REPL, and splices an authorized SSH TCP connection to the container named by the username. The handshake finishes at sshd inside that container. It does not finish at the controller, and it does not open a shell on the node. The server also routes HTTP by the `Host` header. It does not run the user's processes.
 
-The controller receives commands from the server. It pulls images, creates and stops containers, and publishes each container's SSH and HTTP ports on loopback. Clients cannot dial the controller. The controller does not store client public keys. It does store the set of bound public keys for the computers it runs, pushed by the server, so sshd inside the container can accept a forwarded connection.
+The controller receives commands from the server. It pulls images, creates and stops containers, and publishes each container's sshd and HTTP port on loopback. Clients cannot dial the controller. The controller does not store client public keys. It does store the bound public keys for the containers it runs, pushed by the server, so the container's sshd can accept the spliced connection.
 
 Podman is the runtime, not a plugin behind another runtime. The controller shells out to `podman`. Replacing it later means replacing those calls. The first version does not keep a second backend.
 
@@ -102,7 +102,7 @@ The node registers three proxies after pairing:
 | `node-<id>-ssh` | one TCP proxy per computer, loopback only | the container's sshd |
 | `node-<id>-http` | HTTP for computers on this node | public edge routing |
 
-RPC and SSH use STCP. They are not published on a public port. The server opens a short-lived visitor when it needs one, connects to loopback, and closes it. The SSH visitor is a TCP splice. The client's SSH handshake ends at the container's sshd, not at the controller. There is no second SSH session and no `ProxyJump`.
+RPC and SSH use STCP. They are not published on a public port. The server opens a short-lived visitor when it needs one, connects to loopback, and closes it. The SSH visitor is a TCP splice. The client's SSH handshake ends at sshd in the container the username named. The controller only published that container's port. There is no second SSH session and no `ProxyJump`.
 
 HTTP uses frp's HTTP virtual-host proxy. The server listens on one fixed port. A request is routed by `Host`. The node registers a custom domain only after the server has accepted it. The fixed port is for the operator's edge. It is plain HTTP. Do not publish it to the internet without that edge.
 
@@ -112,17 +112,17 @@ xtcp is not used. NAT traversal is unreliable, and STCP through frps is enough.
 
 The server speaks SSH with [charmbracelet/wish](https://github.com/charmbracelet/wish) for the control REPL only. An unknown key is accepted only while presenting a live one-time password. After that, only bound keys are accepted.
 
-SSH has no Host header. One port cannot be demultiplexed by the name the client typed. The username is the route.
+SSH has no Host header. One port cannot be demultiplexed by the name the client typed. The username is the route, and it names a container. The server resolves that name to the node that runs it, then splices. A node runs many containers. Each has its own sshd, its own loopback port, and its own disk. The username never selects the node as a machine to log into.
 
 | Username | Result |
 | --- | --- |
 | empty, or `box` | control REPL |
-| `web` | TCP splice to the computer named web, if this key may access it |
+| `web` | TCP splice to the container named web, if this key may access it |
 | `pair+<password>` | bind this key, if the password is valid |
 
-A computer name cannot be `box`, `pair`, or contain `+`. `new` refuses those. `pair+` exists so a password can be passed non-interactively. The interactive REPL asks for it when a key is not yet bound.
+A container name cannot be `box` or `pair`, and cannot contain `+` or `.`. `new` refuses those. Names are globally unique, so the username alone is enough. `pair+` exists so a password can be passed non-interactively. The interactive REPL asks for it when a key is not yet bound.
 
-The server accepts the key before it splices. The container's sshd must also accept that key, because the splice is a new TCP connection and the handshake runs again. The server pushes the bound public keys to the node. The controller writes them to the computer's authorized keys. A key removed on the server is removed on the next push. Sharing is a key on that list, not a second account system.
+The server accepts the key before it splices, so an unknown key never reaches a container. The container's sshd must also accept that key, because the splice is a new TCP connection and the handshake runs again, this time against the container. The server pushes the bound public keys to the node. The controller writes them to the computer's authorized keys. A key removed on the server is removed on the next push. Sharing is a key on that list, not a second account system.
 
 `scp`, `rsync`, SFTP, and `ssh -L` work because they arrive at a normal sshd. Reverse forward (`-R`) is allowed by sshd and is not specially disabled. It can only reach addresses the container can route. It is not a feature of the control plane.
 

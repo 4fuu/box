@@ -1,4 +1,6 @@
 # Base computer. A node must pull this image before it can create computers.
+# The box CLI is copied in from a release archive. This image does not compile it.
+# COPY box /usr/local/bin/box
 # The controller runs it with podman --systemd=always. sshd is the login path.
 # Client keys are not in the image. The controller writes them onto the volume.
 # The server's GitHub key is also written at start, not baked in here.

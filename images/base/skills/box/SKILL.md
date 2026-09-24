@@ -5,7 +5,7 @@ description: Manage this computer's portal hostnames, server environment, and mi
 
 # box
 
-This computer is a container. The domain and the toolchains are already here. Do not invent a domain. Do not install Go or Rust from their upstream installers.
+This computer is a container. `box` here only has `domain` and `portal`. `box serve` and `box node` are not available. The domain and the toolchains are already here. Do not invent a domain. Do not install Go or Rust from their upstream installers.
 
 ## Domain
 

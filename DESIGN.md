@@ -17,9 +17,9 @@ When the server is initialized it prints a one-time password and the time it exp
 To bind another client, either:
 
 - from an already bound client, run `pair`, which prints a new one-time password, or
-- on the server machine, run `box server pair`, which listens on localhost only and prints one.
+- on the server machine, run `box pair`, which listens on localhost only and prints one.
 
-A deploy node joins with a pairing code, not a password. The code only confirms that this machine is the one the operator intends to add. It is short, single use, and expires. `node pair` on a bound client prints one. `box server node-pair` on the server localhost does the same. The node stores the resulting token locally and reconnects with it. The code is not used again.
+A deploy node joins with a pairing code, not a password. The code only confirms that this machine is the one the operator intends to add. It is short, single use, and expires. `node pair` on a bound client prints one. `box node pair` on the server localhost does the same. The node stores the resulting token locally and reconnects with it. The code is not used again.
 
 A bound key can be listed and removed from a bound client, or from the localhost CLI. Removing the last key does not unlock the server. Initialize again, or pair from localhost.
 
@@ -179,7 +179,7 @@ ssh box.example.com new web --image base --node home --cpu 2 --memory 2G --disk 
 
 If the chosen node has not pulled the image, `new` tells the operator to run `image pull`. It does not pull implicitly. A pull can take long enough that `new` would look stuck.
 
-The localhost CLI on the server is `box server`. It can `pair`, `node-pair`, `key ls`, `key rm`, `key copy`, `env set`, `env rm`, `env ls`, and `status`. It does not open a path around the REPL for creating computers. That stays on a bound client, so a person on the server console cannot skip the key check by accident. `status` is the exception: it is read-only.
+On the server machine, `box` talks to the local server process over a localhost socket. It can `pair`, `node pair`, `key ls`, `key rm`, `key copy`, `env set`, `env rm`, `env ls`, and `status`. It does not open a path around the REPL for creating computers. That stays on a bound client, so a person on the server console cannot skip the key check by accident. `status` is the exception: it is read-only.
 
 ## Portals
 
@@ -244,7 +244,7 @@ The image has no client keys and no host key. The controller generates a host ke
 
 The first time the server starts, it generates an ed25519 key pair and stores it next to its SQLite file. The private key never leaves the server. It is not a login key. It is the key the operator adds to GitHub.
 
-`key copy` prints the public key on its own line and nothing else. The same command exists in the control REPL and as `box server key copy` on the server. Either output can be pasted into GitHub. A later start reuses the same key. It does not rotate unless the operator deletes the file and starts again.
+`key copy` prints the public key on its own line and nothing else. The same command exists in the control REPL and as `box key copy` on the server. Either output can be pasted into GitHub. A later start reuses the same key. It does not rotate unless the operator deletes the file and starts again.
 
 When a container is created, the controller writes that public key into the container's authorized keys, next to the bound client keys. The container can then be used as a GitHub SSH remote once the operator has added the same public key to GitHub. The private key is not copied in. Signing and pushing as that key is a later step. The first version only makes the public key easy to copy and present.
 
@@ -267,9 +267,23 @@ crane push base:local registry.example.com/base:latest
 
 The registry is the operator's. The server only stores the reference. `image pull` runs `podman pull` on the node. A node that has never pulled `base` cannot create a computer from it. That is deliberate: a node is not usable until it has pulled an image.
 
+## One binary
+
+The project builds one executable, `box`. The subcommand selects the role. There is no `boxd` and no `box-node`.
+
+| Command | Where it runs | What it does |
+| --- | --- | --- |
+| `box serve` | the server machine | SSH entry, HTTP routing, SQLite, the pairing and env store |
+| `box node` | a deploy node | the controller. Starts frpc, calls Podman, serves the guest socket |
+| `box node join` | a deploy node | pair, then keep running as the controller |
+| `box` | inside a container | `domain`, `portal`. Talks to the guest socket. Refuses `serve` and `node` |
+| `box` | on the server machine, not serving | `pair`, `key`, `env`, `status`, over the localhost socket |
+
+A release is one archive per OS and architecture. The server, the node, and the image all download that archive. The image Dockerfile copies the binary to `/usr/local/bin/box`. It does not build it.
+
 ## Controller
 
-One binary, `box-node`. It runs as root. Podman is rootful. Rootless mode needs a systemd user session and cgroup delegation, which fails on a machine that was only SSH'd into. Rootful is the smaller setup for a private node. The container is still unprivileged inside: no `--privileged`, no host network, no Docker socket.
+`box node` runs as root. Podman is rootful. Rootless mode needs a systemd user session and cgroup delegation, which fails on a machine that was only SSH'd into. Rootful is the smaller setup for a private node. The container is still unprivileged inside: no `--privileged`, no host network, no Docker socket.
 
 1. Pair with the server. Store the node token.
 2. Start frpc and register the RPC and HTTP proxies. Register an STCP proxy per running computer.
@@ -280,10 +294,10 @@ One binary, `box-node`. It runs as root. Podman is rootful. Rootless mode needs 
 Join:
 
 ```
-box-node join --server box.example.com:7000 --code <pairing-code> --name home
+box node join --server box.example.com:7000 --code <pairing-code> --name home
 ```
 
-The code is single use. The node id and token are written to `/var/lib/box-node/node.json`. A restart reconnects with that file.
+The code is single use. The node id and token are written to `/var/lib/box/node.json`. A restart is `box node`, which reads that file and does not ask for the code again.
 
 Creating a computer:
 
@@ -327,16 +341,16 @@ The controller keeps its own local record: node token, volume name, published po
 
 ## Processes
 
-On the server, one process supervisor runs:
+On the server, one process supervisor runs `box serve` and `frps`.
 
 | Process | Listens | Role |
 | --- | --- | --- |
-| `boxd` | 22, and the fixed HTTP port | SSH control plane, key check, TCP splice, Host routing |
+| `box serve` | 22, the fixed HTTP port, and a localhost socket | SSH control plane, key check, TCP splice, Host routing |
 | `frps` | 7000, token required | Meeting point for nodes |
 
-`frps` is not for clients. 7000 requires the token issued at pairing.
+`frps` is not for clients. 7000 requires the token issued at pairing. `box` on the server machine uses the localhost socket. It does not open SSH to itself.
 
-On a node, `box-node` is the only process the operator starts. It starts frpc and calls Podman. The node needs Podman and a cgroup v2 host. It does not need KVM.
+On a node, `box node` is the only process the operator starts. It starts frpc and calls Podman. The node needs Podman and a cgroup v2 host. It does not need KVM.
 
 ## Not in the first version
 
@@ -363,4 +377,4 @@ On a node, `box-node` is the only process the operator starts. It starts frpc an
 | Toolchain | mise | Built-in Go and Rust backends, plus `mise x` for a temporary toolchain |
 | Server state | SQLite | One file, enough for a private deployment |
 
-The REPL, the controller, the guest `box` CLI, and the skill are the code to write. The rest is the software above.
+The `box` binary and the skill are the code to write. The rest is the software above.

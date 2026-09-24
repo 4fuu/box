@@ -41,4 +41,4 @@ On the computer, `box portal check` asks whether a hostname is free. `box portal
 
 ## Design
 
-[DESIGN.md](DESIGN.md) is the spec: binding, the three parts, frp, the REPL, portals, the guest CLI, the base image, and what the first version leaves out.
+[DESIGN.md](DESIGN.md) is the spec: binding, the three parts, frp, the REPL, portals, the single `box` binary, the base image, and what the first version leaves out.

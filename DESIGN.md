@@ -165,6 +165,9 @@ Keys:
 | `pair` | Print a one-time password for another client |
 | `key ls` / `key rm` | List or remove bound client keys |
 | `key copy` | Print the server's GitHub public key and nothing else, so it can be copied |
+| `env set <name> <value>` | Store an environment variable. Injected into every container at start |
+| `env rm <name>` | Remove it. Running containers keep the old value until restart |
+| `env ls` | List names only. Values are not printed |
 | `whoami` | Which key this session used |
 | `defaults` | Default node, image, and size. Non-interactive `new` uses these |
 
@@ -176,7 +179,7 @@ ssh box.example.com new web --image base --node home --cpu 2 --memory 2G --disk 
 
 If the chosen node has not pulled the image, `new` tells the operator to run `image pull`. It does not pull implicitly. A pull can take long enough that `new` would look stuck.
 
-The localhost CLI on the server is `box server`. It can `pair`, `node-pair`, `key ls`, `key rm`, `key copy`, and `status`. It does not open a path around the REPL for creating computers. That stays on a bound client, so a person on the server console cannot skip the key check by accident. `status` is the exception: it is read-only.
+The localhost CLI on the server is `box server`. It can `pair`, `node-pair`, `key ls`, `key rm`, `key copy`, `env set`, `env rm`, `env ls`, and `status`. It does not open a path around the REPL for creating computers. That stays on a bound client, so a person on the server console cannot skip the key check by accident. `status` is the exception: it is read-only.
 
 ## Portals
 
@@ -225,9 +228,10 @@ The image contains:
 
 - systemd, sudo, openssh-server, and CA certificates
 - user `box`, uid 1000, passwordless sudo, home `/home/box`
-- git, curl, jq, vim, python3, gcc, make, ripgrep, rsync, and the usual shell tools
+- git, curl, jq, vim, gcc, make, rsync, and the usual shell tools
+- agent tools: `rg`, `fd`, `bat`, `fzf`, `zoxide`, `hyperfine`, `tokei`, `sd`, `dust`, and `gh`
 - mise, installed from `https://mise.run` to `/usr/local/bin/mise`
-- the latest stable Go and stable Rust, installed with mise's built-in backends into the `box` user's data directory
+- the latest stable Go, stable Rust, the Node LTS, and the latest Python 3, installed with mise's built-in backends into the `box` user's data directory
 - sshd listening on 2222, password login off, root login off
 - an empty `/etc/machine-id`, so each computer generates its own on first boot
 - the skill at `/home/box/.agents/skills/box/SKILL.md`
@@ -243,6 +247,16 @@ The first time the server starts, it generates an ed25519 key pair and stores it
 `key copy` prints the public key on its own line and nothing else. The same command exists in the control REPL and as `box server key copy` on the server. Either output can be pasted into GitHub. A later start reuses the same key. It does not rotate unless the operator deletes the file and starts again.
 
 When a container is created, the controller writes that public key into the container's authorized keys, next to the bound client keys. The container can then be used as a GitHub SSH remote once the operator has added the same public key to GitHub. The private key is not copied in. Signing and pushing as that key is a later step. The first version only makes the public key easy to copy and present.
+
+## Environment
+
+The server stores environment variables. A container does not. `env set GH_TOKEN ghp_...` writes the value on the server. `env ls` prints names, never values. `env rm` deletes a name.
+
+On create and on restart, the controller asks the server for the current set and passes it to `podman run` as `--env`. The value is not written into the image, the volume, or a file the container can read back as a store. It is in the process environment, which is what `gh` reads. `GH_TOKEN` takes precedence over stored `gh` credentials, so a container with that variable does not run `gh auth login`.
+
+A running container does not see a change until restart. The controller does not edit the environment of a live container. `env set` says that.
+
+The set is global to this deployment. It is not per container. A private deployment has one operator, and the point is to avoid repeating a login on every computer. A value is a secret. The REPL does not echo it back. The SQLite file is the secret store, so that file is not world-readable.
 
 Build and publish:
 
@@ -304,6 +318,7 @@ The server keeps one SQLite file.
 - `images`: name, ref, whether it is the default
 - `computers`: name, node, image, size, state
 - `portals`: hostname, container, node, port, claimed at
+- `env`: name, value. The value is not returned by list commands
 - `shares`: computer, key, web or ssh. The owner key is implicit
 
 Computer names are globally unique, because the SSH username is that name. `new` refuses a collision. A portal hostname is also globally unique. It is not derived from the container name.

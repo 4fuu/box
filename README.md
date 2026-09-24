@@ -10,7 +10,7 @@ There is no account. The server prints a one-time password at init. The first SS
 
 Design only. No server, node, or image has been built, and the commands below are not runnable yet.
 
-A deploy node is not usable until it has pulled an image. The base image is Fedora 44 with systemd, sshd, mise, Go, Rust, and a `box` user. Its Dockerfile is [images/base/Dockerfile](images/base/Dockerfile).
+A deploy node is not usable until it has pulled an image. The base image is Fedora 44 with systemd, sshd, agent tools, mise, Go, Rust, Node, Python, and a `box` user. Its Dockerfile is [images/base/Dockerfile](images/base/Dockerfile).
 
 ## Fit
 
@@ -37,7 +37,7 @@ box ▶ ssh web
 
 `new` prints `ssh web@box.example.com`. That destination is what `scp` and VS Code Remote-SSH use.
 
-On the computer, `box portal check` asks whether a hostname is free. `box portal add` claims it for a port inside that container. The server accepts the claim before frp routes it. `key copy` prints the server's GitHub public key and nothing else. A skill in the base image tells an agent how to claim a portal and how to use mise, including a temporary toolchain.
+On the computer, `box portal check` asks whether a hostname is free. `box portal add` claims it for a port inside that container. The server accepts the claim before frp routes it. `key copy` prints the server's GitHub public key and nothing else. `env set GH_TOKEN <token>` stores a token the server injects when a container starts, so `gh` does not ask for a login. A skill in the base image tells an agent how to claim a portal and how to use mise, including a temporary toolchain.
 
 ## Design
 

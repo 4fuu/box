@@ -9,17 +9,27 @@ ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     container=podman
 
+# Agent tools, not a desktop. fd-find ships as fd. gh reads GH_TOKEN from the
+# environment the controller injects at start, so it does not need gh auth login.
 RUN dnf -y upgrade && dnf -y install \
         bash \
         ca-certificates \
         curl \
         git \
+        gh \
         jq \
         less \
         openssh-clients \
         openssh-server \
-        python3 \
         ripgrep \
+        fd-find \
+        bat \
+        fzf \
+        zoxide \
+        hyperfine \
+        tokei \
+        sd \
+        dust \
         sudo \
         systemd \
         vim \
@@ -55,10 +65,12 @@ RUN mkdir -p /var/lib/box/home /var/lib/box/mise \
     && chown -R box:box /var/lib/box
 
 USER box
-RUN mise use --global go@latest rust@stable \
+RUN mise use --global go@latest rust@stable node@lts python@3 \
     && mise exec -- go version \
     && mise exec -- rustc --version \
-    && mise exec -- cargo --version
+    && mise exec -- cargo --version \
+    && mise exec -- node --version \
+    && mise exec -- python3 --version
 USER root
 
 # Loopback only. The controller publishes this port. Password login stays off.

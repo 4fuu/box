@@ -1,2 +1,8 @@
 # Orb portal registrations. Generated per machine.
 .amp/portals/*
+
+# Built binary. `go build -o box .`
+/box
+
+# Release binary staged into the image build context. Not source.
+/images/base/box

@@ -6,7 +6,7 @@ The reference is [exe.dev](https://exe.dev): one command yields a computer, the 
 
 ## Status
 
-Design only. Nothing here is implemented.
+The `box` module implements this spec. This document is still the source of truth when it disagrees with the README.
 
 ## Binding
 

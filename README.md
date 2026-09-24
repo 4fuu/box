@@ -8,7 +8,7 @@ There is no account. The server prints a one-time password at init. The first SS
 
 ## Status
 
-Design only. No server, node, or image has been built, and the commands below are not runnable yet.
+The `box` binary implements the server, the node controller, and the guest CLI. `go test ./...` exercises that control plane without Podman, frp, or a built image.
 
 A deploy node is not usable until it has pulled an image. The base image is Fedora 44 with systemd, sshd, agent tools, mise, Go, Rust, Node, Python, and a `box` user. Its Dockerfile is [images/base/Dockerfile](images/base/Dockerfile).
 
@@ -17,6 +17,17 @@ A deploy node is not usable until it has pulled an image. The base image is Fedo
 Use this when you want exe.dev's "it is just a computer" on hardware you operate: a persistent disk, sudo, a hostname routed to one port, and stock `ssh` for both control and login.
 
 Do not use this as a multi-tenant host. Computers on a node share that node's kernel. The HTTP port is plain and fixed. Put your own edge in front of it. Non-HTTP ports are not published. Computers are not moved between nodes.
+
+## Install
+
+On the Linux machine that will be the server or a deploy node, download the installer and run it in a terminal. It asks for English or Chinese, then whether this machine is the server or a deploy node, and installs `box` plus the programs that role needs (`frps` on a server, Podman and `frpc` on a node).
+
+```bash
+curl -fsSL -o install.sh https://raw.githubusercontent.com/4fuu/box/main/scripts/install.sh
+sh install.sh
+```
+
+Releases are date versions such as `2026.924.0`. The same release publishes the base computer image at `ghcr.io/4fuu/box:<version>`. After a node is paired, register and pull it with `image add` and `image pull` before `new`. See [docs/release.md](docs/release.md).
 
 ## First session
 

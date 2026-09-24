@@ -4,16 +4,16 @@ Persistent Linux computers on hardware the operator owns. The client is stock `s
 
 ## Status
 
-Nothing is implemented. There is no `go.mod`, no server, and no tests. Do not invent commands, flags, or packages that DESIGN.md does not name. Do not describe the commands in README.md as runnable.
+The Go module implements the three roles in one `box` binary. Do not invent commands, flags, or packages that DESIGN.md does not name. `go test` does not build the base image and does not need Podman or frp.
 
-When a Go module lands, build and test with:
+Build and test with:
 
 ```
 go test ./...
 go build -o box .
 ```
 
-`.agents/setup` installs Go. Until `go.mod` exists it installs Go 1.27.1. After that, the `toolchain` or `go` line in `go.mod` is the pin.
+`.agents/setup` installs Go. The `toolchain` or `go` line in `go.mod` is the pin.
 
 ## Shape
 
@@ -56,5 +56,9 @@ Podman is rootful. Containers are not privileged, do not use the host network, a
 | `images/base/skills/box/SKILL.md` | Skill copied into the image for an agent inside a computer |
 | `.agents/setup` | Orb toolchain install |
 | `.agents/resume` | Checks that Go is still present. Does not install anything |
+| `scripts/install.sh` | Interactive Linux installer for a server or a deploy node |
+| `VERSION` | Calendar version `YYYY.MDD.REVISION` |
+| `.github/workflows/ci.yml` | Test and installer dry run |
+| `.github/workflows/release.yml` | Date-version release of Linux archives and the base image |
 
 Git commit messages and branch names are English.

@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l .)"
+      - name: Check the calendar version
+        run: python3 scripts/set-version.py --check
+      - name: Test
+        run: go test ./...
+      - name: Build
+        run: go build -o "$RUNNER_TEMP/box" .
+      - name: Check the install script
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/install.sh
+          sh -n scripts/install.sh
+          printf '1\n1\n\nbox.example.com\nn\ny\n' | BOX_DRY_RUN=1 sh scripts/install.sh | grep -F 'Role: server'
+          printf '2\n2\n\nn\ny\n' | BOX_DRY_RUN=1 sh scripts/install.sh | grep -F '角色：部署节点'

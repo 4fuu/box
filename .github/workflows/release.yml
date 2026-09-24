@@ -1,0 +1,263 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image: ${{ steps.version.outputs.image }}
+    steps:
+      - name: Check out source and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Validate release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || {
+            echo "Run releases from main, not $GITHUB_REF" >&2
+            exit 1
+          }
+          VERSION=$(python3 scripts/set-version.py --check)
+          EXPECTED_PREFIX=$(TZ=Asia/Hong_Kong date '+%Y.%-m%d')
+          [[ "$VERSION" == "$EXPECTED_PREFIX".* ]] || {
+            echo "Version $VERSION does not match today's Asia/Hong_Kong date $EXPECTED_PREFIX" >&2
+            exit 1
+          }
+          if tag_sha=$(git rev-list -n 1 "v$VERSION" 2>/dev/null); then
+            [[ "$tag_sha" == "$GITHUB_SHA" ]] || {
+              echo "Tag v$VERSION points to $tag_sha instead of $GITHUB_SHA" >&2
+              exit 1
+            }
+            echo "Resuming release v$VERSION"
+          fi
+          image=ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Test
+        run: go test ./...
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build archive
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -o "$RUNNER_TEMP/box" .
+          stage="$RUNNER_TEMP/stage"
+          mkdir -p "$stage"
+          cp "$RUNNER_TEMP/box" README.md "$stage/"
+          chmod 0755 "$stage/box"
+          tar -czf "box-$VERSION-linux-$ARCH.tar.gz" -C "$stage" box README.md
+      - name: Upload release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: box-linux-${{ matrix.arch }}
+          path: box-${{ needs.validate.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    needs: [validate, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Download the release binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: box-linux-${{ matrix.arch }}
+      - name: Stage the binary into the image context
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          tar -xzf "box-$VERSION-linux-$ARCH.tar.gz"
+          install -m 0755 box images/base/box
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build and push the base computer image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: images/base
+          file: images/base/Dockerfile
+          push: true
+          provenance: mode=max
+          tags: ${{ needs.validate.outputs.image }}:${{ needs.validate.outputs.version }}-${{ matrix.arch }}
+
+  manifest:
+    needs: [validate, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Publish the multi-arch image
+        shell: bash
+        env:
+          IMAGE: ${{ needs.validate.outputs.image }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "$IMAGE:$VERSION" \
+            -t "$IMAGE:latest" \
+            "$IMAGE:$VERSION-amd64" \
+            "$IMAGE:$VERSION-arm64"
+
+  release:
+    needs: [validate, test, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Download release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: release
+          pattern: box-linux-*
+          merge-multiple: true
+      - name: Publish the GitHub release
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          IMAGE: ${{ needs.validate.outputs.image }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          actual_sha=$(git rev-parse origin/main)
+          [[ "$actual_sha" == "$GITHUB_SHA" ]] || {
+            echo "main moved from $GITHUB_SHA to $actual_sha during the release" >&2
+            exit 1
+          }
+          (cd release && sha256sum box-* > SHA256SUMS)
+          notes=$(mktemp)
+          cat > "$notes" <<EOF
+          Base computer image: \`$IMAGE:$VERSION\` (also \`$IMAGE:latest\`).
+
+          On a deploy node, after it is paired:
+
+          \`\`\`
+          image add base $IMAGE:$VERSION
+          image pull base
+          \`\`\`
+
+          Install a Linux server or deploy node with \`scripts/install.sh\`.
+          EOF
+          tag="v$VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber --repo "$GITHUB_REPOSITORY"
+          elif git rev-parse --verify --quiet "refs/tags/$tag"; then
+            gh release create "$tag" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "box $VERSION" \
+              --notes-file "$notes"
+          else
+            gh release create "$tag" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "box $VERSION" \
+              --notes-file "$notes"
+          fi
+
+  smoke:
+    needs: [validate, release]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install the server without starting it
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          sudo BOX_LANG=en BOX_ROLE=server BOX_VERSION="$VERSION" BOX_DOMAIN=box.example.com \
+            BOX_ASSUME_YES=1 BOX_SYSTEMD=0 BOX_START=0 \
+            sh scripts/install.sh
+          set +e
+          usage=$(box 2>&1)
+          status=$?
+          set -e
+          [ "$status" -eq 2 ]
+          printf '%s\n' "$usage" | grep -F 'box serve'
+          command -v frps
+          frps --version || frps -v

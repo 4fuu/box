@@ -1,6 +1,6 @@
 # Base computer. A node must pull this image before it can create computers.
-# The box CLI is copied in from a release archive. This image does not compile it.
-# COPY box /usr/local/bin/box
+# The release workflow copies a linux box binary into this directory before
+# building. This image does not compile one.
 # The controller runs it with podman --systemd=always. sshd is the login path.
 # Client keys are not in the image. The controller writes them onto the volume.
 # The server's GitHub key is also written at start, not baked in here.
@@ -75,6 +75,11 @@ RUN mise use --global go@latest rust@stable node@lts python@3 \
     && mise exec -- python3 --version
 USER root
 
+# The image has no host key and no client keys. The controller mounts a
+# per-computer host key and authorized_keys. sshd will not start without that mount.
+COPY skills/box/SKILL.md /home/box/.agents/skills/box/SKILL.md
+RUN chown -R box:box /home/box/.agents
+
 # Loopback only. The controller publishes this port. Password login stays off.
 RUN mkdir -p /etc/ssh/sshd_config.d \
     && printf '%s\n' \
@@ -84,13 +89,17 @@ RUN mkdir -p /etc/ssh/sshd_config.d \
         'KbdInteractiveAuthentication no' \
         'PermitRootLogin no' \
         'AllowUsers box' \
+        'HostKey /etc/ssh/ssh_host_ed25519_key' \
+        'AuthorizedKeysFile /home/box/.ssh/authorized_keys' \
         > /etc/ssh/sshd_config.d/box.conf \
-    && ssh-keygen -A \
     && systemctl enable sshd.service
 
 # Empty machine id. Each computer generates its own on first boot.
 # Keep the empty file so systemd does not treat boot as a first install.
 RUN : > /etc/machine-id && ln -sf /etc/machine-id /var/lib/dbus/machine-id
+
+COPY box /usr/local/bin/box
+RUN chmod 0755 /usr/local/bin/box
 
 EXPOSE 2222
 

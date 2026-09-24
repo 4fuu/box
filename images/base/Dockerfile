@@ -109,7 +109,9 @@ RUN mkdir -p /etc/ssh/sshd_config.d \
 
 # Empty machine id. Each computer generates its own on first boot.
 # Keep the empty file so systemd does not treat boot as a first install.
-RUN : > /etc/machine-id && ln -sf /etc/machine-id /var/lib/dbus/machine-id
+RUN mkdir -p /var/lib/dbus \
+    && : > /etc/machine-id \
+    && ln -sf /etc/machine-id /var/lib/dbus/machine-id
 
 COPY box /usr/local/bin/box
 RUN chmod 0755 /usr/local/bin/box

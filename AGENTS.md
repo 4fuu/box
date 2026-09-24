@@ -58,6 +58,7 @@ Podman is rootful. Containers are not privileged, do not use the host network, a
 | `.agents/resume` | Checks that Go is still present. Does not install anything |
 | `scripts/install.sh` | Interactive Linux installer for a server or a deploy node |
 | `VERSION` | Calendar version `YYYY.MDD.REVISION` |
+| `LICENSE` | AGPL-3.0-only |
 | `.github/workflows/ci.yml` | Test and installer dry run |
 | `.github/workflows/release.yml` | Date-version release of Linux archives and the base image |
 

@@ -1,6 +1,6 @@
 # Base computer. A node must pull this image before it can create computers.
-# The release workflow copies a linux box binary into this directory before
-# building. This image does not compile one.
+# The release workflow copies a linux box binary and the LICENSE into this
+# directory before building. This image does not compile one.
 # The controller runs it with podman --systemd=always. sshd is the login path.
 # Client keys are not in the image. The controller writes them onto the volume.
 # The server's GitHub key is also written at start, not baked in here.
@@ -116,10 +116,16 @@ RUN mkdir -p /var/lib/dbus \
 COPY box /usr/local/bin/box
 RUN chmod 0755 /usr/local/bin/box
 
+# AGPL-3.0: the image conveys the binary, so it carries the license text.
+# The image.source label points at the corresponding source.
+COPY LICENSE /usr/share/licenses/box/LICENSE
+
 EXPOSE 2222
 
 LABEL org.opencontainers.image.title="box-base" \
       org.opencontainers.image.description="Base computer image. Pull onto a node before creating computers." \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/4fuu/box" \
       box.login-user="box" \
       box.ssh-port="2222"
 

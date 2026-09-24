@@ -149,3 +149,9 @@ go build -o box .
 ```
 
 `go test` does not build the base image and does not need Podman or frp.
+
+## License
+
+AGPL-3.0-only. The full text is in [LICENSE](LICENSE). Copyright 2026 4fuu
+and box contributors. If you run a modified box and let users reach it over a
+network, you owe those users the source of your version.

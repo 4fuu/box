@@ -114,3 +114,9 @@ go build -o box .
 ```
 
 `go test` 不构建基础镜像，也不需要 Podman 或 frp。
+
+## 许可证
+
+AGPL-3.0-only，全文见 [LICENSE](LICENSE)。版权所有 2026 4fuu 及 box 贡献者。
+如果你运行修改版 box 并让用户通过网络访问它，就必须向这些用户提供你那
+个版本的源代码。

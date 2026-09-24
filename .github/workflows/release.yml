@@ -90,9 +90,9 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -o "$RUNNER_TEMP/box" .
           stage="$RUNNER_TEMP/stage"
           mkdir -p "$stage"
-          cp "$RUNNER_TEMP/box" README.md "$stage/"
+          cp "$RUNNER_TEMP/box" README.md LICENSE "$stage/"
           chmod 0755 "$stage/box"
-          tar -czf "box-$VERSION-linux-$ARCH.tar.gz" -C "$stage" box README.md
+          tar -czf "box-$VERSION-linux-$ARCH.tar.gz" -C "$stage" box README.md LICENSE
       - name: Upload release archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -132,6 +132,7 @@ jobs:
           set -euo pipefail
           tar -xzf "box-$VERSION-linux-$ARCH.tar.gz"
           install -m 0755 box images/base/box
+          install -m 0644 LICENSE images/base/LICENSE
       - name: Log in to GHCR
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:

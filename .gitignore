@@ -4,5 +4,6 @@
 # Built binary. `go build -o box .`
 /box
 
-# Release binary staged into the image build context. Not source.
+# Release binary and license copy staged into the image build context. Not source.
 /images/base/box
+/images/base/LICENSE

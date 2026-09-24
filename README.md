@@ -1,55 +1,153 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" width="128" alt="box">
+</p>
+
 # box
 
-Persistent Linux computers on your own machines, reached with the `ssh` you already have.
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-`ssh box.example.com` opens a control REPL. `new` creates a computer on a deploy node you paired. `ssh web@box.example.com` opens a shell in the container named `web`. The username selects that container. One node runs many containers, and each has its own sshd. The session is inside the container, not on the node. From inside the container, `box domain` prints the domain configured at server start, and `box portal add web 3000` claims `web` under that domain for port 3000. An agent reads the domain from `box`. It does not invent one. The server routes `Host` to that port. An edge you run publishes the server's fixed HTTP port. The node may sit behind NAT. [frp](https://github.com/fatedier/frp) carries commands, SSH, and HTTP between the server and the node. Each computer is a rootful [Podman](https://podman.io) container with its own volume.
+box is a self-hosted persistent Linux computer. The client is the `ssh`
+already installed on your machine. `ssh box.example.com` opens a control REPL.
+`new` creates a computer on a deploy node you paired. `ssh web@box.example.com`
+opens a shell in the container named `web`.
 
-There is no account. The server prints a one-time password at init. The first SSH client to present it is bound. Further clients get a password from a bound client, or from a localhost command on the server. A node joins with a short pairing code.
+The reference is [exe.dev](https://exe.dev). There, one command yields a
+computer, the disk survives restarts, and a site on that computer gets a
+hostname. You SSH in, you are root, and you have a normal userspace with
+`systemd`. box keeps that shape and runs it on hardware you operate. Billing,
+accounts, email, the web coding agent, and a public IP per computer stay on
+exe.dev. They are not part of this project.
 
-## Status
+One node runs many computers. Each computer is a rootful
+[Podman](https://podman.io) container with its own volume and its own sshd.
+The session is inside the container, not on the node. The node may sit behind
+NAT. [frp](https://github.com/fatedier/frp) carries commands, SSH, and HTTP
+between the server and the node.
 
-The `box` binary implements the server, the node controller, and the guest CLI. `go test ./...` exercises that control plane without Podman, frp, or a built image.
+> [!WARNING]
+> This is not a multi-tenant host. Computers on a node share that node's
+> kernel. The HTTP port is plain and fixed. Put your own edge in front of it.
+> Non-HTTP ports are not published. Computers are not moved between nodes.
 
-A deploy node is not usable until it has pulled an image. The base image is Fedora 44 with systemd, sshd, agent tools, mise, Go, Rust, Node, Python, and a `box` user. Its Dockerfile is [images/base/Dockerfile](images/base/Dockerfile).
+## Why box
 
-## Fit
+- **It is just a computer.** The disk survives restarts. You have sudo, a
+  login user, and sshd. `scp`, rsync, and VS Code Remote-SSH use the same
+  destination as `ssh`.
+- **The client is stock OpenSSH.** There is no account and no client to
+  install. The first SSH connection that presents the one-time password from
+  server init is bound. Later clients get a password from a bound client, or
+  from `box pair` on the server machine.
+- **One binary, three roles.** `box serve` is the public SSH entry. `box node`
+  is the controller on a deploy node. Inside a computer, `box` only answers
+  `domain` and `portal`.
+- **A hostname for one port.** From inside the computer, `box portal add web
+  3000` claims `web` under the domain configured at server start. The server
+  routes that `Host` to port 3000. An agent reads the domain from `box
+  domain`. It does not invent one.
+- **Your machines.** A deploy node is a controller you pair with a short,
+  single-use code. It dials out, so it can sit behind NAT.
 
-Use this when you want exe.dev's "it is just a computer" on hardware you operate: a persistent disk, sudo, a hostname routed to one port, and stock `ssh` for both control and login.
+## Quick start
 
-Do not use this as a multi-tenant host. Computers on a node share that node's kernel. The HTTP port is plain and fixed. Put your own edge in front of it. Non-HTTP ports are not published. Computers are not moved between nodes.
+### Requirements
 
-## Install
+- a Linux machine for the server, and a Linux machine for each deploy node;
+- cgroup v2 and Podman on every deploy node;
+- OpenSSH on the machine you connect from.
 
-On the Linux machine that will be the server or a deploy node, download the installer and run it in a terminal. It asks for English or Chinese, then whether this machine is the server or a deploy node, and installs `box` plus the programs that role needs (`frps` on a server, Podman and `frpc` on a node).
+The server and the node can be the same machine.
+
+### Install
+
+Download the installer and run it in a terminal. It asks for English or
+Chinese, then whether this machine is the server or a deploy node.
 
 ```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/4fuu/box/main/scripts/install.sh
 sh install.sh
 ```
 
-Releases are date versions such as `2026.924.0`. The same release publishes the base computer image at `ghcr.io/4fuu/box:<version>`. After a node is paired, register and pull it with `image add` and `image pull` before `new`. See [docs/release.md](docs/release.md).
+A server install adds `box` and `frps`. A node install adds `box`, `frpc`, and
+Podman, and checks for cgroup v2. The script can install systemd units. It
+does not start them unless you say so. The one-time password from the first
+server start is in `journalctl -u box.service`.
 
-## First session
+Releases use a calendar version such as `2026.924.0`. See
+[docs/release.md](docs/release.md).
 
-Once a server exists, the intended first session is:
+### Start the first session
 
-```
+```bash
 ssh box.example.com
 ```
 
 Present the one-time password from server init. Then:
 
-```
+```text
 box ▶ node pair
 box ▶ image pull base
 box ▶ new web
 box ▶ ssh web
 ```
 
-`new` prints `ssh web@box.example.com`. That destination is what `scp` and VS Code Remote-SSH use.
+`node pair` prints a one-time code. On the deploy node, as root:
 
-On the computer, `box portal check` asks whether a hostname is free. `box portal add` claims it for a port inside that container. The server accepts the claim before frp routes it. `key copy` prints the server's GitHub public key and nothing else. `env set GH_TOKEN <token>` stores a token the server injects when a container starts, so `gh` does not ask for a login. A skill in the base image tells an agent how to claim a portal and how to use mise, including a temporary toolchain.
+```bash
+box node join --server box.example.com:7000 --code <code> --name home
+box node
+```
 
-## Design
+`image pull base` has to finish before `new`. The release publishes the base
+computer image as `ghcr.io/4fuu/box:<version>`. Register that reference, then
+pull it:
 
-[DESIGN.md](DESIGN.md) is the spec: binding, the three parts, frp, the REPL, portals, the single `box` binary, the base image, and what the first version leaves out.
+```text
+box ▶ image add base ghcr.io/4fuu/box:2026.924.0
+box ▶ image pull base
+```
+
+`new` prints `ssh web@box.example.com`. That destination is what `scp` and
+VS Code Remote-SSH use. The login user inside the container is `box`. The SSH
+username selects the container, not that user.
+
+### Claim a hostname
+
+On the computer:
+
+```bash
+box domain
+box portal check web
+box portal add web 3000
+```
+
+`box domain` prints the parent domain, for example `box.example.com`. `web`
+becomes `web.box.example.com` and routes to port 3000 in that container. A
+label cannot contain a dot. `check` does not claim. `add` refuses when the
+label is taken. The process must listen on `0.0.0.0`.
+
+`key copy` prints the server's GitHub public key and nothing else. `env set
+GH_TOKEN <token>` stores a token the server injects when a container starts,
+so `gh` does not ask for a login. `env ls` prints names, never values.
+
+## Documentation
+
+| Goal | Guide |
+| --- | --- |
+| Read the spec: binding, frp, the REPL, portals, and what the first version leaves out | [DESIGN.md](DESIGN.md) |
+| Cut a dated release | [Release](docs/release.md) |
+| See the base computer image | [images/base/Dockerfile](images/base/Dockerfile) |
+| See what an agent inside a computer is told | [images/base/skills/box/SKILL.md](images/base/skills/box/SKILL.md) |
+
+[DESIGN.md](DESIGN.md) wins when it disagrees with this page.
+
+## Development
+
+The module is Go. Read [AGENTS.md](AGENTS.md) before changing the repository.
+
+```bash
+go test ./...
+go build -o box .
+```
+
+`go test` does not build the base image and does not need Podman or frp.

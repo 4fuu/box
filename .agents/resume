@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fast checks after an orb wakes. Do not install toolchains here.
+set -euo pipefail
+
+if [[ ! -x /usr/local/go/bin/go ]]; then
+	printf 'go is missing at /usr/local/go/bin/go; .agents/setup did not finish\n' >&2
+	exit 1
+fi
+
+/usr/local/go/bin/go version

@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# Prepare a fresh orb to build the box binary.
+# The repository has no Go module yet. Until go.mod exists, install the
+# pinned toolchain below. Once go.mod exists, that file is the pin.
+set -euo pipefail
+
+log() {
+	printf '==> %s\n' "$*"
+}
+
+step() {
+	local label="$1"
+	shift
+	log "$label"
+	local start="${EPOCHREALTIME:-$(date +%s)}"
+	"$@"
+	local end="${EPOCHREALTIME:-$(date +%s)}"
+	log "done: $label ($(( ${end%.*} - ${start%.*} ))s)"
+}
+
+# Fallback only. A go.mod toolchain or go line wins when the module exists.
+pinned_go="1.27.1"
+
+want_go() {
+	if [[ -f go.mod ]]; then
+		local line
+		line="$(awk '/^toolchain / { print $2; exit }' go.mod || true)"
+		if [[ "$line" == go* ]]; then
+			printf '%s\n' "${line#go}"
+			return
+		fi
+		line="$(awk '/^go / { print $2; exit }' go.mod || true)"
+		if [[ -n "$line" ]]; then
+			printf '%s\n' "$line"
+			return
+		fi
+	fi
+	printf '%s\n' "$pinned_go"
+}
+
+go_version_of() {
+	"$1" version 2>/dev/null | awk '{ print $3 }' | sed 's/^go//'
+}
+
+install_go() {
+	local version="$1"
+	local current=""
+	if [[ -x /usr/local/go/bin/go ]]; then
+		current="$(go_version_of /usr/local/go/bin/go || true)"
+	fi
+	# A go.mod "go 1.27" line means "1.27 or newer", not an exact tarball.
+	if [[ "$version" != *.*.* ]]; then
+		if [[ -n "$current" && "$current" == "$version".* ]]; then
+			log "go $current already satisfies go $version"
+			return
+		fi
+		version="$pinned_go"
+	fi
+	if [[ "$current" == "$version" ]]; then
+		log "go $version already installed"
+		return
+	fi
+
+	local arch tarball url tmp checksum
+	case "$(uname -m)" in
+		x86_64) arch="amd64" ;;
+		aarch64) arch="arm64" ;;
+		*)
+			printf 'unsupported architecture: %s\n' "$(uname -m)" >&2
+			exit 1
+			;;
+	esac
+	tarball="go${version}.linux-${arch}.tar.gz"
+	url="https://go.dev/dl/${tarball}"
+	tmp="$(mktemp)"
+	log "downloading $url"
+	curl -fsSL "$url" -o "$tmp"
+	checksum="$(
+		curl -fsSL "https://go.dev/dl/?mode=json&include=all" \
+			| python3 -c 'import json,sys; name=sys.argv[1]; data=json.load(sys.stdin)
+for rel in data:
+    for f in rel.get("files", []):
+        if f.get("filename")==name:
+            print(f["sha256"]); raise SystemExit
+raise SystemExit("checksum not found for "+name)' "$tarball"
+	)"
+	echo "${checksum}  ${tmp}" | sha256sum -c -
+	sudo rm -rf /usr/local/go
+	sudo tar -C /usr/local -xzf "$tmp"
+	rm -f "$tmp"
+	log "installed $(/usr/local/go/bin/go version)"
+}
+
+persist_go_path() {
+	local marker="# box: Go toolchain"
+	local profile="$HOME/.bash_profile"
+	touch "$profile"
+	if grep -Fqx "$marker" "$profile"; then
+		return
+	fi
+	cat >>"$profile" <<'EOF'
+
+# box: Go toolchain
+case ":$PATH:" in
+	*:/usr/local/go/bin:*) ;;
+	*) export PATH="/usr/local/go/bin:$PATH" ;;
+esac
+case ":$PATH:" in
+	*:$HOME/go/bin:*) ;;
+	*) export PATH="$HOME/go/bin:$PATH" ;;
+esac
+EOF
+}
+
+install_shellcheck() {
+	if command -v shellcheck >/dev/null 2>&1; then
+		log "shellcheck already installed"
+		return
+	fi
+	sudo apt-get update
+	sudo apt-get install -y shellcheck
+}
+
+ensure_portals_ignored() {
+	# The committed .gitignore already covers this. Only add the rule when a
+	# checkout is missing it, and do not append a second copy.
+	local ignore=".gitignore"
+	if [[ -f "$ignore" ]] && grep -Eq '(^|/)\.amp/\*|(^|/)\.amp/portals/\*' "$ignore"; then
+		return
+	fi
+	touch "$ignore"
+	printf '\n# Orb portal registrations. Generated per machine.\n.amp/portals/*\n' >>"$ignore"
+}
+
+write_orb_guidance() {
+	local dest="$HOME/.config/amp/AGENTS.md"
+	local marker="<!-- box-orb-guidance -->"
+	mkdir -p "$HOME/.config/amp"
+	if [[ -f "$dest" ]] && grep -Fq "$marker" "$dest"; then
+		return
+	fi
+	cat >>"$dest" <<'EOF'
+
+<!-- box-orb-guidance -->
+# box in this orb
+
+- The repository is still design-only until a Go module lands. The intended artifact is one `box` binary.
+- Go is installed at `/usr/local/go`. Login shells have `/usr/local/go/bin` and `$HOME/go/bin` on `PATH`. If `go` is missing in the current shell, use `/usr/local/go/bin/go`.
+- When `go.mod` exists, `.agents/setup` reads its `toolchain` or `go` line instead of the fallback pin.
+- There is no server to start and no database to seed. Do not start Docker or Podman from setup; this orb is not a deploy node.
+- Node, Python, git, gh, jq, and ripgrep are already in the base image. Do not install another copy.
+EOF
+}
+
+main() {
+	local version
+	version="$(want_go)"
+	step "go ${version}" install_go "$version"
+	step "PATH" persist_go_path
+	step "shellcheck" install_shellcheck
+	step "gitignore" ensure_portals_ignored
+	step "guidance" write_orb_guidance
+
+	export PATH="/usr/local/go/bin:${PATH}"
+	log "ready: $(go version)"
+	if [[ -f go.mod ]]; then
+		step "modules" go mod download
+	else
+		log "no go.mod; skipping module download"
+	fi
+}
+
+main "$@"

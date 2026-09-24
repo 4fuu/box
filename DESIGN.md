@@ -164,6 +164,7 @@ Keys:
 | --- | --- |
 | `pair` | Print a one-time password for another client |
 | `key ls` / `key rm` | List or remove bound client keys |
+| `key copy` | Print the server's GitHub public key and nothing else, so it can be copied |
 | `whoami` | Which key this session used |
 | `defaults` | Default node, image, and size. Non-interactive `new` uses these |
 
@@ -175,7 +176,7 @@ ssh box.example.com new web --image base --node home --cpu 2 --memory 2G --disk 
 
 If the chosen node has not pulled the image, `new` tells the operator to run `image pull`. It does not pull implicitly. A pull can take long enough that `new` would look stuck.
 
-The localhost CLI on the server is `box server`. It can `pair`, `node-pair`, `key ls`, `key rm`, and `status`. It does not open a path around the REPL for creating computers. That stays on a bound client, so a person on the server console cannot skip the key check by accident. `status` is the exception: it is read-only.
+The localhost CLI on the server is `box server`. It can `pair`, `node-pair`, `key ls`, `key rm`, `key copy`, and `status`. It does not open a path around the REPL for creating computers. That stays on a bound client, so a person on the server console cannot skip the key check by accident. `status` is the exception: it is read-only.
 
 ## Portals
 
@@ -214,21 +215,34 @@ There is no login wall and no certificate issuance. The operator's edge terminat
 
 Non-HTTP ports are not given hostnames. SSH does not go through this port. A database stays inside the container unless the operator publishes it some other way. The first version is HTTP only, because that is what frp's host routing does.
 
-A skill ships in the base image at `/home/box/.agents/skills/box/SKILL.md`. It tells an agent to read the domain with `box domain`, claim a label with `box portal`, listen on `0.0.0.0`, and not to invent a domain or edit proxy config. The skill does not contain credentials. The domain is not baked into the image. The controller fetches it from the server and answers `box domain` from that.
+A skill ships in the base image at `/home/box/.agents/skills/box/SKILL.md`. It tells an agent to read the domain with `box domain`, claim a label with `box portal`, listen on `0.0.0.0`, and not to invent a domain or edit proxy config. It also tells the agent to use mise for Go and Rust, and `mise x` for a toolchain that should not stick. The skill does not contain credentials. The domain is not baked into the image. The controller fetches it from the server and answers `box domain` from that.
 
 ## Images
 
-The base image is a Debian computer, not a language runtime. The Dockerfile is `images/base/Dockerfile`. It starts from `debian:12` and installs systemd as PID 1, which Podman runs with `--systemd=always`.
+The base image is a Fedora computer, not a language runtime. The Dockerfile is `images/base/Dockerfile`. It starts from `fedora:44` and installs systemd as PID 1, which Podman runs with `--systemd=always`.
 
 The image contains:
 
 - systemd, sudo, openssh-server, and CA certificates
 - user `box`, uid 1000, passwordless sudo, home `/home/box`
-- git, curl, jq, vim, python3, build-essential, ripgrep
+- git, curl, jq, vim, python3, gcc, make, ripgrep, rsync, and the usual shell tools
+- mise, installed from `https://mise.run` to `/usr/local/bin/mise`
+- the latest stable Go and stable Rust, installed with mise's built-in backends into the `box` user's data directory
 - sshd listening on 2222, password login off, root login off
 - an empty `/etc/machine-id`, so each computer generates its own on first boot
+- the skill at `/home/box/.agents/skills/box/SKILL.md`
+
+mise is activated in `~/.bashrc`. A one-off toolchain is `mise x go@1.25 -- go version`. That installs the requested version if it is missing, runs the command, and does not change the default. `mise use` is what changes the default, and it writes the current directory's `mise.toml`.
 
 The image has no client keys and no host key. The controller generates a host key per computer on first start and keeps it on the node, so reconnects do not trip `known_hosts`. Authorized keys are a file the controller writes and the container reads. The computer cannot change the host key.
+
+## GitHub key
+
+The first time the server starts, it generates an ed25519 key pair and stores it next to its SQLite file. The private key never leaves the server. It is not a login key. It is the key the operator adds to GitHub.
+
+`key copy` prints the public key on its own line and nothing else. The same command exists in the control REPL and as `box server key copy` on the server. Either output can be pasted into GitHub. A later start reuses the same key. It does not rotate unless the operator deletes the file and starts again.
+
+When a container is created, the controller writes that public key into the container's authorized keys, next to the bound client keys. The container can then be used as a GitHub SSH remote once the operator has added the same public key to GitHub. The private key is not copied in. Signing and pushing as that key is a later step. The first version only makes the public key easy to copy and present.
 
 Build and publish:
 
@@ -330,7 +344,8 @@ On a node, `box-node` is the only process the operator starts. It starts frpc an
 | Computer SSH | openssh-server in the image | A normal sshd, so scp and Remote-SSH work |
 | Server to node | frp | NAT traversal, encryption, TCP splice, HTTP host routing |
 | Computer | Podman, rootful | One less runtime. Persistent volumes, systemd, resource limits |
-| Base image | debian:12 | No vendor guest image |
+| Base image | fedora:44 | Current stable Fedora, not Debian |
+| Toolchain | mise | Built-in Go and Rust backends, plus `mise x` for a temporary toolchain |
 | Server state | SQLite | One file, enough for a private deployment |
 
 The REPL, the controller, the guest `box` CLI, and the skill are the code to write. The rest is the software above.

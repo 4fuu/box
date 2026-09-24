@@ -78,15 +78,14 @@ ssh web@box                 username is the container; splice to its sshd
                                      ▼
                             commands ──────────────▶  controller
                             SSH TCP    ──────────────▶  that container's sshd
-                            HTTP by Host ───────────▶  that container's HTTP port
-                                                       HTTP port on loopback
+                            HTTP by Host ───────────▶  that container's bridge IP:port
 ```
 
 The client is not a program we ship.
 
 The server checks the key, serves the control REPL, and splices an authorized SSH TCP connection to the container named by the username. The handshake finishes at sshd inside that container. It does not finish at the controller, and it does not open a shell on the node. The server also routes HTTP by the `Host` header. It does not run the user's processes.
 
-The controller receives commands from the server. It pulls images, creates and stops containers, and publishes each container's sshd and HTTP port on loopback. Clients cannot dial the controller. The controller does not store client public keys. It does store the bound public keys for the containers it runs, pushed by the server, so the container's sshd can accept the spliced connection.
+The controller receives commands from the server. It pulls images, creates and stops containers, and publishes each container's sshd on loopback. HTTP is not published as a host port. The controller forwards to the container's bridge address and the port the container asked for. Clients cannot dial the controller. The controller does not store client public keys. It does store the bound public keys for the containers it runs, pushed by the server, so the container's sshd can accept the spliced connection.
 
 Podman is the runtime, not a plugin behind another runtime. The controller shells out to `podman`. Replacing it later means replacing those calls. The first version does not keep a second backend.
 
@@ -100,7 +99,7 @@ The node registers three proxies after pairing:
 | --- | --- | --- |
 | `node-<id>-rpc` | controller RPC, loopback only | create, start, stop, status, resize, sync keys |
 | `node-<id>-ssh` | one TCP proxy per computer, loopback only | the container's sshd |
-| `node-<id>-http` | HTTP for computers on this node | public edge routing |
+| `node-<id>-http` | HTTP for portals on this node | one upstream per claimed host |
 
 RPC and SSH use STCP. They are not published on a public port. The server opens a short-lived visitor when it needs one, connects to loopback, and closes it. The SSH visitor is a TCP splice. The client's SSH handshake ends at sshd in the container the username named. The controller only published that container's port. There is no second SSH session and no `ProxyJump`.
 
@@ -137,11 +136,11 @@ Computers:
 | Command | Effect |
 | --- | --- |
 | `new [name]` | Create. With no flags, ask for image, node, cpu, memory, disk |
-| `ls` | Name, state, node, image, HTTP host |
+| `ls` | Name, state, node, image, portals |
 | `ssh <name>` | Open a shell on that computer |
 | `rm <name>` | Delete the container and its volume. Ask for the name again |
 | `restart <name>` | Restart the container. The volume stays |
-| `rename <name> <new>` | Rename. The HTTP host follows |
+| `rename <name> <new>` | Rename. Portals stay claimed; the SSH username changes |
 | `resize <name>` | Change cpu, memory, or disk. Disk only grows |
 | `stat <name>` | cpu, memory, disk, network |
 
@@ -158,14 +157,6 @@ Nodes and images:
 | `image pull <name> [node]` | Pull on one node, or all online nodes |
 | `image rm <name>` | Drop the registration and the node cache. Refused while in use |
 | `image default <name>` | Image used when `new` does not name one |
-
-HTTP hosts:
-
-| Command | Effect |
-| --- | --- |
-| `share port <name> <port>` | Port on the computer that the HTTP host routes to. Default 8000 |
-| `domain add <name> <fqdn>` | Accept this Host and route it to the computer |
-| `domain rm <name> <fqdn>` | Remove it |
 
 Keys:
 
@@ -186,30 +177,42 @@ If the chosen node has not pulled the image, `new` tells the operator to run `im
 
 The localhost CLI on the server is `box server`. It can `pair`, `node-pair`, `key ls`, `key rm`, and `status`. It does not open a path around the REPL for creating computers. That stays on a bound client, so a person on the server console cannot skip the key check by accident. `status` is the exception: it is read-only.
 
-## HTTP routing
+## Portals
 
-The server exposes one fixed HTTP port. Routing is the `Host` header, through frp's HTTP proxy. A host is routed only after `domain add` has accepted it. Anything else gets 421. That stops a computer, or an outside client, from claiming a name that points at the server.
+A portal is a hostname routed to one TCP port inside one container. The container claims it. The control REPL does not. This is the same shape as an Amp portal: something inside the machine publishes a port and gets a hostname back. It is not Amp. There is no review widget, no thread, and no login wall. TLS stays on the operator's edge.
 
-The default host for a new computer is `<name>.<base-domain>`, registered at create time. Extra names are `domain add`.
+`new` does not register a hostname. Until the container claims one, the server's fixed HTTP port has nothing to route for it.
 
-There is no login wall and no certificate issuance here. The operator's edge terminates TLS, applies whatever access policy they want, and forwards HTTP to this port. Because the port is plain HTTP, the edge should be the only client allowed to reach it.
+From inside the container:
 
-Port 5432 and other non-HTTP ports are not published. SSH does not go through this port. The first version routes one HTTP port per host.
+```
+box portal check app.example.com
+free
+box portal add app.example.com 3000
+http://app.example.com
+box portal ls
+HOST                 PORT
+app.example.com      3000
+box portal rm app.example.com
+```
 
-## Guest CLI
+`check` asks the server whether that hostname is already claimed. It does not claim it. `add` checks again and claims it in one step. If it is taken, `add` refuses and names the container that holds it. A container can hold several hostnames. Each hostname points at one port. Two hostnames may point at the same port.
 
-Each computer has a `box` command on its `PATH`. It talks only to the controller on that node, over a socket the controller mounts into the container. It cannot reach the server, and it cannot see other computers.
+The guest CLI talks only to the controller, over a socket mounted into that container. The socket is bound to that container. A request cannot name a different container. The controller asks the server to claim the hostname. The server is the only place that knows every claim, including claims on other nodes. If the server accepts, the controller points that hostname's frp HTTP proxy at the container's bridge address and the requested port. If the server refuses, nothing is registered.
 
-| Command | Effect |
-| --- | --- |
-| `box http status` | Hosts and the port they route to |
-| `box http port <port>` | Ask the controller to change the routed port |
-| `box domain add <fqdn>` | Ask the controller to register a host |
-| `box domain rm <fqdn>` | Ask the controller to remove it |
+The container does not edit frp config. A compromised container that could write that config could take another container's hostname.
 
-The controller checks the request, then asks the server. The server accepts or refuses. Only then does the controller register or drop the frp HTTP proxy. A compromised computer must not be able to write frp config directly. That would let it take another computer's host.
+Podman stays. `podman run -p` cannot add a host port to a running container, and a portal must be able to target a port that was not known at create time. Rootful Podman gives each container a bridge address. From the host, `container-ip:3000` reaches port 3000 inside that container without a published host port. The controller reads the address from `podman inspect` and uses it as the frp upstream. When the container restarts and the address changes, the controller updates the upstream. No container is recreated to add a portal.
 
-A skill ships in the base image at `/home/box/.agents/skills/box/SKILL.md`. It tells an agent on the computer to use `box http` and `box domain` rather than editing a proxy config or opening a port on the node. The skill does not contain credentials.
+The container must listen on `0.0.0.0` or its bridge address, not only on `127.0.0.1`. A process bound to loopback is not reachable at the bridge address. `add` does not check that the port is listening. It routes, and the operator sees a connection error until something listens. That matches a portal: the route exists before the server is ready.
+
+Removing a container drops its portals. `restart` keeps them. The claim record lives on the server. The route lives on the node.
+
+There is no login wall and no certificate issuance. The operator's edge terminates TLS and forwards HTTP to the server's fixed port. That port is plain. The edge should be the only client allowed to reach it. An unknown Host gets 421.
+
+Non-HTTP ports are not given hostnames. SSH does not go through this port. A database stays inside the container unless the operator publishes it some other way. The first version is HTTP only, because that is what frp's host routing does.
+
+A skill ships in the base image at `/home/box/.agents/skills/box/SKILL.md`. It tells an agent to claim a portal with `box portal`, to listen on `0.0.0.0`, and not to edit proxy config or publish a host port. The skill does not contain credentials.
 
 ## Images
 
@@ -222,7 +225,6 @@ The image contains:
 - git, curl, jq, vim, python3, build-essential, ripgrep
 - sshd listening on 2222, password login off, root login off
 - an empty `/etc/machine-id`, so each computer generates its own on first boot
-- `EXPOSE 8000`, as documentation only. The routed port lives in the server's image record
 
 The image has no client keys and no host key. The controller generates a host key per computer on first start and keeps it on the node, so reconnects do not trip `known_hosts`. Authorized keys are a file the controller writes and the container reads. The computer cannot change the host key.
 
@@ -258,9 +260,9 @@ Creating a computer:
 1. Refuse if the image is not in the local cache.
 2. `podman volume create web`. This volume is the computer's disk. `podman rm` does not delete it. `rm` in the REPL deletes the container and then the volume.
 3. `podman run -d --name web --systemd=always --restart=always` with `--cpus`, `--memory`, and the volume mounted at `/var/lib/box`. Home, sshd state, and anything the user installs under `/var/lib/box` live on that volume. The image's own upper layer is not the disk.
-4. Publish container port 2222 on `127.0.0.1`, and the HTTP port on `127.0.0.1`. Neither is on a public address.
+4. Publish container port 2222 on `127.0.0.1` only. Do not publish an HTTP host port. A portal targets the container's bridge address, which can reach any port the container listens on.
 5. Write the host key and the current authorized keys onto the volume. Start sshd via the image's systemd unit.
-6. Register the STCP proxy for port 2222 and the HTTP host with frp.
+6. Register the STCP proxy for port 2222. Register no HTTP host until the container claims one.
 
 `restart` is `podman restart`. The volume is not recreated. `resize` for cpu and memory is `podman update`. Growing the disk is `podman volume` quota where the filesystem supports it, otherwise a new volume and a copy. Shrinking is refused.
 
@@ -283,12 +285,12 @@ The server keeps one SQLite file.
 - `keys`: public key, comment, bound at
 - `pairings`: hash of a one-time password or node code, expiry, used at
 - `nodes`: name, tags, last heartbeat, capacity
-- `images`: name, ref, default port, whether it is the default
-- `computers`: name, node, image, size, state, HTTP port
-- `domains`: computer, host
+- `images`: name, ref, whether it is the default
+- `computers`: name, node, image, size, state
+- `portals`: hostname, container, node, port, claimed at
 - `shares`: computer, key, web or ssh. The owner key is implicit
 
-Computer names are globally unique, because the SSH username and the HTTP host are both that name. `new` refuses a collision.
+Computer names are globally unique, because the SSH username is that name. `new` refuses a collision. A portal hostname is also globally unique. It is not derived from the container name.
 
 The controller keeps its own local record: node token, volume name, published ports, host key path. The server does not store those.
 

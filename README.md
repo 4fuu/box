@@ -2,7 +2,7 @@
 
 Persistent Linux computers on your own machines, reached with the `ssh` you already have.
 
-`ssh box.example.com` opens a control REPL. `new` creates a computer on a deploy node you paired. `ssh web@box.example.com` opens a shell in the container named `web`. The username selects that container. One node runs many containers, and each has its own sshd. The session is inside the container, not on the node. A fixed HTTP port on the server routes `Host` to that computer, so an edge you run can publish it. The node may sit behind NAT. [frp](https://github.com/fatedier/frp) carries commands, SSH, and HTTP between the server and the node. Each computer is a rootful [Podman](https://podman.io) container with its own volume.
+`ssh box.example.com` opens a control REPL. `new` creates a computer on a deploy node you paired. `ssh web@box.example.com` opens a shell in the container named `web`. The username selects that container. One node runs many containers, and each has its own sshd. The session is inside the container, not on the node. From inside the container, `box portal add app.example.com 3000` claims that hostname for port 3000, after checking it is free. The server routes `Host` to that port. An edge you run publishes the server's fixed HTTP port. The node may sit behind NAT. [frp](https://github.com/fatedier/frp) carries commands, SSH, and HTTP between the server and the node. Each computer is a rootful [Podman](https://podman.io) container with its own volume.
 
 There is no account. The server prints a one-time password at init. The first SSH client to present it is bound. Further clients get a password from a bound client, or from a localhost command on the server. A node joins with a short pairing code.
 
@@ -37,8 +37,8 @@ box ▶ ssh web
 
 `new` prints `ssh web@box.example.com`. That destination is what `scp` and VS Code Remote-SSH use.
 
-On the computer, `box http` and `box domain` ask the node controller to change the routed port or register a hostname. The server accepts the name before frp routes it. A skill in the base image tells an agent on the computer to use those commands.
+On the computer, `box portal check` asks whether a hostname is free. `box portal add` claims it for a port inside that container. The server accepts the claim before frp routes it. A skill in the base image tells an agent to use those commands.
 
 ## Design
 
-[DESIGN.md](DESIGN.md) is the spec: binding, the three parts, frp, the REPL, HTTP routing, the guest CLI, the base image, and what the first version leaves out.
+[DESIGN.md](DESIGN.md) is the spec: binding, the three parts, frp, the REPL, portals, the guest CLI, the base image, and what the first version leaves out.

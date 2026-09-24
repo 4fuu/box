@@ -57,13 +57,12 @@ RUN : > /etc/machine-id && ln -sf /etc/machine-id /var/lib/dbus/machine-id
 RUN mkdir -p /var/lib/box \
     && chown box:box /var/lib/box
 
-EXPOSE 2222 8000
+EXPOSE 2222
 
 LABEL org.opencontainers.image.title="box-base" \
       org.opencontainers.image.description="Base computer image. Pull onto a node before creating computers." \
       box.login-user="box" \
-      box.ssh-port="2222" \
-      box.default-port="8000"
+      box.ssh-port="2222"
 
 STOPSIGNAL SIGRTMIN+3
 WORKDIR /home/box

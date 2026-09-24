@@ -1,6 +1,6 @@
 # box
 
-Persistent Linux computers on hardware the operator owns. The client is stock `ssh`. One `box` binary is the server, the deploy-node controller, and the guest CLI. [DESIGN.md](DESIGN.md) is the spec. [README.md](README.md) is the short version. When they disagree, follow DESIGN.md.
+Persistent Linux computers on hardware the operator owns. The client is stock `ssh`. One `box` binary is the server, the deploy-node controller, and the guest CLI. [DESIGN.md](docs/DESIGN.md) is the spec. [README.md](README.md) is the short version. When they disagree, follow DESIGN.md.
 
 ## Status
 
@@ -51,7 +51,7 @@ Podman is rootful. Containers are not privileged, do not use the host network, a
 
 | Path | What it is |
 | --- | --- |
-| `DESIGN.md` | Spec |
+| `docs/DESIGN.md` | Spec |
 | `images/base/Dockerfile` | Fedora 44 base computer. Not built by `go test` |
 | `images/base/skills/box/SKILL.md` | Skill copied into the image for an agent inside a computer |
 | `.agents/setup` | Orb toolchain install |

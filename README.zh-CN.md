@@ -97,12 +97,12 @@ box portal add web 3000
 
 | 目的 | 文档 |
 | --- | --- |
-| 读规格：绑定、frp、REPL、门户，以及第一版不做的事 | [DESIGN.md](DESIGN.md) |
+| 读规格：绑定、frp、REPL、门户，以及第一版不做的事 | [DESIGN.md](docs/DESIGN.md) |
 | 按日期发版 | [Release](docs/release.md) |
 | 看基础计算机镜像 | [images/base/Dockerfile](images/base/Dockerfile) |
 | 看计算机里的代理会读到什么 | [images/base/skills/box/SKILL.md](images/base/skills/box/SKILL.md) |
 
-与本页不一致时，以 [DESIGN.md](DESIGN.md) 为准。
+与本页不一致时，以 [DESIGN.md](docs/DESIGN.md) 为准。
 
 ## 开发
 

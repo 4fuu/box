@@ -134,12 +134,12 @@ so `gh` does not ask for a login. `env ls` prints names, never values.
 
 | Goal | Guide |
 | --- | --- |
-| Read the spec: binding, frp, the REPL, portals, and what the first version leaves out | [DESIGN.md](DESIGN.md) |
+| Read the spec: binding, frp, the REPL, portals, and what the first version leaves out | [DESIGN.md](docs/DESIGN.md) |
 | Cut a dated release | [Release](docs/release.md) |
 | See the base computer image | [images/base/Dockerfile](images/base/Dockerfile) |
 | See what an agent inside a computer is told | [images/base/skills/box/SKILL.md](images/base/skills/box/SKILL.md) |
 
-[DESIGN.md](DESIGN.md) wins when it disagrees with this page.
+[DESIGN.md](docs/DESIGN.md) wins when it disagrees with this page.
 
 ## Development
 

@@ -248,10 +248,11 @@ jobs:
       - name: Install the server without starting it
         env:
           VERSION: ${{ needs.validate.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          sudo BOX_LANG=en BOX_ROLE=server BOX_VERSION="$VERSION" BOX_DOMAIN=box.example.com \
-            BOX_ASSUME_YES=1 BOX_SYSTEMD=0 BOX_START=0 \
+          sudo GH_TOKEN="$GH_TOKEN" BOX_LANG=en BOX_ROLE=server BOX_VERSION="$VERSION" \
+            BOX_DOMAIN=box.example.com BOX_ASSUME_YES=1 BOX_SYSTEMD=0 BOX_START=0 \
             sh scripts/install.sh
           set +e
           usage=$(box 2>&1)

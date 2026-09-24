@@ -30,7 +30,6 @@ RUN dnf -y upgrade && dnf -y install \
         zoxide \
         hyperfine \
         tokei \
-        sd \
         dust \
         sudo \
         systemd \
@@ -48,6 +47,20 @@ RUN dnf -y upgrade && dnf -y install \
         bind-utils \
         rsync \
     && dnf clean all
+
+# Fedora has no sd package. The skill expects the find-and-replace tool on PATH.
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+        amd64) triple=x86_64-unknown-linux-musl ;; \
+        arm64) triple=aarch64-unknown-linux-musl ;; \
+        *) echo "no sd build for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/sd.tar.gz "https://github.com/chmln/sd/releases/download/v1.1.0/sd-v1.1.0-${triple}.tar.gz" \
+    && mkdir -p /tmp/sd \
+    && tar -xzf /tmp/sd.tar.gz -C /tmp/sd \
+    && find /tmp/sd -type f -name sd -exec install -m 0755 {} /usr/local/bin/sd \; \
+    && rm -rf /tmp/sd /tmp/sd.tar.gz \
+    && test -x /usr/local/bin/sd
 
 # Official mise binary. Go and Rust come from mise's built-in backends,
 # installed into the box user's data dir so the toolchain survives on the volume.

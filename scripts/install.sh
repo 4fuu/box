@@ -422,17 +422,48 @@ sha256_file() {
     fi
 }
 
+gh_token() {
+    if [ -n "${GH_TOKEN:-}" ]; then
+        printf '%s' "$GH_TOKEN"
+    elif [ -n "${GITHUB_TOKEN:-}" ]; then
+        printf '%s' "$GITHUB_TOKEN"
+    fi
+}
+
 download() {
     url=$1
     dest=$2
-    curl --proto '=https' --tlsv1.2 -fL "$url" -o "$dest"
+    n=1
+    token=$(gh_token)
+    while [ "$n" -le 6 ]; do
+        if [ -n "$token" ]; then
+            curl --proto '=https' --tlsv1.2 -fL \
+                -H "Authorization: Bearer $token" \
+                -H "Accept: application/octet-stream" \
+                "$url" -o "$dest" && return 0
+        else
+            curl --proto '=https' --tlsv1.2 -fL "$url" -o "$dest" && return 0
+        fi
+        n=$((n + 1))
+        sleep 5
+    done
+    fail "download failed: $url"
 }
 
 resolve_version() {
     if [ "$version" = latest ] || [ -z "$version" ]; then
-        release_url=$(curl --proto '=https' --tlsv1.2 -fsSL -o /dev/null \
-            -w '%{url_effective}' "https://github.com/$repo/releases/latest")
-        tag=${release_url##*/}
+        token=$(gh_token)
+        if [ -n "$token" ]; then
+            tag=$(curl --proto '=https' --tlsv1.2 -fsSL \
+                -H "Authorization: Bearer $token" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$repo/releases/latest" \
+                | awk -F'"' '/tag_name/ { print $4; exit }')
+        else
+            release_url=$(curl --proto '=https' --tlsv1.2 -fsSL -o /dev/null \
+                -w '%{url_effective}' "https://github.com/$repo/releases/latest")
+            tag=${release_url##*/}
+        fi
         version=${tag#v}
     fi
     case $version in
@@ -442,6 +473,23 @@ resolve_version() {
     tag=v$version
 }
 
+asset_url() {
+    want=$1
+    awk -v want="$want" '
+        $0 ~ /"url": "https:\/\/api.github.com\/repos\/.*\/releases\/assets\// {
+            url = $0
+            sub(/.*"url": "/, "", url)
+            sub(/".*/, "", url)
+        }
+        $0 ~ /"name":/ {
+            name = $0
+            sub(/.*"name": "/, "", name)
+            sub(/".*/, "", name)
+            if (name == want && url != "") print url
+        }
+    '
+}
+
 install_box() {
     arch=$1
     asset="box-$version-linux-$arch.tar.gz"
@@ -449,9 +497,24 @@ install_box() {
     if [ "$dry" = 1 ]; then
         return 0
     fi
-    base="https://github.com/$repo/releases/download/$tag"
-    download "$base/$asset" "$tmp_dir/$asset"
-    download "$base/SHA256SUMS" "$tmp_dir/SHA256SUMS"
+    token=$(gh_token)
+    if [ -n "$token" ]; then
+        rel=$(curl --proto '=https' --tlsv1.2 -fsSL \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$repo/releases/tags/$tag")
+        box_url=$(printf '%s\n' "$rel" | asset_url "$asset")
+        sum_url=$(printf '%s\n' "$rel" | asset_url "SHA256SUMS")
+        if [ -z "$box_url" ] || [ -z "$sum_url" ]; then
+            fail "release $tag is missing $asset"
+        fi
+        download "$box_url" "$tmp_dir/$asset"
+        download "$sum_url" "$tmp_dir/SHA256SUMS"
+    else
+        base="https://github.com/$repo/releases/download/$tag"
+        download "$base/$asset" "$tmp_dir/$asset"
+        download "$base/SHA256SUMS" "$tmp_dir/SHA256SUMS"
+    fi
     expected=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1 }' "$tmp_dir/SHA256SUMS")
     [ -n "$expected" ] || fail "$(say missing_sum "$asset")"
     actual=$(sha256_file "$tmp_dir/$asset")
@@ -589,6 +652,8 @@ become_root() {
         *) script=$(pwd)/$script ;;
     esac
     exec sudo \
+        GH_TOKEN="${GH_TOKEN:-}" \
+        GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
         BOX_CONFIGURED=1 \
         BOX_LANG="$lang" \
         BOX_ROLE="$role" \

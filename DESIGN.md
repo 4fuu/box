@@ -1,8 +1,8 @@
 # Design
 
-A self-hosted persistent Linux computer. The client is the `ssh` already installed on the operator's machine. The server is the only public SSH entry. A deploy node is a controller on a machine the operator owns. It may sit behind NAT. microsandbox is one runtime inside that controller, and can be replaced later.
+A self-hosted persistent Linux computer. The client is the `ssh` already installed on the operator's machine. The server is the only public SSH entry. A deploy node is a controller on a machine the operator owns. It may sit behind NAT. The controller runs each computer as a Podman container. There is no microVM and no second SSH hop.
 
-The reference is [exe.dev](https://exe.dev): one command yields a computer, the disk survives restarts, and a website on that computer gets a hostname. Billing, accounts, email, the web agent, and per-VM public IPs are out of scope. This is a private deployment, not a hosted service.
+The reference is [exe.dev](https://exe.dev): one command yields a computer, the disk survives restarts, and a website on that computer gets a hostname. Billing, accounts, email, the web agent, and per-VM public IPs are out of scope. This is a private deployment, not a hosted service. A container shares the node's kernel. That is accepted. A private node does not need a hardware VM boundary.
 
 ## Status
 
@@ -41,7 +41,7 @@ box ▶ new
   disk: 20G
 web ready
 http://web.box.example.com
-ssh vm+web@box.example.com
+ssh web@box.example.com
 ```
 
 `http://` is the server's fixed routing port. TLS, if any, is terminated by an edge the operator runs in front of that port. This project does not issue certificates.
@@ -53,10 +53,10 @@ box ▶ ssh web
 From outside the REPL, the same computer is:
 
 ```
-ssh vm+web@box.example.com
+ssh web@box.example.com
 ```
 
-`scp`, `rsync`, and VS Code Remote-SSH use that destination. `vm+` is routing information, not the user inside the computer. The base image logs in as `box`, with passwordless sudo.
+The username is the computer's name. `scp`, `rsync`, and VS Code Remote-SSH use that destination. The login user inside the computer is always `box`, with passwordless sudo. The username does not select that user. It selects the computer.
 
 A node that has just started cannot create a computer. Pull the image first:
 
@@ -71,25 +71,24 @@ client                      server                         deploy node
 OpenSSH                     public SSH entry               operator's machine
 
 ssh box.example.com         control REPL
-ssh vm+name@box             key check, then forward
+ssh web@box                 key check, username is the name
                             fixed HTTP port, route by Host
                                      │
                                      │ frp, node dials out
                                      ▼
                             commands ──────────────▶  controller
-                            SSH channels ──────────▶     │
-                            HTTP by Host  ──────────▶    ▼
-                                                      microsandbox
-                                                      computer from base image
+                            SSH TCP    ──────────────▶  podman container
+                            HTTP by Host ───────────▶  sshd on loopback
+                                                       HTTP port on loopback
 ```
 
 The client is not a program we ship.
 
-The server checks the key, serves the control REPL, forwards an authorized SSH channel to the node that owns the computer, and routes HTTP by the `Host` header. It does not run the user's processes.
+The server checks the key, serves the control REPL, and forwards an authorized SSH TCP connection to the node that owns the computer. It also routes HTTP by the `Host` header. It does not run the user's processes.
 
-The controller receives commands and connections from the server. It pulls images, creates and stops computers, and attaches a connection to the matching computer. Clients cannot dial the controller. The controller does not store client public keys.
+The controller receives commands from the server. It pulls images, creates and stops containers, and publishes each container's SSH and HTTP ports on loopback. Clients cannot dial the controller. The controller does not store client public keys. It does store the set of bound public keys for the computers it runs, pushed by the server, so sshd inside the container can accept a forwarded connection.
 
-The runtime in the first version is microsandbox. The controller calls it through a small set of actions: start from a spec, keep a disk, provide a shell and SFTP, publish a loopback port, report status. Replacing it with Cloud Hypervisor or Firecracker changes only that layer.
+Podman is the runtime, not a plugin behind another runtime. The controller shells out to `podman`. Replacing it later means replacing those calls. The first version does not keep a second backend.
 
 ## Server to node
 
@@ -99,35 +98,35 @@ The node registers three proxies after pairing:
 
 | Name | On the node | Use |
 | --- | --- | --- |
-| `node-<id>-rpc` | controller RPC, loopback only | create, start, stop, status, resize |
-| `node-<id>-attach` | per-computer SSH attach, loopback only | shell, exec, SFTP, local forward |
+| `node-<id>-rpc` | controller RPC, loopback only | create, start, stop, status, resize, sync keys |
+| `node-<id>-ssh` | one TCP proxy per computer, loopback only | the container's sshd |
 | `node-<id>-http` | HTTP for computers on this node | public edge routing |
 
-RPC and attach use STCP. They are not published on a public port. The server opens a short-lived visitor when it needs one, connects to loopback, and closes it.
+RPC and SSH use STCP. They are not published on a public port. The server opens a short-lived visitor when it needs one, connects to loopback, and closes it. The SSH visitor is a TCP splice. The client's SSH handshake ends at the container's sshd, not at the controller. There is no second SSH session and no `ProxyJump`.
 
 HTTP uses frp's HTTP virtual-host proxy. The server listens on one fixed port. A request is routed by `Host`. The node registers a custom domain only after the server has accepted it. The fixed port is for the operator's edge. It is plain HTTP. Do not publish it to the internet without that edge.
 
 xtcp is not used. NAT traversal is unreliable, and STCP through frps is enough.
 
-The client's SSH connection is not spliced through to the node. An SSH handshake cannot be handed off mid-flight, and doing so would make the node validate client keys. The server finishes authentication, then opens its own SSH connection over STCP to the node's attach port. The client does not see this hop and does not configure `ProxyJump`.
-
 ## SSH entry
 
-The server speaks SSH with [charmbracelet/wish](https://github.com/charmbracelet/wish). There is no default shell. An unknown key is accepted only while presenting a live one-time password. After that, only bound keys are accepted.
+The server speaks SSH with [charmbracelet/wish](https://github.com/charmbracelet/wish) for the control REPL only. An unknown key is accepted only while presenting a live one-time password. After that, only bound keys are accepted.
 
-SSH has no Host header. One port cannot be demultiplexed by the name the client typed. Both destinations therefore share the server address, and the username carries the route.
+SSH has no Host header. One port cannot be demultiplexed by the name the client typed. The username is the route.
 
 | Username | Result |
 | --- | --- |
-| empty, `box`, or anything not starting with `vm+` | control REPL |
-| `vm+web` | the computer named web |
+| empty, or `box` | control REPL |
+| `web` | TCP splice to the computer named web, if this key may access it |
 | `pair+<password>` | bind this key, if the password is valid |
 
-`pair+` exists so a password can be passed non-interactively. The interactive REPL asks for it when a key is not yet bound.
+A computer name cannot be `box`, `pair`, or contain `+`. `new` refuses those. `pair+` exists so a password can be passed non-interactively. The interactive REPL asks for it when a key is not yet bound.
 
-Inside a computer session, Wish allocates no shell of its own. It forwards the session, exec, SFTP, and `direct-tcpip` (`ssh -L`). Reverse forward (`-R`) is rejected. microsandbox does not support it either.
+The server accepts the key before it splices. The container's sshd must also accept that key, because the splice is a new TCP connection and the handshake runs again. The server pushes the bound public keys to the node. The controller writes them to the computer's authorized keys. A key removed on the server is removed on the next push. Sharing is a key on that list, not a second account system.
 
-An SSH disconnect does not stop the computer. The controller disables microsandbox's default 10-minute SSH idle timeout when it creates the computer.
+`scp`, `rsync`, SFTP, and `ssh -L` work because they arrive at a normal sshd. Reverse forward (`-R`) is allowed by sshd and is not specially disabled. It can only reach addresses the container can route. It is not a feature of the control plane.
+
+An SSH disconnect does not stop the container.
 
 ## Control REPL
 
@@ -140,8 +139,8 @@ Computers:
 | `new [name]` | Create. With no flags, ask for image, node, cpu, memory, disk |
 | `ls` | Name, state, node, image, HTTP host |
 | `ssh <name>` | Open a shell on that computer |
-| `rm <name>` | Delete the computer and its disk. Ask for the name again |
-| `restart <name>` | Restart |
+| `rm <name>` | Delete the container and its volume. Ask for the name again |
+| `restart <name>` | Restart the container. The volume stays |
 | `rename <name> <new>` | Rename. The HTTP host follows |
 | `resize <name>` | Change cpu, memory, or disk. Disk only grows |
 | `stat <name>` | cpu, memory, disk, network |
@@ -195,11 +194,11 @@ The default host for a new computer is `<name>.<base-domain>`, registered at cre
 
 There is no login wall and no certificate issuance here. The operator's edge terminates TLS, applies whatever access policy they want, and forwards HTTP to this port. Because the port is plain HTTP, the edge should be the only client allowed to reach it.
 
-Port 5432 and other non-HTTP ports are not published. SSH does not go through this port. Publishing a range of HTTP ports on one host can be added later. The first version routes one port per host.
+Port 5432 and other non-HTTP ports are not published. SSH does not go through this port. The first version routes one HTTP port per host.
 
 ## Guest CLI
 
-Each computer has a `box` command on its `PATH`. It talks only to the controller on that node, over a socket the controller publishes into the computer. It cannot reach the server, and it cannot see other computers.
+Each computer has a `box` command on its `PATH`. It talks only to the controller on that node, over a socket the controller mounts into the container. It cannot reach the server, and it cannot see other computers.
 
 | Command | Effect |
 | --- | --- |
@@ -214,19 +213,18 @@ A skill ships in the base image at `/home/box/.agents/skills/box/SKILL.md`. It t
 
 ## Images
 
-The base image is a Debian computer, not a language runtime. The Dockerfile is `images/base/Dockerfile`. It starts from `ghcr.io/superradcompany/debian-systemd:12`, so the controller can hand PID 1 to systemd with `--init auto`.
+The base image is a Debian computer, not a language runtime. The Dockerfile is `images/base/Dockerfile`. It starts from `debian:12` and installs systemd as PID 1, which Podman runs with `--systemd=always`.
 
 The image contains:
 
-- systemd, sudo, an SSH client, and CA certificates
+- systemd, sudo, openssh-server, and CA certificates
 - user `box`, uid 1000, passwordless sudo, home `/home/box`
 - git, curl, jq, vim, python3, build-essential, ripgrep
+- sshd listening on 2222, password login off, root login off
 - an empty `/etc/machine-id`, so each computer generates its own on first boot
-- an `/etc/fstab` entry that grows the root filesystem when the disk grows
-- the label `box.login-user=box`, which the controller uses as the SSH user
 - `EXPOSE 8000`, as documentation only. The routed port lives in the server's image record
 
-The image has no secrets and no per-computer host key. SSH is terminated by microsandbox on the node. sshd inside the computer stays disabled.
+The image has no client keys and no host key. The controller generates a host key per computer on first start and keeps it on the node, so reconnects do not trip `known_hosts`. Authorized keys are a file the controller writes and the container reads. The computer cannot change the host key.
 
 Build and publish:
 
@@ -235,16 +233,16 @@ docker build -t base:local images/base
 crane push base:local registry.example.com/base:latest
 ```
 
-The registry is the operator's. The server only stores the reference. `image pull` runs `msb pull` on the node. A node that has never pulled `base` cannot create a computer from it. That is deliberate: a node is not usable until it has pulled an image.
+The registry is the operator's. The server only stores the reference. `image pull` runs `podman pull` on the node. A node that has never pulled `base` cannot create a computer from it. That is deliberate: a node is not usable until it has pulled an image.
 
 ## Controller
 
-One binary, `box-node`.
+One binary, `box-node`. It runs as root. Podman is rootful. Rootless mode needs a systemd user session and cgroup delegation, which fails on a machine that was only SSH'd into. Rootful is the smaller setup for a private node. The container is still unprivileged inside: no `--privileged`, no host network, no Docker socket.
 
 1. Pair with the server. Store the node token.
-2. Start frpc and register the RPC, attach, and HTTP proxies.
+2. Start frpc and register the RPC and HTTP proxies. Register an STCP proxy per running computer.
 3. Serve loopback RPC.
-4. Call microsandbox for each command.
+4. Call `podman` for each command.
 5. Report cpu, memory, free disk, and pulled images on heartbeat.
 
 Join:
@@ -258,15 +256,15 @@ The code is single use. The node id and token are written to `/var/lib/box-node/
 Creating a computer:
 
 1. Refuse if the image is not in the local cache.
-2. `msb create` with the registered ref, `--init auto`, the requested cpu and memory, and `--deployment-profile multi-tenant`.
-3. Put the disk on a microsandbox named volume mounted at `/`. Do not use the OCI writable layer as the computer disk. `msb rm` deletes that layer. A named volume survives it.
-4. Disable the SSH idle timeout. Authorize only the server's attach key. That key represents the server, not a client.
-5. Run `msb ssh serve --host 127.0.0.1 --port 0` for this computer and record the port.
-6. Publish the computer's HTTP port on loopback, and register that upstream with frp under the accepted hosts.
+2. `podman volume create web`. This volume is the computer's disk. `podman rm` does not delete it. `rm` in the REPL deletes the container and then the volume.
+3. `podman run -d --name web --systemd=always --restart=always` with `--cpus`, `--memory`, and the volume mounted at `/var/lib/box`. Home, sshd state, and anything the user installs under `/var/lib/box` live on that volume. The image's own upper layer is not the disk.
+4. Publish container port 2222 on `127.0.0.1`, and the HTTP port on `127.0.0.1`. Neither is on a public address.
+5. Write the host key and the current authorized keys onto the volume. Start sshd via the image's systemd unit.
+6. Register the STCP proxy for port 2222 and the HTTP host with frp.
 
-When the server forwards a session, the controller connects to that loopback port as `box.login-user`. The client key was already checked on the server.
+`restart` is `podman restart`. The volume is not recreated. `resize` for cpu and memory is `podman update`. Growing the disk is `podman volume` quota where the filesystem supports it, otherwise a new volume and a copy. Shrinking is refused.
 
-If the controller restarts, it asks microsandbox which computers still exist, rebinds their serve ports, and reports status. The disk is the named volume, not the controller process.
+If the controller restarts, it asks `podman ps -a` which computers exist, rebinds their loopback ports, and reports status. The disk is the volume.
 
 If the node lacks capacity, the RPC returns a specific error. The server shows it and names another node if one has the image. The controller does not place computers itself.
 
@@ -274,7 +272,7 @@ If the node lacks capacity, the RPC returns a specific error. The server shows i
 
 `new` without `--node` uses the default node. If there is no default and only one node is online, that node is used. If more than one is online, `new` asks.
 
-A computer on an offline node is shown as `offline`. It is not moved. Moving a disk is out of scope. The operator can `new` a different computer on another node.
+A computer on an offline node is shown as `offline`. It is not moved. Moving a volume is out of scope. The operator can `new` a different computer on another node.
 
 The server will not place a computer on a node that has not pulled the image.
 
@@ -288,10 +286,11 @@ The server keeps one SQLite file.
 - `images`: name, ref, default port, whether it is the default
 - `computers`: name, node, image, size, state, HTTP port
 - `domains`: computer, host
+- `shares`: computer, key, web or ssh. The owner key is implicit
 
-Computer names are globally unique, because the HTTP host is `<name>.<base-domain>`. `new` refuses a collision.
+Computer names are globally unique, because the SSH username and the HTTP host are both that name. `new` refuses a collision.
 
-The controller keeps its own local record: node token, microsandbox name, attach port, volume name. The server does not store those.
+The controller keeps its own local record: node token, volume name, published ports, host key path. The server does not store those.
 
 ## Processes
 
@@ -299,12 +298,12 @@ On the server, one process supervisor runs:
 
 | Process | Listens | Role |
 | --- | --- | --- |
-| `boxd` | 22, and the fixed HTTP port | SSH, REPL, key check, Host routing |
+| `boxd` | 22, and the fixed HTTP port | SSH control plane, key check, TCP splice, Host routing |
 | `frps` | 7000, token required | Meeting point for nodes |
 
 `frps` is not for clients. 7000 requires the token issued at pairing.
 
-On a node, `box-node` is the only process the operator starts. It starts frpc and microsandbox. The node needs KVM, with `/dev/kvm` readable by the user running `box-node`. It does not need root.
+On a node, `box-node` is the only process the operator starts. It starts frpc and calls Podman. The node needs Podman and a cgroup v2 host. It does not need KVM.
 
 ## Not in the first version
 
@@ -312,10 +311,10 @@ On a node, `box-node` is the only process the operator starts. It starts frpc an
 - email
 - a web coding agent
 - secret injection at the edge
-- a public IP per computer, or an SSH hostname per computer
+- a public IP per computer
+- a hardware VM boundary
 - TLS and public access control on the HTTP port
 - moving a computer between nodes
-- reverse port forward
 - CDN
 
 ## Dependencies
@@ -323,10 +322,11 @@ On a node, `box-node` is the only process the operator starts. It starts frpc an
 | Piece | Choice | Why |
 | --- | --- | --- |
 | Client | OpenSSH, already installed | No client to ship |
-| SSH server | charmbracelet/wish | An sshd we can branch on the username |
-| Server to node | frp | NAT traversal, encryption, and HTTP host routing |
-| Computer | microsandbox | The runtime the operator asked for. Replaceable |
-| Base image | debian-systemd:12 | A systemd guest maintained for that runtime |
+| Control SSH | charmbracelet/wish | An sshd we can branch on the username |
+| Computer SSH | openssh-server in the image | A normal sshd, so scp and Remote-SSH work |
+| Server to node | frp | NAT traversal, encryption, TCP splice, HTTP host routing |
+| Computer | Podman, rootful | One less runtime. Persistent volumes, systemd, resource limits |
+| Base image | debian:12 | No vendor guest image |
 | Server state | SQLite | One file, enough for a private deployment |
 
-The REPL, the controller RPC, the guest `box` CLI, and the skill are the code to write. The rest is the software above.
+The REPL, the controller, the guest `box` CLI, and the skill are the code to write. The rest is the software above.

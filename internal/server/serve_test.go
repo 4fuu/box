@@ -507,7 +507,7 @@ func TestPairOverPTY(t *testing.T) {
 		t.Fatalf("no banner before prompt, got %q", got)
 	}
 	fmt.Fprint(in, "help\r")
-	got = readUntil(t, br, "† marks a command with subcommands")
+	got = readUntil(t, br, " marks a command with subcommands")
 	if !strings.Contains(got, "Common commands:") || !strings.Contains(got, "\r\n") {
 		t.Fatalf("help output missing text or CRLF, got %q", got)
 	}

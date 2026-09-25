@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -96,11 +97,17 @@ func (c crlfWriter) Write(p []byte) (int, error) {
 
 // Loop reads lines until EOF. A command error is printed and the loop continues.
 func (r *REPL) Loop() error {
+	// One editor for the whole session so history persists across lines.
+	ed := &Editor{in: r.in, out: r.Out, raw: r.Raw, echo: r.Raw}
+	if r.Interactive {
+		ed.prompt = r.prompt()
+		ed.complete = r.completeLine
+	}
 	for {
 		if r.Interactive {
 			fmt.Fprint(r.Out, r.prompt())
 		}
-		line, err := ReadLine(r.in, r.Out, r.Raw, r.Raw)
+		line, err := ed.ReadLine()
 		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
@@ -118,61 +125,151 @@ func (r *REPL) Loop() error {
 	}
 }
 
-// ReadLine reads one line of input. SSH servers get no terminal line
+// ReadLine reads one line of input for callers without session state (a
+// one-off question, a pairing password). SSH servers get no terminal line
 // discipline for free: a client with a PTY runs its local terminal in raw
-// mode, so Enter arrives as \r and nothing is echoed back. When raw is true,
-// ReadLine does that work itself: \r and \n both end the line, backspace
-// deletes the last rune, ^C and ^D on an empty line return io.EOF, ^D on a
-// non-empty line ends it as typed, and printable input is echoed to out when
-// echo is true. When raw is false the client's terminal handles all of it and
-// ReadLine only splits on \n.
+// mode, so ReadLine does the echoing itself and returns io.EOF on ^C or ^D
+// on an empty line. When raw is false the client's terminal handles all of
+// it and ReadLine only splits on \n. Loop owns an Editor directly.
 func ReadLine(in *bufio.Reader, out io.Writer, raw, echo bool) (string, error) {
-	if !raw {
-		line, err := in.ReadString('\n')
-		return strings.TrimSpace(strings.TrimRight(line, "\r\n")), err
+	return (&Editor{in: in, out: out, raw: raw, echo: echo}).ReadLine()
+}
+
+// completeLine returns Tab-completion candidates for the word at the rune
+// index cur in line. It completes command and subcommand names from help,
+// and live object names (computers, nodes, images, env keys) where a
+// command takes one.
+func (r *REPL) completeLine(line string, cur int) []string {
+	runes := []rune(line)
+	if cur > len(runes) {
+		cur = len(runes)
 	}
-	var buf []byte
-	for {
-		b, err := in.ReadByte()
-		if err != nil {
-			if len(buf) > 0 && errors.Is(err, io.EOF) {
-				return strings.TrimSpace(string(buf)), nil
-			}
-			return "", err
+	text := string(runes[:cur])
+	fields := strings.Fields(text)
+	wordIdx := len(fields) // a trailing space starts a fresh word
+	prefix := ""
+	if !strings.HasSuffix(text, " ") && len(fields) > 0 {
+		wordIdx = len(fields) - 1
+		prefix = fields[len(fields)-1]
+	}
+	if strings.HasPrefix(prefix, "-") {
+		return nil // flags are not completed
+	}
+	if wordIdx == 0 {
+		return filterPrefix(commandNames(), prefix)
+	}
+	switch fields[0] {
+	case "node", "image", "key", "env":
+		if wordIdx == 1 {
+			return filterPrefix(subcommandNames(fields[0]), prefix)
 		}
-		switch {
-		case b == '\r' || b == '\n':
-			// A real terminal echoes the newline even with ECHO off; without
-			// it the command output starts on the prompt's line.
-			_, _ = io.WriteString(out, "\r\n")
-			return strings.TrimSpace(string(buf)), nil
-		case b == 0x03, b == 0x04 && len(buf) == 0: // ^C, ^D on an empty line
-			if echo && b == 0x03 {
-				_, _ = io.WriteString(out, "^C")
+		return filterPrefix(r.objectNames(fields[0]+" "+fields[1], wordIdx-2), prefix)
+	case "help":
+		if wordIdx == 1 {
+			return filterPrefix(append(commandNames(), "all"), prefix)
+		}
+		return nil
+	default:
+		return filterPrefix(r.objectNames(fields[0], wordIdx-1), prefix)
+	}
+}
+
+// commandNames lists every top-level command name, sorted.
+func commandNames() []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, group := range helpHelp {
+		for _, e := range group.subs {
+			name := strings.Fields(e.name)[0]
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
 			}
-			_, _ = io.WriteString(out, "\r\n")
-			return "", io.EOF
-		case b == 0x04: // ^D ends the line as typed
-			_, _ = io.WriteString(out, "\r\n")
-			return strings.TrimSpace(string(buf)), nil
-		case b == 0x08 || b == 0x7f: // backspace
-			for len(buf) > 0 {
-				last := buf[len(buf)-1]
-				buf = buf[:len(buf)-1]
-				if last&0xc0 != 0x80 { // dropped a whole rune
-					break
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// subcommandNames lists the subcommands of a group command, sorted.
+func subcommandNames(group string) []string {
+	var names []string
+	for _, g := range helpHelp {
+		for _, e := range g.subs {
+			if f := strings.Fields(e.name); len(f) == 2 && f[0] == group {
+				names = append(names, f[1])
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// objectNames returns live object names for the argument position argIdx of
+// cmd ("ssh", "node tag", ...), or nil when the command takes no name there
+// or the store is unavailable.
+func (r *REPL) objectNames(cmd string, argIdx int) []string {
+	if r.Svc == nil || argIdx < 0 {
+		return nil
+	}
+	var names []string
+	var err error
+	switch cmd {
+	case "ssh", "rm", "restart", "stat", "resize", "rename":
+		if argIdx == 0 {
+			var views []control.ComputerView
+			if views, err = r.Svc.ListComputers(); err == nil {
+				for _, v := range views {
+					names = append(names, v.Name)
 				}
 			}
-			if echo {
-				fmt.Fprint(out, "\b \b")
-			}
-		case b >= 0x20: // printable; other control bytes are ignored
-			buf = append(buf, b)
-			if echo {
-				_, _ = out.Write([]byte{b})
+		}
+	case "node rm", "node tag":
+		if argIdx == 0 {
+			var views []control.NodeView
+			if views, err = r.Svc.ListNodes(); err == nil {
+				for _, v := range views {
+					names = append(names, v.Name)
+				}
 			}
 		}
+	case "image rm", "image default":
+		if argIdx == 0 {
+			var views []control.ImageView
+			if views, err = r.Svc.ListImages(); err == nil {
+				for _, v := range views {
+					names = append(names, v.Name)
+				}
+			}
+		}
+	case "image pull":
+		if argIdx == 1 {
+			return r.objectNames("node rm", 0)
+		}
+		return r.objectNames("image rm", 0)
+	case "env rm":
+		if argIdx == 0 {
+			names, err = r.Svc.EnvNames()
+		}
 	}
+	if err != nil {
+		return nil
+	}
+	return names
+}
+
+// filterPrefix keeps the names that start with prefix.
+func filterPrefix(names []string, prefix string) []string {
+	if prefix == "" {
+		return names
+	}
+	var out []string
+	for _, n := range names {
+		if strings.HasPrefix(n, prefix) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // Exec runs one already-split command. The error is not written; the caller prints it.
@@ -745,14 +842,24 @@ func (r *REPL) printHelpOverview() {
 		{"Help", "help"},
 	}
 	for _, row := range rows {
-		fmt.Fprintf(r.Out, "%s%-16s%s%s\n", bold, row.group, reset, row.cmds)
+		// markDagger after the width formatting: escapes must not shift columns.
+		fmt.Fprintf(r.Out, "%s", r.markDagger(fmt.Sprintf("%s%-16s%s%s\n", bold, row.group, reset, row.cmds)))
 	}
-	fmt.Fprintln(r.Out, "\n† marks a command with subcommands.")
+	dagger := r.markDagger("†")
+	fmt.Fprintf(r.Out, "\n%s marks a command with subcommands.\n", dagger)
 	dim := reset
 	if r.Color {
 		dim = "\x1b[2m"
 	}
 	fmt.Fprintf(r.Out, "%sRun help all for a list of all commands, help <command> for more detail.%s\n", dim, reset)
+}
+
+// markDagger colors the † subcommand marker blue when the peer supports color.
+func (r *REPL) markDagger(s string) string {
+	if r.Color {
+		return strings.ReplaceAll(s, "†", "\x1b[1;34m†\x1b[0m")
+	}
+	return s
 }
 
 func helpLine(w io.Writer, usage, short string) {

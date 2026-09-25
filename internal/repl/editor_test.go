@@ -2,6 +2,7 @@ package repl
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"reflect"
 	"strings"
@@ -162,6 +163,135 @@ func TestEditorTabListsCandidates(t *testing.T) {
 	}
 }
 
+func TestEditorTabMenuCycle(t *testing.T) {
+	// First Tab lists, two more Tabs cycle abc -> abd, Enter confirms.
+	ed := newEditor("ab\t\t\t\r", io.Discard)
+	ed.complete = func(line string, cur int) []string { return []string{"abc", "abd"} }
+	line, err := ed.ReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "abd" {
+		t.Fatalf("got %q, want %q", line, "abd")
+	}
+}
+
+func TestEditorTabMenuBackTab(t *testing.T) {
+	// Shift-Tab cycles backward, landing on the last candidate.
+	ed := newEditor("ab\t\x1b[Z\r", io.Discard)
+	ed.complete = func(line string, cur int) []string { return []string{"abc", "abd"} }
+	line, err := ed.ReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "abd" {
+		t.Fatalf("got %q, want %q", line, "abd")
+	}
+}
+
+func TestEditorTabMenuDismissKeepsSelection(t *testing.T) {
+	// Typing after the menu dismisses the listing but keeps the selection.
+	ed := newEditor("ab\t\tx\r", io.Discard)
+	ed.complete = func(line string, cur int) []string { return []string{"abc", "abd"} }
+	line, err := ed.ReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "abcx" {
+		t.Fatalf("got %q, want %q", line, "abcx")
+	}
+}
+
+func TestEditorCtrlCInterrupts(t *testing.T) {
+	// ^C drops the half-typed line; the editor keeps working afterwards.
+	ed := newEditor("par\x03ls\r", io.Discard)
+	if _, err := ed.ReadLine(); !errors.Is(err, errInterrupt) {
+		t.Fatalf("got err %v, want errInterrupt", err)
+	}
+	line, err := ed.ReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "ls" {
+		t.Fatalf("got %q, want %q", line, "ls")
+	}
+}
+
+func TestEditorCtrlRSearchExec(t *testing.T) {
+	// ^R + query + Enter runs the newest matching history entry.
+	ed := newEditor("restart alpha\r\x12alpha\r", io.Discard)
+	if _, err := ed.ReadLine(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := ed.ReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "restart alpha" {
+		t.Fatalf("got %q, want %q", line, "restart alpha")
+	}
+}
+
+func TestEditorCtrlRSearchEdit(t *testing.T) {
+	// ESC during a search drops the match into the buffer for editing.
+	ed := newEditor("restart alpha\r\x12alpha\x1bX\r", io.Discard)
+	if _, err := ed.ReadLine(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := ed.ReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "restart alphaX" {
+		t.Fatalf("got %q, want %q", line, "restart alphaX")
+	}
+}
+
+func TestEditorCtrlWordMotion(t *testing.T) {
+	// Ctrl+Left (ESC [ 1 ; 5 D) moves by word and must not leak "1;5D".
+	ed := newEditor("abc def\x1b[1;5DX\r", io.Discard)
+	line, err := ed.ReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "abc Xdef" {
+		t.Fatalf("got %q, want %q", line, "abc Xdef")
+	}
+}
+
+func TestEditorEscBWordLeft(t *testing.T) {
+	// readline-style ESC b also moves left by word.
+	ed := newEditor("abc def\x1bbX\r", io.Discard)
+	line, err := ed.ReadLine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "abc Xdef" {
+		t.Fatalf("got %q, want %q", line, "abc Xdef")
+	}
+}
+
+func TestLayoutMenu(t *testing.T) {
+	// Width 7, colw 5: one column, input order preserved.
+	rows := layoutMenu([]string{"ab", "cde", "f"}, -1, 7)
+	if want := []string{"ab", "cde", "f"}; !reflect.DeepEqual(rows, want) {
+		t.Fatalf("got %q, want %q", rows, want)
+	}
+	// Width 20, colw 5: everything fits one row; selection is highlighted.
+	rows = layoutMenu([]string{"ab", "cde", "f"}, 1, 20)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1: %q", len(rows), rows)
+	}
+	if !strings.Contains(rows[0], "\x1b[7mcde\x1b[0m") {
+		t.Fatalf("selection not highlighted: %q", rows[0])
+	}
+	// Column-major: 4 candidates, width 4 (colw 4, one column) -> 4 rows.
+	rows = layoutMenu([]string{"a1", "a2", "a3", "a4"}, -1, 4)
+	if len(rows) != 4 || rows[0] != "a1" || rows[3] != "a4" {
+		t.Fatalf("bad column layout: %q", rows)
+	}
+}
+
 func TestCompleteLineCommands(t *testing.T) {
 	r := &REPL{}
 	got := r.completeLine("he", 2)
@@ -197,10 +327,27 @@ func TestCompleteLineHelpIncludesAll(t *testing.T) {
 	}
 }
 
-func TestCompleteLineNoFlags(t *testing.T) {
+func TestCompleteLineFlags(t *testing.T) {
 	r := &REPL{}
-	if got := r.completeLine("ssh -", 5); got != nil {
-		t.Fatalf("flags should not complete: %q", got)
+	if got := r.completeLine("ssh -", 5); !reflect.DeepEqual(got, []string{"--json"}) {
+		t.Fatalf(`ssh -: got %q, want ["--json"]`, got)
+	}
+	if got := r.completeLine("new --i", 7); !reflect.DeepEqual(got, []string{"--image"}) {
+		t.Fatalf(`new --i: got %q, want ["--image"]`, got)
+	}
+}
+
+func TestCompleteLineHelpExcludesHelp(t *testing.T) {
+	r := &REPL{}
+	got := r.completeLine("help ", 5)
+	if contains(got, "help") {
+		t.Fatalf("help should not complete to itself: %q", got)
+	}
+	if !contains(got, "all") || !contains(got, "ls") {
+		t.Fatalf("missing expected candidates: %q", got)
+	}
+	if !isSorted(got) {
+		t.Fatalf("candidates not sorted: %q", got)
 	}
 }
 

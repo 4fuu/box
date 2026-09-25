@@ -17,6 +17,16 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// ErrExit is returned by Exec for session-ending commands (exit, quit,
+// logout). Loop returns nil on it and the SSH one-shot path treats it as
+// success without printing an error.
+var ErrExit = errors.New("exit")
+
+// errInterrupt reports that ^C was pressed while editing a line or answering
+// a prompt. Loop drops the line and prints a fresh prompt instead of an
+// error message.
+var errInterrupt = errors.New("line interrupted")
+
 // REPL runs one command or a prompt loop. Output for a person goes to Out.
 // --json selects the script form. key copy writes only the public key.
 type REPL struct {
@@ -26,6 +36,7 @@ type REPL struct {
 	Interactive bool
 	Raw         bool // the peer has a PTY: read lines with local line discipline
 	Color       bool // the peer has a PTY with a real terminal: emit ANSI colors
+	Width       int  // the peer's terminal width in columns; 0 means unknown
 	Svc         *control.Service
 	Bridge      func(name string) error
 	Pub         ssh.PublicKey
@@ -98,7 +109,7 @@ func (c crlfWriter) Write(p []byte) (int, error) {
 // Loop reads lines until EOF. A command error is printed and the loop continues.
 func (r *REPL) Loop() error {
 	// One editor for the whole session so history persists across lines.
-	ed := &Editor{in: r.in, out: r.Out, raw: r.Raw, echo: r.Raw}
+	ed := &Editor{in: r.in, out: r.Out, raw: r.Raw, echo: r.Raw, width: r.Width}
 	if r.Interactive {
 		ed.prompt = r.prompt()
 		ed.complete = r.completeLine
@@ -109,6 +120,9 @@ func (r *REPL) Loop() error {
 		}
 		line, err := ed.ReadLine()
 		if err != nil && !errors.Is(err, io.EOF) {
+			if errors.Is(err, errInterrupt) {
+				continue // ^C: drop the line, print a fresh prompt
+			}
 			return err
 		}
 		if line != "" {
@@ -116,7 +130,14 @@ func (r *REPL) Loop() error {
 			if splitErr != nil {
 				fmt.Fprintln(r.Err, r.errText(splitErr.Error()))
 			} else if runErr := r.Exec(argv); runErr != nil {
-				fmt.Fprintln(r.Err, r.errText(runErr.Error()))
+				switch {
+				case errors.Is(runErr, ErrExit):
+					return nil
+				case errors.Is(runErr, errInterrupt):
+					// ^C at a prompt inside the command cancels it quietly.
+				default:
+					fmt.Fprintln(r.Err, r.errText(runErr.Error()))
+				}
 			}
 		}
 		if errors.Is(err, io.EOF) {
@@ -128,9 +149,10 @@ func (r *REPL) Loop() error {
 // ReadLine reads one line of input for callers without session state (a
 // one-off question, a pairing password). SSH servers get no terminal line
 // discipline for free: a client with a PTY runs its local terminal in raw
-// mode, so ReadLine does the echoing itself and returns io.EOF on ^C or ^D
-// on an empty line. When raw is false the client's terminal handles all of
-// it and ReadLine only splits on \n. Loop owns an Editor directly.
+// mode, so ReadLine does the echoing itself, returns io.EOF on ^D on an
+// empty line, and returns errInterrupt on ^C while echoing. When raw is
+// false the client's terminal handles all of it and ReadLine only splits
+// on \n. Loop owns an Editor directly.
 func ReadLine(in *bufio.Reader, out io.Writer, raw, echo bool) (string, error) {
 	return (&Editor{in: in, out: out, raw: raw, echo: echo}).ReadLine()
 }
@@ -153,7 +175,10 @@ func (r *REPL) completeLine(line string, cur int) []string {
 		prefix = fields[len(fields)-1]
 	}
 	if strings.HasPrefix(prefix, "-") {
-		return nil // flags are not completed
+		if wordIdx == 0 {
+			return nil // a leading dash is not a command
+		}
+		return filterPrefix(flagsFor(fields[0]), prefix)
 	}
 	if wordIdx == 0 {
 		return filterPrefix(commandNames(), prefix)
@@ -166,12 +191,35 @@ func (r *REPL) completeLine(line string, cur int) []string {
 		return filterPrefix(r.objectNames(fields[0]+" "+fields[1], wordIdx-2), prefix)
 	case "help":
 		if wordIdx == 1 {
-			return filterPrefix(append(commandNames(), "all"), prefix)
+			// Complete help topics: every command except help itself, plus "all".
+			names := []string{"all"}
+			for _, n := range commandNames() {
+				if n != "help" {
+					names = append(names, n)
+				}
+			}
+			sort.Strings(names)
+			return filterPrefix(names, prefix)
 		}
 		return nil
 	default:
 		return filterPrefix(r.objectNames(fields[0], wordIdx-1), prefix)
 	}
+}
+
+// flagsFor lists the flags a top-level command accepts, sorted. parseArgv
+// accepts the size and placement flags on every command; only new and
+// resize act on all of them.
+func flagsFor(command string) []string {
+	flags := []string{"--json"}
+	switch command {
+	case "new":
+		flags = append(flags, "--image", "--node", "--cpu", "--memory", "--disk")
+	case "resize":
+		flags = append(flags, "--cpu", "--memory", "--disk")
+	}
+	sort.Strings(flags)
+	return flags
 }
 
 // commandNames lists every top-level command name, sorted.
@@ -451,6 +499,15 @@ func (r *REPL) Exec(argv []string) error {
 		return r.print(control.FormatDefaults(d, asJSON))
 	case "help":
 		return r.cmdHelp(pos)
+	case "exit", "quit", "logout":
+		return ErrExit
+	case "clear":
+		if r.Raw {
+			// Home, clear screen and scrollback. Only with a PTY: a pipe
+			// would just receive escape junk.
+			io.WriteString(r.Out, "\x1b[H\x1b[2J\x1b[3J")
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown command %q — run help", name)
 	}
@@ -807,6 +864,13 @@ var helpHelp = []helpEntry{
 		},
 	},
 	{
+		name: "Session",
+		subs: []helpEntry{
+			{name: "clear", usage: "clear", short: "Clear the screen"},
+			{name: "exit", usage: "exit", short: "End this session; ^D on an empty line works too"},
+		},
+	},
+	{
 		name: "Help",
 		subs: []helpEntry{
 			{name: "help", usage: "help [all | <command>]", short: "This help; help node covers every node subcommand"},
@@ -839,6 +903,7 @@ func (r *REPL) printHelpOverview() {
 		{"Computers", "new  ssh  ls  rm  restart  resize  rename  stat"},
 		{"Nodes & images", "node†  image†"},
 		{"Keys & secrets", "pair  key†  env†  whoami  defaults"},
+		{"Session", "clear  exit"},
 		{"Help", "help"},
 	}
 	for _, row := range rows {

@@ -10,10 +10,11 @@ import (
 )
 
 // Editor reads one line of input. With a raw PTY and echo on it provides a
-// small line editor: cursor movement, up/down history, Tab completion, and
-// the common Emacs bindings. Without echo it reads a secret (pairing
-// passwords) byte for byte with no redraw and no history. Without a PTY the
-// client's terminal does all of it and Editor only splits on '\n'.
+// small line editor: cursor and word movement, up/down history, ^R history
+// search, Tab completion with a selectable menu, and the common Emacs
+// bindings. Without echo it reads a secret (pairing passwords) byte for byte
+// with no redraw and no history. Without a PTY the client's terminal does
+// all of it and Editor only splits on '\n'.
 //
 // One Editor is owned per session so history persists across lines.
 type Editor struct {
@@ -21,6 +22,9 @@ type Editor struct {
 	out  io.Writer
 	raw  bool // input is a PTY in raw mode
 	echo bool // typed characters are echoed back
+	// width is the peer's terminal width in columns, used to lay out the
+	// completion menu; effWidth falls back to 80 when it is zero.
+	width int
 
 	// prompt is redrawn before the buffer; the cursor is assumed to sit
 	// right after it when the line starts.
@@ -35,7 +39,7 @@ type Editor struct {
 }
 
 // ReadLine reads one line. It returns io.EOF when the caller hangs up or
-// presses ^C, or ^D on an empty line.
+// presses ^D on an empty line, and errInterrupt when ^C aborts the line.
 func (e *Editor) ReadLine() (string, error) {
 	if !e.raw {
 		line, err := e.in.ReadString('\n')
@@ -151,6 +155,66 @@ func (e *Editor) edit() (string, error) {
 		}
 	}
 
+	// menu is the live Tab-completion listing; non-nil means it is on
+	// screen and must be erased before anything else moves the line.
+	var menu *menuState
+	keepsMenu := func(b byte) bool {
+		switch b {
+		case '\t', 0x1b, 0x01, 0x02, 0x05, 0x06: // Tab, ESC, ^A ^B ^E ^F
+			return true
+		}
+		return false
+	}
+	dropMenu := func() {
+		if menu == nil {
+			return
+		}
+		menu = nil
+		// Reset any highlight and clear from the cursor down; the cursor
+		// sits on the prompt line, so this erases just the listing.
+		_, _ = io.WriteString(e.out, "\x1b[0m\x1b[J")
+		e.redraw(buf, cur)
+	}
+	menuCycle := func(step int) {
+		n := len(menu.cands)
+		if menu.idx == -1 {
+			if step > 0 {
+				menu.idx = 0
+			} else {
+				menu.idx = n - 1
+			}
+		} else {
+			menu.idx = (menu.idx + step + n) % n
+		}
+		// Rebuild the buffer around the highlighted candidate so Enter
+		// confirms the selection and typing continues from it.
+		cand := []rune(menu.cands[menu.idx])
+		buf = append(append([]rune{}, buf[:menu.start]...), cand...)
+		buf = append(buf, menu.tail...)
+		cur = menu.start + len(cand)
+		e.listMenu(buf, cur, menu)
+	}
+	wordLeft := func() {
+		i := cur
+		for i > 0 && buf[i-1] == ' ' {
+			i--
+		}
+		for i > 0 && buf[i-1] != ' ' {
+			i--
+		}
+		left(cur - i)
+	}
+	wordRight := func() {
+		i := cur
+		for i < len(buf) && buf[i] == ' ' {
+			i++
+		}
+		for i < len(buf) && buf[i] != ' ' {
+			i++
+		}
+		right(i - cur)
+	}
+
 	for {
 		b, err := e.in.ReadByte()
 		if err != nil {
@@ -162,6 +226,11 @@ func (e *Editor) edit() (string, error) {
 				return line, nil
 			}
 			return "", err
+		}
+		if menu != nil && !keepsMenu(b) {
+			// Anything but menu navigation dismisses the listing; the
+			// buffer keeps the highlighted candidate.
+			dropMenu()
 		}
 		switch b {
 		case '\r', '\n':
@@ -181,9 +250,9 @@ func (e *Editor) edit() (string, error) {
 			histUp()
 		case 0x0e: // ^N
 			histDown()
-		case 0x03: // ^C
+		case 0x03: // ^C aborts this line only; Loop prints a fresh prompt
 			_, _ = io.WriteString(e.out, "^C\r\n")
-			return "", io.EOF
+			return "", errInterrupt
 		case 0x04: // ^D deletes the rune under the cursor; EOF on an empty line
 			if len(buf) == 0 {
 				_, _ = io.WriteString(e.out, "^D\r\n")
@@ -223,24 +292,51 @@ func (e *Editor) edit() (string, error) {
 		case 0x0c: // ^L clears the screen and redraws
 			_, _ = io.WriteString(e.out, "\x1b[H\x1b[2J")
 			e.redraw(buf, cur)
+		case 0x12: // ^R reverse history search
+			line, act := e.searchHistory()
+			switch act {
+			case searchExec:
+				return line, nil
+			case searchEdit:
+				setLine(line)
+			case searchInterrupt:
+				return "", errInterrupt
+			case searchCancel:
+				e.redraw(buf, cur)
+			}
 		case '\t':
-			e.completeWord(&buf, &cur)
-		case 0x1b: // ESC: arrows, Home/End/Delete
+			if menu != nil {
+				menuCycle(1)
+			} else {
+				menu = e.completeWord(&buf, &cur)
+			}
+		case 0x1b: // ESC: arrows, word motions, Home/End/Delete, Shift-Tab
 			switch e.readEscape() {
 			case keyUp:
+				dropMenu()
 				histUp()
 			case keyDown:
+				dropMenu()
 				histDown()
 			case keyLeft:
 				left(1)
 			case keyRight:
 				right(1)
+			case keyWordLeft:
+				wordLeft()
+			case keyWordRight:
+				wordRight()
 			case keyHome:
 				left(cur)
 			case keyEnd:
 				right(len(buf) - cur)
 			case keyDelete:
+				dropMenu()
 				deleteAt(cur)
+			case keyBackTab:
+				if menu != nil {
+					menuCycle(-1)
+				}
 			}
 		default:
 			if b >= 0x20 { // printable; other control bytes are ignored
@@ -310,16 +406,30 @@ func (e *Editor) commit(line string) {
 	e.history = append(e.history, line)
 }
 
-// completeWord runs Tab completion on the word behind the cursor: a single
-// candidate replaces the word, several candidates extend it to their longest
-// common prefix, and a second Tab lists them below the prompt.
-func (e *Editor) completeWord(buf *[]rune, cur *int) {
+// menuState is a live Tab-completion listing. start and tail bracket the
+// completed word in the buffer: buf[:start] is the line before the word and
+// tail is everything after it, so cycling rebuilds the buffer as
+// buf[:start] + candidate + tail. idx == -1 means nothing is highlighted
+// yet; non-nil menuState means the listing is on screen.
+type menuState struct {
+	cands []string
+	idx   int
+	start int
+	tail  []rune
+}
+
+// completeWord runs Tab completion on the word behind the cursor. A single
+// candidate replaces the word. Several candidates extend the word to their
+// longest common prefix and open a menu listing below the prompt: further
+// Tabs cycle the highlight, Enter confirms it, and any other key dismisses
+// the listing while keeping the selection in the buffer.
+func (e *Editor) completeWord(buf *[]rune, cur *int) *menuState {
 	if e.complete == nil {
-		return
+		return nil
 	}
 	cands := e.complete(string(*buf), *cur)
 	if len(cands) == 0 {
-		return
+		return nil
 	}
 	start := *cur
 	for start > 0 && (*buf)[start-1] != ' ' {
@@ -336,14 +446,165 @@ func (e *Editor) completeWord(buf *[]rune, cur *int) {
 		if cands[0] != prefix {
 			replace(cands[0])
 		}
-		return
+		return nil
 	}
 	if lcp := longestCommonPrefix(cands); len(lcp) > len(prefix) {
 		replace(lcp)
-		return
 	}
-	_, _ = io.WriteString(e.out, "\r\n"+strings.Join(cands, "   ")+"\r\n")
-	e.redraw(*buf, *cur)
+	m := &menuState{
+		cands: cands,
+		idx:   -1,
+		start: start,
+		tail:  append([]rune{}, (*buf)[*cur:]...),
+	}
+	e.listMenu(*buf, *cur, m)
+	return m
+}
+
+// listMenu prints the candidate listing below the prompt and redraws the
+// line. The rows may scroll the screen, but the cursor stays a fixed number
+// of lines below the prompt, so moving back up that many lines always lands
+// on the prompt line again.
+func (e *Editor) listMenu(buf []rune, cur int, m *menuState) {
+	rows := layoutMenu(m.cands, m.idx, e.effWidth())
+	var s strings.Builder
+	s.WriteString("\r\n")
+	for _, row := range rows {
+		s.WriteString("\r" + row + "\x1b[K\r\n")
+	}
+	fmt.Fprintf(&s, "\x1b[%dA", len(rows)+1)
+	_, _ = io.WriteString(e.out, s.String())
+	e.redraw(buf, cur)
+}
+
+// layoutMenu arranges candidates into column-major rows that fit width
+// columns, highlighting cands[sel] (sel < 0 highlights nothing). Cells are
+// padded by rune count, which is exact for the ASCII names the REPL
+// completes.
+func layoutMenu(cands []string, sel, width int) []string {
+	if len(cands) == 0 {
+		return nil
+	}
+	colw := 0
+	for _, c := range cands {
+		if n := utf8.RuneCountInString(c); n > colw {
+			colw = n
+		}
+	}
+	colw += 2
+	cols := width / colw
+	if cols < 1 {
+		cols = 1
+	}
+	rows := (len(cands) + cols - 1) / cols
+	out := make([]string, rows)
+	for row := 0; row < rows; row++ {
+		var s strings.Builder
+		for col := 0; col < cols; col++ {
+			i := col*rows + row
+			if i >= len(cands) {
+				break
+			}
+			c := cands[i]
+			if i == sel {
+				s.WriteString("\x1b[7m" + c + "\x1b[0m")
+			} else {
+				s.WriteString(c)
+			}
+			s.WriteString(strings.Repeat(" ", colw-utf8.RuneCountInString(c)))
+		}
+		out[row] = strings.TrimRight(s.String(), " ")
+	}
+	return out
+}
+
+// effWidth is the terminal width used to lay out the completion menu.
+func (e *Editor) effWidth() int {
+	if e.width > 0 {
+		return e.width
+	}
+	return 80
+}
+
+// searchAction is what a ^R history search ended with.
+type searchAction int
+
+const (
+	searchCancel    searchAction = iota // redraw the line as it was
+	searchExec                          // run the match
+	searchEdit                          // put the match in the buffer to edit
+	searchInterrupt                     // ^C: abort the line
+)
+
+// searchHistory is the incremental reverse search behind ^R: each character
+// narrows the newest matching history entry, another ^R steps to the next
+// older match, Enter runs the match, ESC drops it into the buffer for
+// editing, and ^G cancels. This is the readline behavior shells use.
+func (e *Editor) searchHistory() (string, searchAction) {
+	var q []rune
+	match := ""
+	pos := len(e.history) // entries at or above pos are excluded
+
+	find := func() {
+		match = ""
+		for i := pos - 1; i >= 0; i-- {
+			if strings.Contains(e.history[i], string(q)) {
+				match = e.history[i]
+				pos = i
+				return
+			}
+		}
+	}
+	render := func() {
+		tag := "reverse-i-search"
+		if match == "" {
+			tag = "failed " + tag
+		}
+		fmt.Fprintf(e.out, "\r(%s)`%s': %s\x1b[K", tag, string(q), match)
+	}
+
+	render()
+	for {
+		b, err := e.in.ReadByte()
+		if err != nil {
+			return "", searchInterrupt
+		}
+		switch {
+		case b == 0x12: // ^R: next older match
+			find()
+			render()
+		case b == '\r' || b == '\n':
+			_, _ = io.WriteString(e.out, "\r\n")
+			if match != "" {
+				e.commit(match)
+				return match, searchExec
+			}
+			return "", searchCancel
+		case b == 0x07: // ^G cancels, like readline
+			return "", searchCancel
+		case b == 0x03: // ^C
+			_, _ = io.WriteString(e.out, "^C\r\n")
+			return "", searchInterrupt
+		case b == 0x08 || b == 0x7f: // backspace
+			if len(q) > 0 {
+				q = q[:len(q)-1]
+				pos = len(e.history)
+				find()
+			}
+			render()
+		case b == 0x1b: // ESC: a match goes into the buffer for editing
+			k := e.readEscape()
+			if k == keyNone && match != "" {
+				return match, searchEdit
+			}
+			return "", searchCancel
+		case b >= 0x20:
+			q = append(q, e.readRune(b))
+			pos = len(e.history)
+			find()
+			render()
+		}
+	}
 }
 
 func longestCommonPrefix(cands []string) string {
@@ -370,13 +631,19 @@ const (
 	keyDown
 	keyLeft
 	keyRight
+	keyWordLeft
+	keyWordRight
 	keyHome
 	keyEnd
 	keyDelete
+	keyBackTab
 )
 
-// readEscape classifies the escape sequence after an ESC byte. A byte that
-// does not start a known sequence is left unread so a lone ESC press cannot
+// readEscape classifies the escape sequence after an ESC byte. CSI sequences
+// are always consumed whole — parameters, intermediates, and final byte — so
+// an unknown or modified sequence (say Ctrl+Left's ESC [ 1 ; 5 D) cannot leak
+// its parameter bytes into the line buffer as typed text. A byte that does
+// not start a known sequence is left unread so a lone ESC press cannot
 // swallow the next character.
 func (e *Editor) readEscape() escKey {
 	b, err := e.in.Peek(1)
@@ -384,51 +651,9 @@ func (e *Editor) readEscape() escKey {
 		return keyNone
 	}
 	switch b[0] {
-	case '[': // CSI: arrows, Home/End/Delete via "n~"
+	case '[': // CSI
 		_, _ = e.in.ReadByte()
-		c, err := e.in.ReadByte()
-		if err != nil {
-			return keyNone
-		}
-		switch c {
-		case 'A':
-			return keyUp
-		case 'B':
-			return keyDown
-		case 'C':
-			return keyRight
-		case 'D':
-			return keyLeft
-		case 'H':
-			return keyHome
-		case 'F':
-			return keyEnd
-		}
-		if c >= '0' && c <= '9' {
-			param := string(c)
-			for {
-				d, err := e.in.ReadByte()
-				if err != nil {
-					return keyNone
-				}
-				if d == '~' {
-					break
-				}
-				if d < '0' || d > '9' {
-					return keyNone
-				}
-				param += string(d)
-			}
-			switch param {
-			case "1", "7":
-				return keyHome
-			case "3":
-				return keyDelete
-			case "4", "8":
-				return keyEnd
-			}
-		}
-		return keyNone
+		return e.readCSI()
 	case 'O': // SS3: some terminals send arrows this way
 		_, _ = e.in.ReadByte()
 		c, err := e.in.ReadByte()
@@ -449,6 +674,78 @@ func (e *Editor) readEscape() escKey {
 		case 'F':
 			return keyEnd
 		}
+	case 'b': // readline-style ESC b / ESC f word motion
+		_, _ = e.in.ReadByte()
+		return keyWordLeft
+	case 'f':
+		_, _ = e.in.ReadByte()
+		return keyWordRight
 	}
 	return keyNone
+}
+
+// readCSI consumes the body of a CSI sequence: parameter bytes (0x30–0x3f,
+// e.g. digits and ;), intermediate bytes (0x20–0x2f, ignored), then a final
+// byte (0x40–0x7e) which classifies the key together with the parameters.
+func (e *Editor) readCSI() escKey {
+	var param strings.Builder
+	for {
+		c, err := e.in.ReadByte()
+		if err != nil {
+			return keyNone
+		}
+		switch {
+		case c >= 0x30 && c <= 0x3f:
+			param.WriteByte(c)
+		case c >= 0x20 && c <= 0x2f:
+		case c >= 0x40 && c <= 0x7e:
+			return csiKey(param.String(), c)
+		default:
+			return keyNone
+		}
+	}
+}
+
+// csiKey maps a CSI parameter and final byte to an editor key. Arrow keys
+// with a modifier parameter (1;5 is Ctrl+arrow in xterm) move by word.
+func csiKey(param string, final byte) escKey {
+	switch final {
+	case 'A':
+		return keyUp
+	case 'B':
+		return keyDown
+	case 'C':
+		if isModified(param) {
+			return keyWordRight
+		}
+		return keyRight
+	case 'D':
+		if isModified(param) {
+			return keyWordLeft
+		}
+		return keyLeft
+	case 'Z': // Shift-Tab
+		return keyBackTab
+	case 'H':
+		return keyHome
+	case 'F':
+		return keyEnd
+	case '~':
+		switch param {
+		case "1", "7":
+			return keyHome
+		case "3":
+			return keyDelete
+		case "4", "8":
+			return keyEnd
+		}
+	}
+	return keyNone
+}
+
+// isModified reports whether a CSI parameter carries a modifier other than
+// the plain "1", as in "1;5" for Ctrl+arrow.
+func isModified(param string) bool {
+	_, mod, ok := strings.Cut(param, ";")
+	return ok && mod != "" && mod != "1"
 }

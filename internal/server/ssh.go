@@ -121,11 +121,15 @@ func (h *sshServer) session(sess ssh.Session) {
 	if len(sess.Command()) == 0 {
 		r.Raw = pty // a PTY peer sends \r and gets no echo: read with a line discipline
 		r.Color = pty && ptyReq.Term != "dumb"
+		r.Width = ptyReq.Window.Width
 		r.Banner()
 		_ = r.Loop()
 		return
 	}
 	if err := r.Exec(sess.Command()); err != nil {
+		if errors.Is(err, repl.ErrExit) {
+			return
+		}
 		fmt.Fprintln(errOut, err.Error())
 		_ = sess.Exit(1)
 	}

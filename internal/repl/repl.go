@@ -3,6 +3,7 @@ package repl
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ type REPL struct {
 	Err         io.Writer
 	Interactive bool
 	Raw         bool // the peer has a PTY: read lines with local line discipline
+	Color       bool // the peer has a PTY with a real terminal: emit ANSI colors
 	Svc         *control.Service
 	Bridge      func(name string) error
 	Pub         ssh.PublicKey
@@ -35,11 +37,68 @@ func New(in io.Reader, out, errw io.Writer, svc *control.Service) *REPL {
 	return &REPL{in: bufio.NewReader(in), Out: out, Err: errw, Svc: svc}
 }
 
+// prompt returns the REPL prompt. The colored form wraps the whole prompt in
+// one escape pair so a plain-text substring match still finds "box ▶ ".
+func (r *REPL) prompt() string {
+	if r.Color {
+		return "\x1b[1;32mbox ▶ \x1b[0m"
+	}
+	return "box ▶ "
+}
+
+// errText renders an error message, in red when the peer supports color.
+func (r *REPL) errText(msg string) string {
+	if r.Color {
+		return "\x1b[31m" + msg + "\x1b[0m"
+	}
+	return msg
+}
+
+// Banner prints the greeting shown once when an interactive session starts.
+func (r *REPL) Banner() {
+	welcome := "Welcome to box."
+	if r.Svc != nil && r.Svc.Domain != "" {
+		welcome = "Welcome to box — " + r.Svc.Domain + "."
+	}
+	help := "help"
+	if r.Color {
+		welcome = "\x1b[1m" + welcome + "\x1b[0m"
+		help = "\x1b[1m" + help + "\x1b[0m"
+	}
+	fmt.Fprintf(r.Out, "%s\n\nRun %s for the command list.\n\n", welcome, help)
+}
+
+// crlfWriter turns lone \n into \r\n. A PTY peer runs its terminal in raw
+// mode with output processing off, so the server must emit both bytes or
+// every line staircases into the previous one.
+type crlfWriter struct{ w io.Writer }
+
+// CRLF wraps w so newline-terminated output renders correctly on a raw PTY.
+// Sequences that already carry \r\n pass through unchanged.
+func CRLF(w io.Writer) io.Writer { return crlfWriter{w} }
+
+func (c crlfWriter) Write(p []byte) (int, error) {
+	if !bytes.Contains(p, []byte("\n")) {
+		return c.w.Write(p)
+	}
+	out := make([]byte, 0, len(p)+16)
+	for i, b := range p {
+		if b == '\n' && (i == 0 || p[i-1] != '\r') {
+			out = append(out, '\r')
+		}
+		out = append(out, b)
+	}
+	if _, err := c.w.Write(out); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
 // Loop reads lines until EOF. A command error is printed and the loop continues.
 func (r *REPL) Loop() error {
 	for {
 		if r.Interactive {
-			fmt.Fprint(r.Out, "box ▶ ")
+			fmt.Fprint(r.Out, r.prompt())
 		}
 		line, err := ReadLine(r.in, r.Out, r.Raw, r.Raw)
 		if err != nil && !errors.Is(err, io.EOF) {
@@ -48,9 +107,9 @@ func (r *REPL) Loop() error {
 		if line != "" {
 			argv, splitErr := Split(line)
 			if splitErr != nil {
-				fmt.Fprintln(r.Err, splitErr.Error())
+				fmt.Fprintln(r.Err, r.errText(splitErr.Error()))
 			} else if runErr := r.Exec(argv); runErr != nil {
-				fmt.Fprintln(r.Err, runErr.Error())
+				fmt.Fprintln(r.Err, r.errText(runErr.Error()))
 			}
 		}
 		if errors.Is(err, io.EOF) {
@@ -83,10 +142,18 @@ func ReadLine(in *bufio.Reader, out io.Writer, raw, echo bool) (string, error) {
 		}
 		switch {
 		case b == '\r' || b == '\n':
+			// A real terminal echoes the newline even with ECHO off; without
+			// it the command output starts on the prompt's line.
+			_, _ = io.WriteString(out, "\r\n")
 			return strings.TrimSpace(string(buf)), nil
 		case b == 0x03, b == 0x04 && len(buf) == 0: // ^C, ^D on an empty line
+			if echo && b == 0x03 {
+				_, _ = io.WriteString(out, "^C")
+			}
+			_, _ = io.WriteString(out, "\r\n")
 			return "", io.EOF
 		case b == 0x04: // ^D ends the line as typed
+			_, _ = io.WriteString(out, "\r\n")
 			return strings.TrimSpace(string(buf)), nil
 		case b == 0x08 || b == 0x7f: // backspace
 			for len(buf) > 0 {
@@ -120,7 +187,7 @@ func (r *REPL) Exec(argv []string) error {
 	name, args := pos[0], pos[1:]
 	if name == "node" || name == "image" || name == "key" || name == "env" {
 		if len(args) == 0 {
-			return fmt.Errorf("unknown command")
+			return fmt.Errorf("%q needs a subcommand — run help %s", name, name)
 		}
 		name = name + " " + args[0]
 		args = args[1:]
@@ -285,8 +352,10 @@ func (r *REPL) Exec(argv []string) error {
 			return err
 		}
 		return r.print(control.FormatDefaults(d, asJSON))
+	case "help":
+		return r.cmdHelp(pos)
 	default:
-		return errors.New("unknown command")
+		return fmt.Errorf("unknown command %q — run help", name)
 	}
 }
 
@@ -481,11 +550,11 @@ func (r *REPL) ask(prompt, def string) (string, error) {
 	} else {
 		fmt.Fprintf(r.Out, "%s: ", prompt)
 	}
-	line, err := r.in.ReadString('\n')
+	line, err := ReadLine(r.in, r.Out, r.Raw, r.Raw)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	line = strings.TrimSpace(strings.TrimRight(line, "\r\n"))
+	line = strings.TrimSpace(line)
 	if line == "" {
 		return def, nil
 	}
@@ -589,4 +658,149 @@ func Split(line string) ([]string, error) {
 		flush()
 	}
 	return args, nil
+}
+
+type helpEntry struct {
+	name  string
+	usage string
+	short string
+	subs  []helpEntry
+}
+
+var helpHelp = []helpEntry{
+	{
+		name: "Computers",
+		subs: []helpEntry{
+			{name: "new", usage: "new [name] [--image ref] [--node n] [--cpu 2] [--memory 2G] [--disk 20G]", short: "Create a computer; asks for anything missing"},
+			{name: "ssh", usage: "ssh <name>", short: "Open a shell inside a computer"},
+			{name: "ls", usage: "ls", short: "List computers"},
+			{name: "rm", usage: "rm <name>", short: "Destroy a computer; asks for the name again"},
+			{name: "restart", usage: "restart <name>", short: "Restart a computer"},
+			{name: "resize", usage: "resize <name> [--cpu 2] [--memory 4G] [--disk 40G]", short: "Change cpu, memory or disk; asks against current values"},
+			{name: "rename", usage: "rename <name> <new-name>", short: "Rename a computer"},
+			{name: "stat", usage: "stat <name>", short: "Show detail for one computer"},
+		},
+	},
+	{
+		name: "Nodes & images",
+		subs: []helpEntry{
+			{name: "node ls", usage: "node ls", short: "List deploy nodes"},
+			{name: "node pair", usage: "node pair", short: "Print the one-time code that joins a deploy node"},
+			{name: "node rm", usage: "node rm <name>", short: "Remove a deploy node"},
+			{name: "node tag", usage: "node tag <name> k=v ...", short: "Tag a node; new targets tags by default"},
+			{name: "image ls", usage: "image ls", short: "List computer images"},
+			{name: "image add", usage: "image add <name> <ref>", short: "Register an image reference"},
+			{name: "image pull", usage: "image pull <name> [node]", short: "Pull an image onto one node or every matching node"},
+			{name: "image rm", usage: "image rm <name>", short: "Remove an image"},
+			{name: "image default", usage: "image default <name>", short: "Make an image the default for new"},
+		},
+	},
+	{
+		name: "Keys & secrets",
+		subs: []helpEntry{
+			{name: "pair", usage: "pair", short: "Print a one-time password that adds your ssh key"},
+			{name: "key ls", usage: "key ls", short: "List paired ssh keys"},
+			{name: "key rm", usage: "key rm <fingerprint>", short: "Revoke an ssh key"},
+			{name: "key copy", usage: "key copy", short: "Print the server's GitHub public key and nothing else"},
+			{name: "env set", usage: "env set <name> <value>", short: "Store a secret, injected into every computer"},
+			{name: "env rm", usage: "env rm <name>", short: "Remove a secret"},
+			{name: "env ls", usage: "env ls", short: "List secret names; values are never printed"},
+			{name: "whoami", usage: "whoami", short: "Show the key this session authenticated with"},
+			{name: "defaults", usage: "defaults [k=v ...]", short: "Show or set default node, cpu, memory and disk"},
+		},
+	},
+	{
+		name: "Help",
+		subs: []helpEntry{
+			{name: "help", usage: "help [all | <command>]", short: "This help; help node covers every node subcommand"},
+		},
+	},
+}
+
+func (r *REPL) cmdHelp(pos []string) error {
+	switch {
+	case len(pos) == 1:
+		r.printHelpOverview()
+		return nil
+	case len(pos) == 2 && pos[1] == "all":
+		r.printHelpAll()
+		return nil
+	case len(pos) == 2:
+		return r.printHelpFor(pos[1])
+	default:
+		return errors.New("usage: help [all | <command>]")
+	}
+}
+
+func (r *REPL) printHelpOverview() {
+	bold, reset := "", ""
+	if r.Color {
+		bold, reset = "\x1b[1m", "\x1b[0m"
+	}
+	fmt.Fprintf(r.Out, "%sCommon commands:%s\n\n", bold, reset)
+	rows := []struct{ group, cmds string }{
+		{"Computers", "new  ssh  ls  rm  restart  resize  rename  stat"},
+		{"Nodes & images", "node†  image†"},
+		{"Keys & secrets", "pair  key†  env†  whoami  defaults"},
+		{"Help", "help"},
+	}
+	for _, row := range rows {
+		fmt.Fprintf(r.Out, "%s%-16s%s%s\n", bold, row.group, reset, row.cmds)
+	}
+	fmt.Fprintln(r.Out, "\n† marks a command with subcommands.")
+	dim := reset
+	if r.Color {
+		dim = "\x1b[2m"
+	}
+	fmt.Fprintf(r.Out, "%sRun help all for a list of all commands, help <command> for more detail.%s\n", dim, reset)
+}
+
+func helpLine(w io.Writer, usage, short string) {
+	if len(usage) > 28 {
+		fmt.Fprintf(w, "  %s\n      %s\n", usage, short)
+		return
+	}
+	fmt.Fprintf(w, "  %-28s%s\n", usage, short)
+}
+
+func (r *REPL) printHelpAll() {
+	bold, reset := "", ""
+	if r.Color {
+		bold, reset = "\x1b[1m", "\x1b[0m"
+	}
+	for _, group := range helpHelp {
+		fmt.Fprintf(r.Out, "%s%s:%s\n", bold, group.name, reset)
+		for _, e := range group.subs {
+			helpLine(r.Out, e.usage, e.short)
+		}
+		fmt.Fprintln(r.Out)
+	}
+}
+
+func (r *REPL) printHelpFor(name string) error {
+	name = strings.ToLower(name)
+	bold, reset := "", ""
+	if r.Color {
+		bold, reset = "\x1b[1m", "\x1b[0m"
+	}
+	for _, group := range helpHelp {
+		for _, e := range group.subs {
+			entry := e
+			if entry.name == name {
+				helpLine(r.Out, entry.usage, entry.short)
+				return nil
+			}
+			if fields := strings.Fields(entry.name); len(fields) > 1 && fields[0] == name {
+				fmt.Fprintf(r.Out, "%s%s:%s\n", bold, group.name, reset)
+				for _, sub := range group.subs {
+					if f := strings.Fields(sub.name); len(f) > 1 && f[0] == name {
+						helpLine(r.Out, sub.usage, sub.short)
+					}
+				}
+				fmt.Fprintln(r.Out)
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("no help for %q", name)
 }

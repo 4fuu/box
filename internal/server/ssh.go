@@ -106,47 +106,61 @@ func (h *sshServer) session(sess ssh.Session) {
 		_ = h.bridge(sess, user, true)
 		return
 	}
-	r := repl.New(sess, sess, sess.Stderr(), h.s.svc)
+	ptyReq, _, pty := sess.Pty()
+	out, errOut := io.Writer(sess), io.Writer(sess.Stderr())
+	if pty {
+		// A PTY peer runs its terminal raw with output processing off:
+		// server text must carry \r\n, and stderr merges into the one screen.
+		out = repl.CRLF(out)
+		errOut = out
+	}
+	r := repl.New(sess, out, errOut, h.s.svc)
 	r.Interactive = len(sess.Command()) == 0
 	r.Pub = sess.PublicKey()
 	r.Bridge = func(name string) error { return h.bridge(sess, name, false) }
 	if len(sess.Command()) == 0 {
-		_, _, pty := sess.Pty()
 		r.Raw = pty // a PTY peer sends \r and gets no echo: read with a line discipline
+		r.Color = pty && ptyReq.Term != "dumb"
+		r.Banner()
 		_ = r.Loop()
 		return
 	}
 	if err := r.Exec(sess.Command()); err != nil {
-		fmt.Fprintln(sess.Stderr(), err.Error())
+		fmt.Fprintln(errOut, err.Error())
 		_ = sess.Exit(1)
 	}
 }
 
 func (h *sshServer) readPassword(sess ssh.Session) bool {
+	_, _, pty := sess.Pty()
+	out, errOut := io.Writer(sess), io.Writer(sess.Stderr())
+	if pty {
+		out = repl.CRLF(out)
+		errOut = out
+	}
 	if len(sess.Command()) > 0 {
-		fmt.Fprintln(sess.Stderr(), "use pair+password to bind a key")
+		fmt.Fprintln(errOut, "use pair+password to bind a key")
 		_ = sess.Exit(1)
 		return false
 	}
-	fmt.Fprint(sess, "password: ")
-	_, _, pty := sess.Pty()
-	line, err := repl.ReadLine(bufio.NewReader(sess), sess, pty, false)
+	fmt.Fprint(out, "password: ")
+	line, err := repl.ReadLine(bufio.NewReader(sess), out, pty, false)
 	if err != nil {
 		_ = sess.Exit(1)
 		return false
 	}
 	if err := h.s.svc.ConsumeClient(line); err != nil {
-		fmt.Fprintln(sess.Stderr(), err.Error())
+		fmt.Fprintln(errOut, err.Error())
 		_ = sess.Exit(1)
 		return false
 	}
 	if sess.PublicKey() == nil {
-		fmt.Fprintln(sess.Stderr(), "no key")
+		fmt.Fprintln(errOut, "no key")
 		_ = sess.Exit(1)
 		return false
 	}
 	if err := h.s.svc.Bind(sess.PublicKey(), ""); err != nil {
-		fmt.Fprintln(sess.Stderr(), err.Error())
+		fmt.Fprintln(errOut, err.Error())
 		_ = sess.Exit(1)
 		return false
 	}
@@ -236,9 +250,15 @@ func (h *sshServer) defaultDial(ctx context.Context, computer string) (net.Conn,
 }
 
 func (h *sshServer) bridge(sess ssh.Session, computer string, closeSession bool) error {
+	// Server-generated errors need \r\n for a PTY peer and merge into its one
+	// screen; container I/O passes through as-is.
+	errOut := io.Writer(sess.Stderr())
+	if _, _, pty := sess.Pty(); pty {
+		errOut = repl.CRLF(sess)
+	}
 	client, err := h.clientFor(sess.Context(), computer)
 	if err != nil {
-		fmt.Fprintln(sess.Stderr(), err.Error())
+		fmt.Fprintln(errOut, err.Error())
 		if closeSession {
 			_ = sess.Exit(1)
 		}
@@ -246,7 +266,7 @@ func (h *sshServer) bridge(sess ssh.Session, computer string, closeSession bool)
 	}
 	bs, err := client.NewSession()
 	if err != nil {
-		fmt.Fprintln(sess.Stderr(), "unreachable")
+		fmt.Fprintln(errOut, "unreachable")
 		if closeSession {
 			_ = sess.Exit(1)
 		}
@@ -282,7 +302,7 @@ func (h *sshServer) bridge(sess ssh.Session, computer string, closeSession bool)
 		err = bs.Start(raw)
 	}
 	if err != nil {
-		fmt.Fprintln(sess.Stderr(), err.Error())
+		fmt.Fprintln(errOut, err.Error())
 		if closeSession {
 			_ = sess.Exit(1)
 		}

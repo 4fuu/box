@@ -502,7 +502,17 @@ func TestPairOverPTY(t *testing.T) {
 
 	readUntil(t, br, "password: ")
 	fmt.Fprintf(in, "%s\r", pass)
-	readUntil(t, br, "box ▶")
+	got := readUntil(t, br, "box ▶")
+	if !strings.Contains(got, "Welcome to box") {
+		t.Fatalf("no banner before prompt, got %q", got)
+	}
+	fmt.Fprint(in, "help\r")
+	got = readUntil(t, br, "† marks a command with subcommands")
+	if !strings.Contains(got, "Common commands:") || !strings.Contains(got, "\r\n") {
+		t.Fatalf("help output missing text or CRLF, got %q", got)
+	}
+	fmt.Fprint(in, "bogus\r")
+	readUntil(t, br, `unknown command "bogus"`)
 	fmt.Fprint(in, "ls\r")
 	readUntil(t, br, "NAME")
 	fmt.Fprint(in, "\x04")
@@ -516,7 +526,7 @@ func TestPairOverPTY(t *testing.T) {
 	}
 }
 
-func readUntil(t *testing.T, br *bufio.Reader, want string) {
+func readUntil(t *testing.T, br *bufio.Reader, want string) string {
 	t.Helper()
 	type result struct {
 		got string
@@ -554,10 +564,12 @@ func readUntil(t *testing.T, br *bufio.Reader, want string) {
 		if res.err != nil {
 			t.Fatalf("read until %q: got %q: %v", want, res.got, res.err)
 		}
+		return res.got
 	case <-time.After(10 * time.Second):
 		mu.Lock()
 		got := string(seen)
 		mu.Unlock()
 		t.Fatalf("timed out reading for %q, got %q", want, got)
+		return got
 	}
 }

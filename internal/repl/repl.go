@@ -860,7 +860,7 @@ var helpHelp = []helpEntry{
 			{name: "env rm", usage: "env rm <name>", short: "Remove a secret"},
 			{name: "env ls", usage: "env ls", short: "List secret names; values are never printed"},
 			{name: "whoami", usage: "whoami", short: "Show the key this session authenticated with"},
-			{name: "defaults", usage: "defaults [k=v ...]", short: "Show or set default node, cpu, memory and disk"},
+			{name: "defaults", usage: "defaults", short: "Show the default node, image and size that new uses"},
 		},
 	},
 	{

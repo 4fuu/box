@@ -22,6 +22,7 @@ type REPL struct {
 	Out         io.Writer
 	Err         io.Writer
 	Interactive bool
+	Raw         bool // the peer has a PTY: read lines with local line discipline
 	Svc         *control.Service
 	Bridge      func(name string) error
 	Pub         ssh.PublicKey
@@ -40,11 +41,10 @@ func (r *REPL) Loop() error {
 		if r.Interactive {
 			fmt.Fprint(r.Out, "box ▶ ")
 		}
-		line, err := r.in.ReadString('\n')
+		line, err := ReadLine(r.in, r.Out, r.Raw, r.Raw)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
-		line = strings.TrimSpace(strings.TrimRight(line, "\r\n"))
 		if line != "" {
 			argv, splitErr := Split(line)
 			if splitErr != nil {
@@ -55,6 +55,55 @@ func (r *REPL) Loop() error {
 		}
 		if errors.Is(err, io.EOF) {
 			return nil
+		}
+	}
+}
+
+// ReadLine reads one line of input. SSH servers get no terminal line
+// discipline for free: a client with a PTY runs its local terminal in raw
+// mode, so Enter arrives as \r and nothing is echoed back. When raw is true,
+// ReadLine does that work itself: \r and \n both end the line, backspace
+// deletes the last rune, ^C and ^D on an empty line return io.EOF, ^D on a
+// non-empty line ends it as typed, and printable input is echoed to out when
+// echo is true. When raw is false the client's terminal handles all of it and
+// ReadLine only splits on \n.
+func ReadLine(in *bufio.Reader, out io.Writer, raw, echo bool) (string, error) {
+	if !raw {
+		line, err := in.ReadString('\n')
+		return strings.TrimSpace(strings.TrimRight(line, "\r\n")), err
+	}
+	var buf []byte
+	for {
+		b, err := in.ReadByte()
+		if err != nil {
+			if len(buf) > 0 && errors.Is(err, io.EOF) {
+				return strings.TrimSpace(string(buf)), nil
+			}
+			return "", err
+		}
+		switch {
+		case b == '\r' || b == '\n':
+			return strings.TrimSpace(string(buf)), nil
+		case b == 0x03, b == 0x04 && len(buf) == 0: // ^C, ^D on an empty line
+			return "", io.EOF
+		case b == 0x04: // ^D ends the line as typed
+			return strings.TrimSpace(string(buf)), nil
+		case b == 0x08 || b == 0x7f: // backspace
+			for len(buf) > 0 {
+				last := buf[len(buf)-1]
+				buf = buf[:len(buf)-1]
+				if last&0xc0 != 0x80 { // dropped a whole rune
+					break
+				}
+			}
+			if echo {
+				fmt.Fprint(out, "\b \b")
+			}
+		case b >= 0x20: // printable; other control bytes are ignored
+			buf = append(buf, b)
+			if echo {
+				_, _ = out.Write([]byte{b})
+			}
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -441,3 +442,122 @@ func (f *fakeRuntime) ImageExists(context.Context, string) (bool, error) {
 	return true, nil
 }
 func (f *fakeRuntime) Stats(context.Context, string) (int64, int64, bool) { return 0, 0, false }
+
+// TestPairOverPTY walks the interactive pairing path the way stock OpenSSH
+// uses it: a PTY is allocated, so the client sends raw bytes and Enter
+// arrives as \r. The password prompt must accept it, bind the key, and drop
+// into the REPL, whose lines must also terminate on \r.
+func TestPairOverPTY(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	srv, err := server.Start(context.Background(), server.Config{
+		Domain:     "box.example.com",
+		DataDir:    dir,
+		SSHAddr:    "127.0.0.1:0",
+		HTTPAddr:   "127.0.0.1:0",
+		SocketPath: filepath.Join(dir, "box.sock"),
+		Stdout:     &buf,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	pass := passwordOf(t, buf.String())
+
+	signer, _, err := keys.GenerateSigner("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := ssh.Dial("tcp", srv.SSHAddr(), &ssh.ClientConfig{
+		User:            "box",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if err := sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	in, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Shell(); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(out)
+
+	readUntil(t, br, "password: ")
+	fmt.Fprintf(in, "%s\r", pass)
+	readUntil(t, br, "box ▶")
+	fmt.Fprint(in, "ls\r")
+	readUntil(t, br, "NAME")
+	fmt.Fprint(in, "\x04")
+	if err := sess.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	// The key is bound now: the plain exec path works without any password.
+	if _, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "ls"); err != nil {
+		t.Fatalf("exec after pair: %v %s", err, errOut)
+	}
+}
+
+func readUntil(t *testing.T, br *bufio.Reader, want string) {
+	t.Helper()
+	type result struct {
+		got string
+		err error
+	}
+	ch := make(chan result, 1)
+	var mu sync.Mutex
+	var seen []byte
+	go func() {
+		for {
+			mu.Lock()
+			done := strings.Contains(string(seen), want)
+			mu.Unlock()
+			if done {
+				break
+			}
+			b, err := br.ReadByte()
+			mu.Lock()
+			if err != nil {
+				got := string(seen)
+				mu.Unlock()
+				ch <- result{got, err}
+				return
+			}
+			seen = append(seen, b)
+			mu.Unlock()
+		}
+		mu.Lock()
+		got := string(seen)
+		mu.Unlock()
+		ch <- result{got, nil}
+	}()
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatalf("read until %q: got %q: %v", want, res.got, res.err)
+		}
+	case <-time.After(10 * time.Second):
+		mu.Lock()
+		got := string(seen)
+		mu.Unlock()
+		t.Fatalf("timed out reading for %q, got %q", want, got)
+	}
+}

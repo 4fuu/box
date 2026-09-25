@@ -111,6 +111,8 @@ func (h *sshServer) session(sess ssh.Session) {
 	r.Pub = sess.PublicKey()
 	r.Bridge = func(name string) error { return h.bridge(sess, name, false) }
 	if len(sess.Command()) == 0 {
+		_, _, pty := sess.Pty()
+		r.Raw = pty // a PTY peer sends \r and gets no echo: read with a line discipline
 		_ = r.Loop()
 		return
 	}
@@ -127,12 +129,13 @@ func (h *sshServer) readPassword(sess ssh.Session) bool {
 		return false
 	}
 	fmt.Fprint(sess, "password: ")
-	line, err := bufio.NewReader(sess).ReadString('\n')
+	_, _, pty := sess.Pty()
+	line, err := repl.ReadLine(bufio.NewReader(sess), sess, pty, false)
 	if err != nil {
 		_ = sess.Exit(1)
 		return false
 	}
-	if err := h.s.svc.ConsumeClient(strings.TrimSpace(line)); err != nil {
+	if err := h.s.svc.ConsumeClient(line); err != nil {
 		fmt.Fprintln(sess.Stderr(), err.Error())
 		_ = sess.Exit(1)
 		return false

@@ -317,6 +317,71 @@ func (s *Service) ListComputers() ([]ComputerView, error) {
 	return out, nil
 }
 
+// PortalView is one claim. It has no secrets.
+type PortalView struct {
+	Label    string `json:"label"`
+	Host     string `json:"host"`
+	Computer string `json:"computer"`
+	Port     int    `json:"port"`
+}
+
+// Snapshot is the dashboard's view of the server.
+// Env is names only. Pending joins do not include approval codes.
+type Snapshot struct {
+	Domain    string         `json:"domain"`
+	Computers []ComputerView `json:"computers"`
+	Pending   []PendingView  `json:"pending"`
+	Portals   []PortalView   `json:"portals"`
+	Keys      []KeyView      `json:"keys"`
+	Env       []string       `json:"env"`
+}
+
+// Snapshot gathers the lists the TUI shows. One call, no secret values.
+func (s *Service) Snapshot() (Snapshot, error) {
+	snap := Snapshot{Domain: s.Domain}
+	comps, err := s.ListComputers()
+	if err != nil {
+		return snap, err
+	}
+	snap.Computers = comps
+	pending := s.Pending()
+	if pending == nil {
+		pending = []PendingView{}
+	}
+	snap.Pending = pending
+	ports, err := s.Store.ListPortals()
+	if err != nil {
+		return snap, err
+	}
+	snap.Portals = make([]PortalView, 0, len(ports))
+	for _, p := range ports {
+		snap.Portals = append(snap.Portals, PortalView{
+			Label: portalLabel(p.Hostname, s.Domain), Host: p.Hostname,
+			Computer: p.Computer, Port: p.Port,
+		})
+	}
+	keys, err := s.Keys()
+	if err != nil {
+		return snap, err
+	}
+	snap.Keys = keys
+	names, err := s.EnvNames()
+	if err != nil {
+		return snap, err
+	}
+	if names == nil {
+		names = []string{}
+	}
+	snap.Env = names
+	if snap.Computers == nil {
+		snap.Computers = []ComputerView{}
+	}
+	if snap.Keys == nil {
+		snap.Keys = []KeyView{}
+	}
+	return snap, nil
+}
+
 func (s *Service) liveGet(name string) *tunnel.Conn {
 	if s.Live == nil {
 		return nil

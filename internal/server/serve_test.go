@@ -446,6 +446,43 @@ func TestUnsignedPublicKeyDoesNotBurnPairing(t *testing.T) {
 	}
 }
 
+func TestLocalSnapshotOmitsSecrets(t *testing.T) {
+	dir := t.TempDir()
+	start(t, dir, "box.example.com", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
+	sock := filepath.Join(dir, "box.sock")
+	const secretValue = "super-secret-value"
+	var msg struct {
+		Message string `json:"message"`
+	}
+	if err := localCall(t, sock, "env_set", map[string]string{"name": "TOKEN", "value": secretValue}, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(msg.Message, secretValue) {
+		t.Fatal(msg.Message)
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := rpc.Write(conn, rpc.Message{Op: "snapshot"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := rpc.Read(conn)
+	if err != nil || !got.OK {
+		t.Fatalf("%v %s", err, got.Error)
+	}
+	body := string(got.Body)
+	if strings.Contains(body, secretValue) {
+		t.Fatal(body)
+	}
+	for _, want := range []string{`"env"`, "TOKEN", `"computers"`, `"pending"`, `"portals"`, `"keys"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("snapshot missing %q: %s", want, body)
+		}
+	}
+}
+
 func TestPairOverPTY(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
@@ -502,20 +539,11 @@ func TestPairOverPTY(t *testing.T) {
 
 	readUntil(t, br, "password: ")
 	fmt.Fprintf(in, "%s\r", pass)
-	got := readUntil(t, br, "box ▶")
-	if !strings.Contains(got, "Welcome to box") {
-		t.Fatalf("no banner before prompt, got %q", got)
+	got := readUntil(t, br, "PORTALS")
+	if !strings.Contains(got, "NAME") || !strings.Contains(got, "ONLINE") || !strings.Contains(got, "\r\n") {
+		t.Fatalf("tui missing the computer table, got %q", got)
 	}
-	fmt.Fprint(in, "help\r")
-	got = readUntil(t, br, " marks a command with subcommands")
-	if !strings.Contains(got, "Common commands:") || !strings.Contains(got, "\r\n") {
-		t.Fatalf("help output missing text or CRLF, got %q", got)
-	}
-	fmt.Fprint(in, "bogus\r")
-	readUntil(t, br, `unknown command "bogus"`)
-	fmt.Fprint(in, "ls\r")
-	readUntil(t, br, "NAME")
-	fmt.Fprint(in, "\x04")
+	fmt.Fprint(in, "q")
 	if err := sess.Wait(); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}

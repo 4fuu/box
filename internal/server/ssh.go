@@ -15,6 +15,7 @@ import (
 
 	"github.com/4fuu/box/internal/repl"
 	"github.com/4fuu/box/internal/store"
+	"github.com/4fuu/box/internal/tui"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
 	gossh "golang.org/x/crypto/ssh"
@@ -201,33 +202,104 @@ func (h *sshServer) serveBootstrap(sess ssh.Session) {
 }
 
 func (h *sshServer) serveREPL(sess ssh.Session) {
-	ptyReq, _, pty := sess.Pty()
+	ptyReq, winch, pty := sess.Pty()
+	if len(sess.Command()) == 0 {
+		h.serveTUI(sess, ptyReq, winch, pty)
+		return
+	}
 	out, errOut := io.Writer(sess), io.Writer(sess.Stderr())
 	if pty {
 		out = repl.CRLF(out)
 		errOut = out
 	}
 	r := repl.New(sess, out, errOut, h.s.svc)
-	r.Interactive = len(sess.Command()) == 0
 	r.Pub = sess.PublicKey()
 	if sess.RemoteAddr() != nil {
 		r.From = sess.RemoteAddr().String()
 	}
 	r.Bridge = func(name string) error { return h.bridge(sess, name, false) }
-	if len(sess.Command()) == 0 {
-		r.Raw = pty
-		r.Color = pty && ptyReq.Term != "dumb"
-		r.Width = ptyReq.Window.Width
-		r.Banner()
-		_ = r.Loop()
-		return
-	}
 	if err := r.Exec(sess.Command()); err != nil {
 		if errors.Is(err, repl.ErrExit) {
 			return
 		}
 		fmt.Fprintln(errOut, err.Error())
 		_ = sess.Exit(1)
+	}
+}
+
+// serveTUI is the interactive control session. A shell opened from it uses
+// the same bridge as `ssh <name>`; the TUI does not speak SSH itself.
+func (h *sshServer) serveTUI(sess ssh.Session, ptyReq ssh.Pty, winch <-chan ssh.Window, pty bool) {
+	from := ""
+	if sess.RemoteAddr() != nil {
+		from = sess.RemoteAddr().String()
+	}
+	id := ""
+	if key := sess.PublicKey(); key != nil {
+		id, _ = h.s.svc.WhoAmI(key)
+	}
+	var mu sync.Mutex
+	var onWin func(ssh.Window)
+	if pty && winch != nil {
+		go func() {
+			for w := range winch {
+				mu.Lock()
+				fn := onWin
+				mu.Unlock()
+				if fn != nil {
+					fn(w)
+				}
+			}
+		}()
+	}
+	setWinch := func(fn func(ssh.Window)) {
+		mu.Lock()
+		onWin = fn
+		mu.Unlock()
+	}
+	in := newSessionInput(sess)
+	notice := ""
+	ctx := sess.Context()
+	for {
+		reader := in.attach()
+		resize := make(chan tui.Size, 4)
+		setWinch(func(w ssh.Window) {
+			select {
+			case resize <- tui.Size{Width: w.Width, Height: w.Height}:
+			default:
+			}
+		})
+		cfg := tui.Config{
+			Context: ctx, In: reader, Out: sess,
+			Backend:    tui.ServiceBackend{Svc: h.s.svc, From: from},
+			AllowShell: true, Identity: id, Notice: notice,
+			Width: ptyReq.Window.Width, Height: ptyReq.Window.Height,
+			Resize: resize,
+		}
+		if pty {
+			cfg.Term = ptyReq.Term
+			cfg.Environ = append(append([]string{}, sess.Environ()...), "TERM="+ptyReq.Term)
+		}
+		name, err := tui.Run(cfg)
+		setWinch(nil)
+		notice = ""
+		if err != nil {
+			in.detach()
+			errOut := io.Writer(sess.Stderr())
+			if pty {
+				errOut = repl.CRLF(sess)
+			}
+			fmt.Fprintln(errOut, err.Error())
+			_ = sess.Exit(1)
+			return
+		}
+		if name == "" {
+			in.detach()
+			return
+		}
+		if err := h.bridgeIO(sess, name, false, in.attach(), setWinch); err != nil {
+			notice = err.Error()
+		}
 	}
 }
 
@@ -244,7 +316,7 @@ func (h *sshServer) readPassword(sess ssh.Session) bool {
 		return false
 	}
 	fmt.Fprint(out, "password: ")
-	line, err := repl.ReadLine(bufio.NewReader(sess), out, pty, false)
+	line, err := repl.ReadSecret(bufio.NewReader(sess), out, pty)
 	if err != nil {
 		_ = sess.Exit(1)
 		return false
@@ -365,6 +437,15 @@ func parseHostKey(line string) (gossh.PublicKey, error) {
 }
 
 func (h *sshServer) bridge(sess ssh.Session, computer string, closeSession bool) error {
+	return h.bridgeIO(sess, computer, closeSession, nil, nil)
+}
+
+// bridgeIO splices to the computer. stdin nil reads the session. setWinch, when
+// set, receives window changes because the TUI already owns the pty channel.
+func (h *sshServer) bridgeIO(sess ssh.Session, computer string, closeSession bool, stdin io.Reader, setWinch func(func(ssh.Window))) error {
+	if stdin == nil {
+		stdin = sess
+	}
 	errOut := io.Writer(sess.Stderr())
 	if _, _, pty := sess.Pty(); pty {
 		errOut = repl.CRLF(sess)
@@ -388,13 +469,20 @@ func (h *sshServer) bridge(sess ssh.Session, computer string, closeSession bool)
 	defer bs.Close()
 	if pty, winch, ok := sess.Pty(); ok {
 		_ = bs.RequestPty(pty.Term, pty.Window.Height, pty.Window.Width, gossh.TerminalModes{})
-		go func() {
-			for win := range winch {
-				_ = bs.WindowChange(win.Height, win.Width)
-			}
-		}()
+		if setWinch != nil {
+			setWinch(func(w ssh.Window) {
+				_ = bs.WindowChange(w.Height, w.Width)
+			})
+			defer setWinch(nil)
+		} else {
+			go func() {
+				for win := range winch {
+					_ = bs.WindowChange(win.Height, win.Width)
+				}
+			}()
+		}
 	}
-	bs.Stdin = sess
+	bs.Stdin = stdin
 	stdout, err := bs.StdoutPipe()
 	if err != nil {
 		return err

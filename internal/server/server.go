@@ -557,6 +557,9 @@ func (s *Server) local(op string, body json.RawMessage) (any, error) {
 		return s.svc.Stat(context.Background(), req.Name)
 	case "status":
 		return s.svc.Status()
+	case "snapshot":
+		// One read of the lists the dashboard draws. No env values, no codes.
+		return s.svc.Snapshot()
 	default:
 		return nil, errors.New("unknown command")
 	}

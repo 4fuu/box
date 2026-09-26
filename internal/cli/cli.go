@@ -86,8 +86,11 @@ func runGuest(o Options) error {
 
 func runHost(o Options) error {
 	if len(o.Args) == 0 {
-		fmt.Fprint(o.Stderr, hostUsage)
-		return errUsage
+		if !socketUp(o.ServerSocket) {
+			fmt.Fprint(o.Stderr, hostUsage)
+			return errUsage
+		}
+		return dashboard(o)
 	}
 	switch o.Args[0] {
 	case "serve":
@@ -112,6 +115,7 @@ func runHost(o Options) error {
 }
 
 const hostUsage = `usage:
+  box
   box serve --domain <domain> [--ssh-addr addr] [--http-addr addr] [--quic-addr addr]
   box pair
   box node

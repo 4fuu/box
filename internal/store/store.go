@@ -577,6 +577,29 @@ func (s *Store) PortalsByComputer(name string) ([]Portal, error) {
 	return out, nil
 }
 
+// ListPortals returns every claim, ordered by hostname.
+func (s *Store) ListPortals() ([]Portal, error) {
+	rows, err := s.db.Query(`SELECT hostname, computer, port, claimed_at FROM portals ORDER BY hostname`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Portal{}
+	for rows.Next() {
+		var p Portal
+		var at string
+		if err := rows.Scan(&p.Hostname, &p.Computer, &p.Port, &at); err != nil {
+			return nil, err
+		}
+		p.ClaimedAt, err = time.Parse(time.RFC3339Nano, at)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ReleasePortal drops a claim the computer holds. Another computer's claim is left alone.
 func (s *Store) ReleasePortal(hostname, computer string) error {
 	res, err := s.db.Exec(`DELETE FROM portals WHERE hostname = ? AND computer = ?`, hostname, computer)

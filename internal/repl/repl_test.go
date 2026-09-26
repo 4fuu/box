@@ -1,12 +1,14 @@
 package repl
 
 import (
-	"bufio"
 	"bytes"
-	"errors"
-	"io"
 	"strings"
 	"testing"
+
+	"github.com/4fuu/box/internal/approve"
+	"github.com/4fuu/box/internal/control"
+	"github.com/4fuu/box/internal/secret"
+	"github.com/4fuu/box/internal/store"
 )
 
 func TestCRLFWriter(t *testing.T) {
@@ -32,48 +34,6 @@ func TestCRLFWriterPassthrough(t *testing.T) {
 	}
 	if got := buf.String(); got != "no newlines" {
 		t.Fatalf("got %q", got)
-	}
-}
-
-func TestReadLineRawEchoesNewline(t *testing.T) {
-	var out bytes.Buffer
-	line, err := ReadLine(bufio.NewReader(strings.NewReader("ls\r")), &out, true, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if line != "ls" {
-		t.Fatalf("line = %q, want %q", line, "ls")
-	}
-	if got := out.String(); got != "ls\r\n" {
-		t.Fatalf("echo = %q, want %q", got, "ls\r\n")
-	}
-}
-
-func TestReadLineRawNoEchoStillEndsLine(t *testing.T) {
-	var out bytes.Buffer
-	line, err := ReadLine(bufio.NewReader(strings.NewReader("secret\r")), &out, true, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if line != "secret" {
-		t.Fatalf("line = %q", line)
-	}
-	if got := out.String(); got != "\r\n" {
-		t.Fatalf("echo = %q, want only the newline", got)
-	}
-}
-
-func TestReadLineRawCtrlD(t *testing.T) {
-	var out bytes.Buffer
-	if _, err := ReadLine(bufio.NewReader(strings.NewReader("\x04")), &out, true, true); !errors.Is(err, io.EOF) {
-		t.Fatalf("^D on empty line: err = %v, want io.EOF", err)
-	}
-	line, err := ReadLine(bufio.NewReader(strings.NewReader("partial\x04")), &out, true, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if line != "partial" {
-		t.Fatalf("^D mid-line: line = %q, want %q", line, "partial")
 	}
 }
 
@@ -121,4 +81,66 @@ func TestExecHelp(t *testing.T) {
 	if err := r.Exec([]string{"key"}); err == nil || !strings.Contains(err.Error(), "needs a subcommand") {
 		t.Fatalf("bare key: err = %v, want needs-a-subcommand", err)
 	}
+}
+
+func TestPlainAndJSONLists(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/box.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	svc := &control.Service{
+		Store: st, Domain: "box.example.com", Queue: approve.New(), Live: control.NewLive(),
+	}
+	if err := st.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AddPortal("home", "web", 3000); err != nil {
+		t.Fatal(err)
+	}
+	const secretValue = "ghp_secret_value"
+	if _, err := svc.SetEnv("GH_TOKEN", secretValue); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BindKey("ssh-ed25519 AAAACLIENT laptop", "laptop", "SHA256:laptop"); err != nil {
+		t.Fatal(err)
+	}
+	const code = "a3Kf9Q"
+	if err := svc.Queue.Submit("laptop", "9.9.9.9:1", "bob", secret.Hash(code)); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	r := &REPL{Out: &buf, Err: &buf, Svc: svc}
+
+	check := func(argv []string, want []string, forbid []string) {
+		t.Helper()
+		buf.Reset()
+		if err := r.Exec(argv); err != nil {
+			t.Fatal(argv, err)
+		}
+		got := buf.String()
+		if strings.Contains(got, "\x1b") {
+			t.Fatalf("%v has color: %q", argv, got)
+		}
+		for _, s := range want {
+			if !strings.Contains(got, s) {
+				t.Fatalf("%v missing %q:\n%s", argv, s, got)
+			}
+		}
+		for _, s := range forbid {
+			if s != "" && strings.Contains(got, s) {
+				t.Fatalf("%v leaked %q:\n%s", argv, s, got)
+			}
+		}
+	}
+
+	check([]string{"ls"}, []string{"NAME", "ONLINE", "USER", "ADDRESS", "AGENT", "PORTALS", "home", "alice", "web"}, []string{secretValue, code})
+	check([]string{"ls", "--json"}, []string{`"name":"home"`, `"online":false`, `"user":"alice"`, `"web"`}, []string{secretValue, code, "\x1b"})
+	check([]string{"pending"}, []string{"NAME", "ADDRESS", "laptop", "bob"}, []string{code, secret.Hash(code), secretValue})
+	check([]string{"--json", "pending"}, []string{`"name":"laptop"`, `"user":"bob"`}, []string{code, secret.Hash(code)})
+	check([]string{"env", "ls"}, []string{"GH_TOKEN"}, []string{secretValue})
+	check([]string{"env", "ls", "--json"}, []string{`"names"`, "GH_TOKEN"}, []string{secretValue})
+	check([]string{"key", "ls"}, []string{"SHA256:laptop", "laptop"}, []string{secretValue, "AAAACLIENT"})
+	check([]string{"key", "ls", "--json"}, []string{`"fingerprint":"SHA256:laptop"`, `"comment":"laptop"`}, []string{secretValue, "AAAACLIENT"})
 }

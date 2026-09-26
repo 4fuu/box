@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -229,6 +230,45 @@ func TestFormatStat(t *testing.T) {
 	}
 	if !strings.Contains(text, "0.5") || !strings.Contains(text, "uptime") {
 		t.Fatal(text)
+	}
+}
+
+func TestSnapshotOmitsSecrets(t *testing.T) {
+	svc := newSvc(t)
+	const value = "super-secret-value"
+	if _, err := svc.SetEnv("TOKEN", value); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Store.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AddPortal("home", "web", 3000); err != nil {
+		t.Fatal(err)
+	}
+	code := "a3Kf9Q"
+	if err := svc.Queue.Submit("laptop", "9.9.9.9:1", "bob", secret.Hash(code)); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := svc.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Contains(text, value) || strings.Contains(text, code) || strings.Contains(text, secret.Hash(code)) {
+		t.Fatal(text)
+	}
+	if snap.Domain != "box.example.com" || len(snap.Computers) != 1 || snap.Computers[0].Name != "home" {
+		t.Fatalf("%+v", snap)
+	}
+	if len(snap.Portals) != 1 || snap.Portals[0].Label != "web" || snap.Portals[0].Port != 3000 {
+		t.Fatalf("%+v", snap.Portals)
+	}
+	if len(snap.Pending) != 1 || snap.Pending[0].Name != "laptop" || len(snap.Env) != 1 || snap.Env[0] != "TOKEN" {
+		t.Fatalf("%+v", snap)
 	}
 }
 

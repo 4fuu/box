@@ -238,6 +238,7 @@ func TestRun(t *testing.T) {
 		"AA":   "one",
 		"A\"B": "nope",
 		"NL":   "no\npe",
+		"BS":   `a\b`,
 	}}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -252,8 +253,8 @@ func TestRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantKeys := "" +
-		`environment="AA=one" environment="ZZ=s3cret value" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake one` + "\n" +
-		`environment="AA=one" environment="ZZ=s3cret value" ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ two` + "\n"
+		`environment="AA=one",environment="ZZ=s3cret value" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake one` + "\n" +
+		`environment="AA=one",environment="ZZ=s3cret value" ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ two` + "\n"
 	if string(keysRaw) != wantKeys {
 		t.Fatalf("keys:\n%s", keysRaw)
 	}
@@ -364,6 +365,17 @@ func TestRun(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), secretValue) {
 		t.Fatal("env value logged")
+	}
+	accessRaw := mustRead(t, filepath.Join(dir, accessFileName))
+	if !strings.Contains(accessRaw, secretValue) {
+		t.Fatal("env was not persisted")
+	}
+	afi, err := os.Stat(filepath.Join(dir, accessFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afi.Mode().Perm() != 0o600 {
+		t.Fatalf("access mode %o", afi.Mode().Perm())
 	}
 	walkNoSecret(t, dir, secretValue)
 
@@ -540,17 +552,98 @@ func TestRunKeepsStateOnNetworkError(t *testing.T) {
 }
 
 func TestFormatKeyLine(t *testing.T) {
-	env := map[string]string{"ZZ": "two", "AA": "one", "A\"B": "x", "NL": "a\nb", "CR": "a\rb"}
+	env := map[string]string{"ZZ": "two", "AA": "one", "A\"B": "x", "NL": "a\nb", "CR": "a\rb", "BS": `a\b`}
 	got := formatKeyLine("ssh-ed25519 AAAA comment", env)
-	want := `environment="AA=one" environment="ZZ=two" ssh-ed25519 AAAA comment`
+	want := `environment="AA=one",environment="ZZ=two" ssh-ed25519 AAAA comment`
 	if got != want {
 		t.Fatalf("got %s", got)
+	}
+	if strings.Contains(got, `\`) || strings.Contains(got, "A\"B") {
+		t.Fatalf("escaped pair leaked: %s", got)
+	}
+	opt := formatKeyLine(`no-port-forwarding ssh-ed25519 AAAA`, map[string]string{"AA": "one"})
+	if opt != `environment="AA=one",no-port-forwarding ssh-ed25519 AAAA` {
+		t.Fatalf("options %s", opt)
 	}
 	if formatKeyLine("  \n", env) != "" {
 		t.Fatal("blank line")
 	}
 	if formatKeyLine("ssh-ed25519 AAAA", nil) != "ssh-ed25519 AAAA" {
 		t.Fatal("no env")
+	}
+}
+
+func TestAccessKeepsBothSets(t *testing.T) {
+	dir := t.TempDir()
+	setHome(t, dir)
+	a := &agent{dir: dir, env: map[string]string{}}
+	keysBody, err := json.Marshal(tunnel.KeysRequest{AuthorizedKeys: []string{"ssh-ed25519 AAAA one"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.onControl(tunnel.OpKeys, keysBody); err != nil {
+		t.Fatal(err)
+	}
+	b := &agent{dir: dir}
+	if err := b.loadAndRewrite(); err != nil {
+		t.Fatal(err)
+	}
+	envBody, err := json.Marshal(tunnel.EnvRequest{Vars: map[string]string{"AA": "one"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.onControl(tunnel.OpEnv, envBody); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRead(t, filepath.Join(dir, ".ssh", "box_authorized_keys"))
+	want := "environment=\"AA=one\" ssh-ed25519 AAAA one\n"
+	if got != want {
+		t.Fatalf("after env push:\n%s", got)
+	}
+	c := &agent{dir: dir}
+	if err := c.loadAndRewrite(); err != nil {
+		t.Fatal(err)
+	}
+	keysBody, err = json.Marshal(tunnel.KeysRequest{AuthorizedKeys: []string{"restrict ssh-rsa BBB two"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.onControl(tunnel.OpKeys, keysBody); err != nil {
+		t.Fatal(err)
+	}
+	got = mustRead(t, filepath.Join(dir, ".ssh", "box_authorized_keys"))
+	want = "environment=\"AA=one\",restrict ssh-rsa BBB two\n"
+	if got != want {
+		t.Fatalf("after keys push:\n%s", got)
+	}
+	fi, err := os.Stat(filepath.Join(dir, accessFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("access mode %o", fi.Mode().Perm())
+	}
+}
+
+func TestPushDoesNotCommitOnWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	setHome(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".ssh"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &agent{dir: dir, env: map[string]string{"KEEP": "yes"}}
+	body, err := json.Marshal(tunnel.KeysRequest{AuthorizedKeys: []string{"ssh-ed25519 AAAA"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.onControl(tunnel.OpKeys, body); err == nil {
+		t.Fatal("expected write failure")
+	}
+	if len(a.keys) != 0 || a.env["KEEP"] != "yes" {
+		t.Fatalf("memory changed keys=%v env=%v", a.keys, a.env)
+	}
+	if _, err := os.Stat(filepath.Join(dir, accessFileName)); !os.IsNotExist(err) {
+		t.Fatal("access.json written", err)
 	}
 }
 
@@ -580,6 +673,16 @@ func TestSSHDConfig(t *testing.T) {
 	if !strings.HasPrefix(got, "# c\n"+sshdKeysLine+"\nMatch User x\n") {
 		t.Fatalf("match insert: %q", got)
 	}
+	eq := "AuthorizedKeysFile=.ssh/authorized_keys\n"
+	got, changed = addBoxAuthorizedKeys(eq)
+	if !changed || strings.Count(got, "AuthorizedKeysFile") != 1 || !strings.Contains(got, boxAuthorizedKeys) {
+		t.Fatalf("equals form: %q changed %v", got, changed)
+	}
+	already := "AuthorizedKeysFile=.ssh/authorized_keys .ssh/box_authorized_keys\n"
+	got, changed = addBoxAuthorizedKeys(already)
+	if changed || got != already {
+		t.Fatalf("equals already present: %q changed %v", got, changed)
+	}
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sshd_config")
@@ -598,6 +701,20 @@ func TestSSHDConfig(t *testing.T) {
 	}
 	if strings.Count(string(body), boxAuthorizedKeys) != 1 {
 		t.Fatalf("file %s", body)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Fatalf("mode %o", fi.Mode().Perm())
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".sshd-config-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temp left behind: %v", matches)
 	}
 }
 
@@ -852,7 +969,7 @@ func walkNoSecret(t *testing.T, dir, secretValue string) {
 		if err != nil || d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
-		if strings.HasSuffix(path, "box_authorized_keys") {
+		if strings.HasSuffix(path, "box_authorized_keys") || strings.HasSuffix(path, accessFileName) {
 			return nil
 		}
 		b, err := os.ReadFile(path)

@@ -102,6 +102,9 @@ func Run(ctx context.Context, stateDir string) error {
 		return err
 	}
 	a := &agent{dir: stateDir, ctx: ctx, comp: comp, env: map[string]string{}}
+	if err := a.loadAndRewrite(); err != nil {
+		return err
+	}
 	_ = installSkill(stateDir)
 	if err := a.listen(); err != nil {
 		return err

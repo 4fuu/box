@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -135,8 +136,8 @@ func (a *agent) onControl(op string, body json.RawMessage) (any, error) {
 		}
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		a.keys = append([]string(nil), req.AuthorizedKeys...)
-		return nil, writeAuthorizedKeys(a.keys, a.env)
+		keys := append([]string(nil), req.AuthorizedKeys...)
+		return nil, a.commitAccess(keys, a.env)
 	case tunnel.OpEnv:
 		var req tunnel.EnvRequest
 		if err := decodeBody(body, &req); err != nil {
@@ -144,8 +145,7 @@ func (a *agent) onControl(op string, body json.RawMessage) (any, error) {
 		}
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		a.env = copyEnv(req.Vars)
-		return nil, writeAuthorizedKeys(a.keys, a.env)
+		return nil, a.commitAccess(a.keys, maps.Clone(req.Vars))
 	case tunnel.OpStat:
 		return readStat(), nil
 	default:

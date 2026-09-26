@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
-	"unicode"
 )
 
 // sshdConfigPath is the sshd config box join edits when it can write it.
@@ -28,12 +28,11 @@ func ensureSSHD(out io.Writer) {
 }
 
 func updateSSHD(path string) error {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	info, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	body, err := io.ReadAll(f)
+	body, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
@@ -41,14 +40,42 @@ func updateSSHD(path string) error {
 	if !changed {
 		return nil
 	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	n, err := f.WriteString(next)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".sshd-config-*")
 	if err != nil {
 		return err
 	}
-	return f.Truncate(int64(n))
+	tmpName := tmp.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.WriteString(next); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	ok = true
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // addBoxAuthorizedKeys returns the file contents and whether they changed.
@@ -111,9 +138,17 @@ func sshdKeyword(line string) (key, args string, ok bool) {
 	if s == "" || strings.HasPrefix(s, "#") {
 		return "", "", false
 	}
-	i := strings.IndexFunc(s, unicode.IsSpace)
-	if i < 0 {
-		return s, "", true
+	i := strings.IndexAny(s, " \t=")
+	if i <= 0 {
+		if i < 0 {
+			return s, "", true
+		}
+		return "", "", false
 	}
-	return s[:i], strings.TrimSpace(s[i:]), true
+	key = s[:i]
+	rest := strings.TrimSpace(s[i:])
+	if strings.HasPrefix(rest, "=") {
+		rest = strings.TrimSpace(rest[1:])
+	}
+	return key, rest, true
 }

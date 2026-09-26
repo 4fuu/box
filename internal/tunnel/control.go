@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/4fuu/box/internal/rpc"
 	"github.com/quic-go/quic-go"
@@ -33,10 +34,12 @@ type control struct {
 	cond    *sync.Cond
 
 	pending    map[string]chan rpc.Message
+	dropped    map[string]struct{} // cancelled calls; a late response is not a request
 	handler    Handler
 	handlerSet bool
 	err        error
 	closed     chan struct{}
+	broken     bool // writeMu; a failed write must not be followed by another frame
 
 	prefix string
 	seq    atomic.Uint64
@@ -70,13 +73,12 @@ func (c *control) nextID() string {
 }
 
 func (c *control) Call(ctx context.Context, op string, req, resp any) error {
-	c.mu.Lock()
-	if c.err != nil {
-		err := c.err
-		c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	c.mu.Unlock()
+	if c.failed() {
+		return c.deadErr()
+	}
 
 	var body json.RawMessage
 	if req != nil {
@@ -86,6 +88,10 @@ func (c *control) Call(ctx context.Context, op string, req, resp any) error {
 		}
 		body = raw
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	id := c.nextID()
 	ch := make(chan rpc.Message, 1)
 	c.mu.Lock()
@@ -94,11 +100,24 @@ func (c *control) Call(ctx context.Context, op string, req, resp any) error {
 		c.mu.Unlock()
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	if err := c.write(rpc.Message{ID: id, Op: op, Body: body}); err != nil {
-		c.forget(id)
+	if err := c.write(ctx, rpc.Message{ID: id, Op: op, Body: body}); err != nil {
+		if c.failed() {
+			// The frame may have left the process. Keep the id until the
+			// matching response shows up so it is not handled as a request.
+			c.abandon(id)
+		} else {
+			c.forget(id)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return err
 	}
 
@@ -107,7 +126,7 @@ func (c *control) Call(ctx context.Context, op string, req, resp any) error {
 		c.forget(id)
 		return decodeResp(m, resp)
 	case <-ctx.Done():
-		go c.forgetWhen(id, ch)
+		c.abandon(id)
 		return ctx.Err()
 	case <-c.closed:
 		c.forget(id)
@@ -121,14 +140,22 @@ func (c *control) forget(id string) {
 	c.mu.Unlock()
 }
 
-// forgetWhen drops the waiter only after the response arrives or the stream dies,
-// so a late response is not dispatched as a new request.
-func (c *control) forgetWhen(id string, ch <-chan rpc.Message) {
-	select {
-	case <-ch:
-	case <-c.closed:
+// abandon keeps id out of the request path without a goroutine per call.
+// deliver drops it when the response arrives.
+func (c *control) abandon(id string) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	if c.dropped == nil {
+		c.dropped = make(map[string]struct{})
 	}
-	c.forget(id)
+	c.dropped[id] = struct{}{}
+	c.mu.Unlock()
+}
+
+func (c *control) failed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err != nil
 }
 
 func (c *control) deadErr() error {
@@ -140,15 +167,61 @@ func (c *control) deadErr() error {
 	return errClosed
 }
 
-func (c *control) write(m rpc.Message) error {
+func (c *control) write(ctx context.Context, m rpc.Message) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	err := c.writeLocked(ctx, m)
+	c.writeMu.Unlock()
+	if err != nil && c.failed() {
+		c.fail(err)
+	}
+	return err
+}
+
+// writeLocked runs under writeMu. A context cancel unblocks a stalled Write
+// so handler responses are not stuck behind it. Any short write closes the
+// session: the frame is no longer framed.
+func (c *control) writeLocked(ctx context.Context, m rpc.Message) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.broken {
+		return errClosed
+	}
 	select {
 	case <-c.closed:
 		return errClosed
 	default:
 	}
-	return rpc.Write(c.stream, m)
+
+	var mu sync.Mutex
+	writing := true
+	stop := context.AfterFunc(ctx, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if writing {
+			_ = c.stream.SetWriteDeadline(time.Now())
+		}
+	})
+	err := rpc.Write(c.stream, m)
+	mu.Lock()
+	writing = false
+	_ = c.stream.SetWriteDeadline(time.Time{})
+	mu.Unlock()
+	stop()
+
+	if err != nil {
+		c.broken = true
+		if ctx.Err() != nil {
+			c.shutdown(err)
+			return ctx.Err()
+		}
+		c.shutdown(err)
+		return err
+	}
+	return nil
 }
 
 func (c *control) readLoop() {
@@ -157,7 +230,7 @@ func (c *control) readLoop() {
 		if err == nil {
 			err = errClosed
 		}
-		c.shutdown(err)
+		c.fail(err)
 	}()
 	for {
 		var m rpc.Message
@@ -176,6 +249,11 @@ func (c *control) deliver(m rpc.Message) bool {
 		return false
 	}
 	c.mu.Lock()
+	if _, ok := c.dropped[m.ID]; ok {
+		delete(c.dropped, m.ID)
+		c.mu.Unlock()
+		return true
+	}
 	ch := c.pending[m.ID]
 	c.mu.Unlock()
 	if ch == nil {
@@ -204,7 +282,7 @@ func (c *control) dispatch(m rpc.Message) {
 		if dead {
 			resp.Error = "closed"
 		}
-		_ = c.write(resp)
+		_ = c.write(context.Background(), resp)
 		return
 	}
 	out, herr := h(m.Op, m.Body)
@@ -220,7 +298,9 @@ func (c *control) dispatch(m rpc.Message) {
 			resp.Body = raw
 		}
 	}
-	_ = c.write(resp)
+	if err := c.write(context.Background(), resp); err != nil {
+		return
+	}
 }
 
 func (c *control) shutdown(err error) {
@@ -239,11 +319,18 @@ func (c *control) shutdown(err error) {
 }
 
 func (c *control) Close() error {
-	c.shutdown(errClosed)
-	// Cancel unblocks a Write still holding the stream, which Close must not race.
+	c.fail(errClosed)
+	return nil
+}
+
+// fail marks the control stream dead and closes the QUIC connection.
+// CancelWrite runs before any lock the stalled Write holds, so writeMu cannot
+// stay taken across a cancel.
+func (c *control) fail(err error) {
+	c.shutdown(err)
 	c.stream.CancelWrite(0)
 	c.stream.CancelRead(0)
-	return c.qconn.CloseWithError(0, "closed")
+	_ = c.qconn.CloseWithError(0, "closed")
 }
 
 func decodeResp(m rpc.Message, resp any) error {

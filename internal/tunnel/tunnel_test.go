@@ -413,6 +413,206 @@ func TestBackoff(t *testing.T) {
 	}
 }
 
+func TestQUICConfig(t *testing.T) {
+	cfg := quicConfig()
+	if cfg.KeepAlivePeriod <= 0 {
+		t.Fatal("keepalive disabled")
+	}
+	if cfg.MaxIdleTimeout <= 30*time.Second {
+		t.Fatalf("idle timeout %s", cfg.MaxIdleTimeout)
+	}
+	if cfg.KeepAlivePeriod >= cfg.MaxIdleTimeout/2 {
+		t.Fatalf("keepalive %s idle %s", cfg.KeepAlivePeriod, cfg.MaxIdleTimeout)
+	}
+}
+
+func TestCloseDuringHello(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	cert, fp, err := NewCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := Listen("127.0.0.1:0", cert, func(Identity) (HelloResult, error) {
+		close(started)
+		<-release
+		return HelloResult{Domain: "box.example.com", HTTPPort: 80}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	accErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c, err := srv.Accept(ctx)
+		if c != nil {
+			_ = c.Close()
+			accErr <- errors.New("accept returned a conn after close")
+			return
+		}
+		accErr <- err
+	}()
+
+	sess := dial(t, srv.Addr(), fp)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = sess.Hello(ctx, testID())
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hello did not start")
+	}
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sess.qconn.Context().Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("quic connection still open during hello")
+	}
+	close(release)
+	if err := <-accErr; err == nil {
+		t.Fatal("accept succeeded after close")
+	}
+}
+
+func TestControlFailureClosesQUIC(t *testing.T) {
+	srv, fp := newTestServer(t, "secret")
+	acc := acceptAsync(srv)
+	sess := dial(t, srv.Addr(), fp)
+	helloOK(t, sess, testID())
+	got := <-acc
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	conn := got.c
+	t.Cleanup(func() { _ = conn.Close() })
+
+	if _, err := conn.ctrl.stream.Write([]byte("{not json\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sess.qconn.Context().Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("client connection still open")
+	}
+	select {
+	case <-conn.ctrl.qconn.Context().Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("server connection still open")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := conn.OpenSSH(ctx); err == nil {
+		t.Fatal("ssh opened after control failure")
+	}
+}
+
+func TestCallAlreadyCancelled(t *testing.T) {
+	srv, fp := newTestServer(t, "secret")
+	acc := acceptAsync(srv)
+	sess := dial(t, srv.Addr(), fp)
+	helloOK(t, sess, testID())
+	got := <-acc
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	conn := got.c
+	t.Cleanup(func() { _ = conn.Close() })
+
+	var mu sync.Mutex
+	var labels []string
+	conn.Handle(func(op string, body json.RawMessage) (any, error) {
+		var req PortalCheckRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		labels = append(labels, req.Label)
+		mu.Unlock()
+		return PortalCheckResponse{Free: true}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sess.Call(ctx, OpPortalCheck, PortalCheckRequest{Label: "nope"}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("call: %v", err)
+	}
+	if sess.ctrl.seq.Load() != 0 || len(sess.ctrl.pending) != 0 || len(sess.ctrl.dropped) != 0 {
+		t.Fatal("cancelled call registered or sent")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var resp PortalCheckResponse
+	if err := sess.Call(ctx, OpPortalCheck, PortalCheckRequest{Label: "web"}, &resp); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(labels) != 1 || labels[0] != "web" || !resp.Free {
+		t.Fatalf("labels %v resp %+v", labels, resp)
+	}
+}
+
+func TestCloseWrite(t *testing.T) {
+	srv, fp := newTestServer(t, "secret")
+	acc := acceptAsync(srv)
+	sess := dial(t, srv.Addr(), fp)
+	helloOK(t, sess, testID())
+	got := <-acc
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	conn := got.c
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ssh, err := conn.OpenSSH(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ssh.Close()
+	kind, _, peer, err := sess.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	if kind != KindSSH {
+		t.Fatalf("kind %s", kind)
+	}
+	cw, ok := ssh.(interface{ CloseWrite() error })
+	if !ok {
+		t.Fatal("missing CloseWrite")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	_ = ssh.SetDeadline(deadline)
+	_ = peer.SetDeadline(deadline)
+	if _, err := ssh.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cw.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(peer, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("read %q %v", buf, err)
+	}
+	if n, err := peer.Read(buf); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("half-close n=%d err=%v", n, err)
+	}
+	if _, err := peer.Write([]byte("pong")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(ssh, buf); err != nil || string(buf) != "pong" {
+		t.Fatalf("read after CloseWrite %q %v", buf, err)
+	}
+}
+
 func TestBodyShape(t *testing.T) {
 	raw, err := json.Marshal(HelloBody{
 		Version: 1, Name: "home", Token: "t", User: "alice",

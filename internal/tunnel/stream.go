@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -40,11 +41,39 @@ func (c *streamConn) Close() error {
 	return c.str.Close()
 }
 
+// CloseWrite finishes the send side and leaves the response readable.
+func (c *streamConn) CloseWrite() error { return c.str.Close() }
+
 func (c *streamConn) LocalAddr() net.Addr                { return c.local }
 func (c *streamConn) RemoteAddr() net.Addr               { return c.remote }
 func (c *streamConn) SetDeadline(t time.Time) error      { return c.str.SetDeadline(t) }
 func (c *streamConn) SetReadDeadline(t time.Time) error  { return c.str.SetReadDeadline(t) }
 func (c *streamConn) SetWriteDeadline(t time.Time) error { return c.str.SetWriteDeadline(t) }
+
+func writeHeaderCtx(ctx context.Context, st *quic.Stream, kind string, port int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var mu sync.Mutex
+	writing := true
+	stop := context.AfterFunc(ctx, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if writing {
+			_ = st.SetWriteDeadline(time.Now())
+		}
+	})
+	err := writeHeader(st, kind, port)
+	mu.Lock()
+	writing = false
+	_ = st.SetWriteDeadline(time.Time{})
+	mu.Unlock()
+	stop()
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
 
 func writeHeader(w io.Writer, kind string, port int) error {
 	var line string

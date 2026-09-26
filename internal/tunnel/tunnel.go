@@ -18,13 +18,28 @@ import (
 
 const appRefused quic.ApplicationErrorCode = 1
 
+// quicConfig keeps an idle computer up. quic-go otherwise uses a 30s idle
+// timeout and sends no keep-alive, so a quiet tunnel is closed. The effective
+// idle timeout is the minimum of both peers, so Listen and Dial share this.
+// Keep-alives are under half the idle timeout; quic-go clamps them to that.
+func quicConfig() *quic.Config {
+	return &quic.Config{
+		MaxIdleTimeout:  2 * time.Minute,
+		KeepAlivePeriod: 10 * time.Second,
+	}
+}
+
 // Server accepts computers that dial in.
 type Server struct {
 	ln      *quic.Listener
 	onHello func(Identity) (HelloResult, error)
+	base    context.Context
+	cancel  context.CancelFunc
 
-	mu    sync.Mutex
-	conns map[*Conn]struct{}
+	mu     sync.Mutex
+	closed bool
+	conns  map[*Conn]struct{}
+	early  map[*quic.Conn]struct{} // accepted, hello not finished
 }
 
 // Listen serves QUIC on addr. onHello returning an error refuses that computer.
@@ -33,14 +48,18 @@ func Listen(addr string, cert tls.Certificate, onHello func(Identity) (HelloResu
 	if onHello == nil {
 		return nil, errors.New("nil hello handler")
 	}
-	ln, err := quic.ListenAddr(addr, serverTLS(cert), nil)
+	ln, err := quic.ListenAddr(addr, serverTLS(cert), quicConfig())
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
 		ln:      ln,
 		onHello: onHello,
+		base:    ctx,
+		cancel:  cancel,
 		conns:   map[*Conn]struct{}{},
+		early:   map[*quic.Conn]struct{}{},
 	}, nil
 }
 
@@ -58,10 +77,27 @@ func (s *Server) Addr() string { return s.ln.Addr().String() }
 // Accept waits for one computer, completes hello, and returns its connection.
 // The QUIC connection is closed when hello is refused.
 func (s *Server) Accept(ctx context.Context) (*Conn, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if stop := context.AfterFunc(s.base, cancel); stop != nil {
+		defer stop()
+	}
+
 	qconn, err := s.ln.Accept(ctx)
 	if err != nil {
 		return nil, err
 	}
+	if err := s.begin(qconn); err != nil {
+		_ = qconn.CloseWithError(0, "closed")
+		return nil, err
+	}
+	releaseEarly := true
+	defer func() {
+		if releaseEarly {
+			s.end(qconn)
+		}
+	}()
+
 	st, err := qconn.AcceptStream(ctx)
 	if err != nil {
 		_ = qconn.CloseWithError(appRefused, "no control stream")
@@ -73,18 +109,27 @@ func (s *Server) Accept(ctx context.Context) (*Conn, error) {
 		_ = qconn.CloseWithError(appRefused, "hello")
 		return nil, err
 	}
+	if err := s.blocked(ctx); err != nil {
+		releaseEarly = false
+		s.refuse(qconn, st, m, err)
+		return nil, err
+	}
 	id, result, herr := s.checkHello(m)
 	if herr != nil {
-		refuse(qconn, st, m, herr)
+		releaseEarly = false
+		s.refuse(qconn, st, m, herr)
 		return nil, herr
 	}
-	if err := ctx.Err(); err != nil {
-		refuse(qconn, st, m, err)
+	// Close during onHello must not publish a live Conn.
+	if err := s.blocked(ctx); err != nil {
+		releaseEarly = false
+		s.refuse(qconn, st, m, err)
 		return nil, err
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
-		refuse(qconn, st, m, err)
+		releaseEarly = false
+		s.refuse(qconn, st, m, err)
 		return nil, err
 	}
 	if err := rpc.Write(st, rpc.Message{Op: OpHello, ID: m.ID, OK: true, Body: raw}); err != nil {
@@ -92,11 +137,22 @@ func (s *Server) Accept(ctx context.Context) (*Conn, error) {
 		return nil, err
 	}
 	ctrl := newControl(qconn, st, dec, "s")
+	c := &Conn{srv: s, ctrl: ctrl, id: id}
+	if err := s.track(c); err != nil {
+		_ = qconn.CloseWithError(0, "closed")
+		return nil, err
+	}
 	ctrl.start()
 	go rejectClientStreams(qconn)
-	c := &Conn{srv: s, ctrl: ctrl, id: id}
-	s.track(c)
 	return c, nil
+}
+
+// blocked reports server shutdown or caller cancellation before hello succeeds.
+func (s *Server) blocked(ctx context.Context) error {
+	if err := s.errIfClosed(); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func (s *Server) checkHello(m rpc.Message) (Identity, HelloResult, error) {
@@ -125,11 +181,15 @@ func (s *Server) checkHello(m rpc.Message) (Identity, HelloResult, error) {
 }
 
 // refuse writes the error and closes the QUIC connection once the peer can read it.
-func refuse(qconn *quic.Conn, st *quic.Stream, m rpc.Message, herr error) {
+// q stays in early until then, so Server.Close does not leave it running.
+func (s *Server) refuse(qconn *quic.Conn, st *quic.Stream, m rpc.Message, herr error) {
 	_ = rpc.Write(st, rpc.Message{Op: m.Op, ID: m.ID, OK: false, Error: herr.Error()})
 	_ = st.Close()
 	go func() {
-		defer func() { _ = qconn.CloseWithError(appRefused, herr.Error()) }()
+		defer func() {
+			_ = qconn.CloseWithError(appRefused, herr.Error())
+			s.end(qconn)
+		}()
 		_ = st.SetReadDeadline(time.Now().Add(5 * time.Second))
 		var buf [1]byte
 		_, _ = st.Read(buf[:])
@@ -147,13 +207,42 @@ func rejectClientStreams(qconn *quic.Conn) {
 	}
 }
 
-func (s *Server) track(c *Conn) {
+func (s *Server) begin(q *quic.Conn) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conns == nil {
-		s.conns = map[*Conn]struct{}{}
+	if s.closed {
+		return errClosed
+	}
+	s.early[q] = struct{}{}
+	return nil
+}
+
+func (s *Server) end(q *quic.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.early, q)
+}
+
+func (s *Server) errIfClosed() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errClosed
+	}
+	return nil
+}
+
+// track publishes c. A shutdown that already won closes nothing here;
+// the caller closes qconn and Accept returns an error.
+func (s *Server) track(c *Conn) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.early, c.ctrl.qconn)
+	if s.closed {
+		return errClosed
 	}
 	s.conns[c] = struct{}{}
+	return nil
 }
 
 func (s *Server) untrack(c *Conn) {
@@ -162,15 +251,26 @@ func (s *Server) untrack(c *Conn) {
 	delete(s.conns, c)
 }
 
-// Close stops the listener and the computers accepted on it.
+// Close stops the listener and every QUIC connection, including hellos still in flight.
 func (s *Server) Close() error {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
 	conns := s.conns
+	early := s.early
 	s.conns = nil
+	s.early = nil
 	s.mu.Unlock()
+	s.cancel()
 	err := s.ln.Close()
 	for c := range conns {
 		_ = c.ctrl.Close()
+	}
+	for q := range early {
+		_ = q.CloseWithError(0, "closed")
 	}
 	return err
 }
@@ -205,7 +305,7 @@ func (c *Conn) open(ctx context.Context, kind string, port int) (net.Conn, error
 	if err != nil {
 		return nil, err
 	}
-	if err := writeHeader(st, kind, port); err != nil {
+	if err := writeHeaderCtx(ctx, st, kind, port); err != nil {
 		st.CancelRead(0)
 		st.CancelWrite(0)
 		return nil, err
@@ -234,7 +334,7 @@ type Session struct {
 // Dial checks the server leaf against fingerprint and returns before hello.
 // A wrong pin fails the handshake.
 func Dial(ctx context.Context, addr, fingerprint string) (*Session, error) {
-	qconn, err := quic.DialAddr(ctx, addr, clientTLS(fingerprint), nil)
+	qconn, err := quic.DialAddr(ctx, addr, clientTLS(fingerprint), quicConfig())
 	if err != nil {
 		return nil, err
 	}

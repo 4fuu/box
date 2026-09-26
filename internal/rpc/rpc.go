@@ -10,6 +10,9 @@ import (
 )
 
 type Message struct {
+	// ID matches a response to a request when both sides write on one stream.
+	// Empty on the node and guest sockets.
+	ID    string          `json:"id,omitempty"`
 	Op    string          `json:"op"`
 	OK    bool            `json:"ok"`
 	Error string          `json:"error,omitempty"`

@@ -309,13 +309,13 @@ func TestCompleteLineCommands(t *testing.T) {
 
 func TestCompleteLineSubcommands(t *testing.T) {
 	r := &REPL{}
-	got := r.completeLine("node ", 5)
-	if len(got) == 0 || !isSorted(got) || !contains(got, "pair") {
-		t.Fatalf("node subcommands: %q", got)
+	got := r.completeLine("key ", 4)
+	if len(got) == 0 || !isSorted(got) || !contains(got, "ls") || !contains(got, "rm") {
+		t.Fatalf("key subcommands: %q", got)
 	}
-	got = r.completeLine("image p", 7)
-	if !reflect.DeepEqual(got, []string{"pull"}) {
-		t.Fatalf("image p: %q", got)
+	got = r.completeLine("env s", 5)
+	if !reflect.DeepEqual(got, []string{"set"}) {
+		t.Fatalf("env s: %q", got)
 	}
 }
 
@@ -332,8 +332,8 @@ func TestCompleteLineFlags(t *testing.T) {
 	if got := r.completeLine("ssh -", 5); !reflect.DeepEqual(got, []string{"--json"}) {
 		t.Fatalf(`ssh -: got %q, want ["--json"]`, got)
 	}
-	if got := r.completeLine("new --i", 7); !reflect.DeepEqual(got, []string{"--image"}) {
-		t.Fatalf(`new --i: got %q, want ["--image"]`, got)
+	if got := r.completeLine("env --j", 7); !reflect.DeepEqual(got, []string{"--json"}) {
+		t.Fatalf(`env --j: got %q, want ["--json"]`, got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/4fuu/box/internal/paths"
 	"github.com/4fuu/box/internal/repl"
+	"github.com/4fuu/box/internal/store"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
 	gossh "golang.org/x/crypto/ssh"
@@ -22,8 +23,9 @@ import (
 type ctxKey struct{ name string }
 
 var (
-	needPasswordKey = &ctxKey{"need-password"}
-	backendKey      = &ctxKey{"backend"}
+	routeKey   = &ctxKey{"route"}
+	hashKey    = &ctxKey{"join-hash"}
+	backendKey = &ctxKey{"backend"}
 )
 
 type sshServer struct {
@@ -37,6 +39,7 @@ func newSSH(s *Server, hostKey string) (*sshServer, error) {
 		wish.WithAddress(s.cfg.SSHAddr),
 		wish.WithHostKeyPath(hostKey),
 		wish.WithPublicKeyAuth(h.publicKey),
+		wish.WithPasswordAuth(h.password),
 	)
 	if err != nil {
 		return nil, err
@@ -67,59 +70,121 @@ func (h *sshServer) close() {
 
 func (h *sshServer) publicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 	user := ctx.User()
-	bound, err := h.s.svc.HasKey(key)
-	if err != nil {
-		return false
-	}
-	if strings.HasPrefix(user, "pair+") {
-		if err := h.s.svc.ConsumeClient(strings.TrimPrefix(user, "pair+")); err != nil {
+	class, rest := classifyUser(user)
+	if class == classPair {
+		if err := h.s.svc.ConsumeClient(rest); err != nil {
 			return false
 		}
-		if err := h.s.svc.Bind(key, ""); err != nil {
+		if key == nil || h.s.svc.Bind(key, "") != nil {
 			return false
 		}
 		h.s.svc.PushKeys(ctx)
-		return true
 	}
-	if h.s.svc.IsComputer(user) {
-		return bound
+	bound := false
+	if key != nil {
+		ok, err := h.s.svc.HasKey(key)
+		if err != nil {
+			return false
+		}
+		bound = ok
 	}
-	if bound {
-		return true
+	live := false
+	if class == classREPL && !bound {
+		ok, err := h.s.store.HasLivePairing()
+		if err != nil {
+			return false
+		}
+		live = ok
 	}
-	live, err := h.s.store.HasLivePairing("client")
-	if err != nil || !live {
+	computer := class == classOther && h.s.svc.IsComputer(user)
+	accept, route := publicKeyDecision(class, bound, live, computer)
+	if !accept {
 		return false
 	}
-	ctx.SetValue(needPasswordKey, true)
+	ctx.SetValue(routeKey, route)
+	return true
+}
+
+func (h *sshServer) password(ctx ssh.Context, password string) bool {
+	user := ctx.User()
+	class, _ := classifyUser(user)
+	tokenOK := false
+	if class == classOther {
+		ok, err := h.s.store.TokenMatches(user, password)
+		if err != nil || !ok {
+			return false
+		}
+		tokenOK = true
+	}
+	accept, route := passwordDecision(class, isHex64(password), tokenOK)
+	if !accept {
+		return false
+	}
+	ctx.SetValue(routeKey, route)
+	if route == routeJoin {
+		ctx.SetValue(hashKey, password)
+	}
 	return true
 }
 
 func (h *sshServer) session(sess ssh.Session) {
-	if sess.Context().Value(needPasswordKey) == true {
+	switch sess.Context().Value(routeKey) {
+	case routeJoin:
+		h.serveJoin(sess)
+	case routeBoot:
+		h.serveBootstrap(sess)
+	case routeBind:
 		if !h.readPassword(sess) {
 			return
 		}
+		h.serveREPL(sess)
+	case routeSplice:
+		_ = h.bridge(sess, sess.User(), true)
+	default:
+		user := sess.User()
+		if h.s.svc.IsComputer(user) {
+			_ = h.bridge(sess, user, true)
+			return
+		}
+		if user == "" || user == "box" || strings.HasPrefix(user, "pair+") {
+			h.serveREPL(sess)
+			return
+		}
+		fmt.Fprintln(sess.Stderr(), "unknown computer")
+		_ = sess.Exit(1)
 	}
-	user := sess.User()
-	if h.s.svc.IsComputer(user) {
-		_ = h.bridge(sess, user, true)
+}
+
+func (h *sshServer) serveBootstrap(sess ssh.Session) {
+	if _, err := h.s.store.Computer(sess.User()); err != nil {
+		_ = sess.Exit(1)
 		return
 	}
+	_ = json.NewEncoder(sess).Encode(map[string]any{
+		"quic":        h.s.quicEndpoint(),
+		"fingerprint": h.s.fingerprint,
+		"domain":      h.s.svc.Domain,
+		"http_port":   h.s.httpPort,
+	})
+	_ = sess.Exit(0)
+}
+
+func (h *sshServer) serveREPL(sess ssh.Session) {
 	ptyReq, _, pty := sess.Pty()
 	out, errOut := io.Writer(sess), io.Writer(sess.Stderr())
 	if pty {
-		// A PTY peer runs its terminal raw with output processing off:
-		// server text must carry \r\n, and stderr merges into the one screen.
 		out = repl.CRLF(out)
 		errOut = out
 	}
 	r := repl.New(sess, out, errOut, h.s.svc)
 	r.Interactive = len(sess.Command()) == 0
 	r.Pub = sess.PublicKey()
+	if sess.RemoteAddr() != nil {
+		r.From = sess.RemoteAddr().String()
+	}
 	r.Bridge = func(name string) error { return h.bridge(sess, name, false) }
 	if len(sess.Command()) == 0 {
-		r.Raw = pty // a PTY peer sends \r and gets no echo: read with a line discipline
+		r.Raw = pty
 		r.Color = pty && ptyReq.Term != "dumb"
 		r.Width = ptyReq.Window.Width
 		r.Banner()
@@ -200,62 +265,75 @@ func (h *sshServer) clientFor(ctx ssh.Context, computer string) (*gossh.Client, 
 }
 
 func (h *sshServer) dial(ctx context.Context, computer string) (*gossh.Client, error) {
-	var conn net.Conn
-	var pub gossh.PublicKey
-	var err error
-	if h.s.cfg.Backend != nil {
-		conn, pub, err = h.s.cfg.Backend(ctx, computer)
-	} else {
-		conn, pub, err = h.defaultDial(ctx, computer)
+	if !h.s.svc.IsComputer(computer) {
+		return nil, fmt.Errorf("computer %s not found", computer)
 	}
+	live := h.s.svc.Live.Get(computer)
+	if live == nil {
+		return nil, errors.New("computer is offline")
+	}
+	rec, err := h.s.store.Computer(computer)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("computer %s not found", computer)
+		}
 		return nil, err
 	}
-	want := pub
+	user := rec.LoginUser
+	if user == "" {
+		user = live.Identity().User
+	}
+	if user == "" {
+		return nil, errors.New("computer has no login user")
+	}
+	hostLine := live.Identity().HostKey
+	if hostLine == "" {
+		hostLine = rec.HostKey
+	}
+	want, err := parseHostKey(hostLine)
+	if err != nil {
+		return nil, errors.New("host key mismatch")
+	}
+	raw, err := live.OpenSSH(ctx)
+	if err != nil {
+		return nil, errors.New("computer is offline")
+	}
+	_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
 	cfg := &gossh.ClientConfig{
-		User: paths.LoginUser,
-		Auth: []gossh.AuthMethod{gossh.PublicKeys(h.s.github)},
+		User: user,
+		Auth: []gossh.AuthMethod{gossh.PublicKeys(h.s.splice)},
 		HostKeyCallback: func(_ string, _ net.Addr, got gossh.PublicKey) error {
-			if want == nil || got == nil || !keysEqual(want, got) {
+			if got == nil || !keysEqual(want, got) {
 				return errors.New("host key mismatch")
 			}
 			return nil
 		},
 	}
-	cc, chans, reqs, err := gossh.NewClientConn(conn, computer, cfg)
+	cc, chans, reqs, err := gossh.NewClientConn(raw, computer, cfg)
 	if err != nil {
-		conn.Close()
+		raw.Close()
+		if strings.Contains(err.Error(), "host key") {
+			return nil, errors.New("host key mismatch")
+		}
 		return nil, err
 	}
+	_ = raw.SetDeadline(time.Time{})
 	return gossh.NewClient(cc, chans, reqs), nil
 }
 
-func (h *sshServer) defaultDial(ctx context.Context, computer string) (net.Conn, gossh.PublicKey, error) {
-	if h.s.cfg.Dial == nil {
-		return nil, nil, fmt.Errorf("node is unreachable")
-	}
-	id, err := h.s.svc.NodeID(computer)
-	if err != nil {
-		return nil, nil, err
-	}
-	line, err := h.s.svc.HostPublicKey(ctx, computer)
-	if err != nil {
-		return nil, nil, err
+func parseHostKey(line string) (gossh.PublicKey, error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, errors.New("missing host key")
 	}
 	pub, _, _, _, err := gossh.ParseAuthorizedKey([]byte(line))
 	if err != nil {
-		return nil, nil, errors.New("host key mismatch")
+		return nil, err
 	}
-	conn, err := h.s.cfg.Dial(ctx, id, "ssh/"+computer)
-	if err != nil {
-		return nil, nil, fmt.Errorf("node is unreachable")
-	}
-	return conn, pub, nil
+	return pub, nil
 }
 
 func (h *sshServer) bridge(sess ssh.Session, computer string, closeSession bool) error {
-	// Server-generated errors need \r\n for a PTY peer and merge into its one
-	// screen; container I/O passes through as-is.
 	errOut := io.Writer(sess.Stderr())
 	if _, _, pty := sess.Pty(); pty {
 		errOut = repl.CRLF(sess)
@@ -270,7 +348,7 @@ func (h *sshServer) bridge(sess ssh.Session, computer string, closeSession bool)
 	}
 	bs, err := client.NewSession()
 	if err != nil {
-		fmt.Fprintln(errOut, "unreachable")
+		fmt.Fprintln(errOut, "computer is offline")
 		if closeSession {
 			_ = sess.Exit(1)
 		}
@@ -375,7 +453,7 @@ func (h *sshServer) directTCP(srv *ssh.Server, conn *gossh.ServerConn, newChan g
 	}
 	client, err := h.clientFor(ctx, ctx.User())
 	if err != nil {
-		newChan.Reject(gossh.ConnectionFailed, "unreachable")
+		newChan.Reject(gossh.ConnectionFailed, "computer is offline")
 		return
 	}
 	dest := net.JoinHostPort(d.DestAddr, fmt.Sprintf("%d", d.DestPort))

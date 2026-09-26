@@ -9,7 +9,7 @@ func TestComputer(t *testing.T) {
 			t.Fatalf("%s: %v", n, err)
 		}
 	}
-	bad := []string{"", "box", "pair", "a+b", "a.b", "Web", "-a", "a-", "has space", "a/b"}
+	bad := []string{"", "box", "pair", "join", "a+b", "a.b", "Web", "-a", "a-", "has space", "a/b"}
 	for _, n := range bad {
 		if err := Computer(n); err == nil {
 			t.Fatalf("%s should be rejected", n)
@@ -17,6 +17,9 @@ func TestComputer(t *testing.T) {
 	}
 	if err := Computer("box"); err == nil || err.Error() != "name box is reserved" {
 		t.Fatalf("box: %v", err)
+	}
+	if err := Computer("join"); err == nil || err.Error() != "name join is reserved" {
+		t.Fatalf("join: %v", err)
 	}
 }
 

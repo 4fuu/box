@@ -13,7 +13,6 @@ import (
 	"unicode"
 
 	"github.com/4fuu/box/internal/control"
-	"github.com/4fuu/box/internal/size"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -28,7 +27,7 @@ var ErrExit = errors.New("exit")
 var errInterrupt = errors.New("line interrupted")
 
 // REPL runs one command or a prompt loop. Output for a person goes to Out.
-// --json selects the script form. key copy writes only the public key.
+// --json selects the script form for lists.
 type REPL struct {
 	in          *bufio.Reader
 	Out         io.Writer
@@ -40,6 +39,7 @@ type REPL struct {
 	Svc         *control.Service
 	Bridge      func(name string) error
 	Pub         ssh.PublicKey
+	From        string // remote address, for approve rate limits
 }
 
 func New(in io.Reader, out, errw io.Writer, svc *control.Service) *REPL {
@@ -184,7 +184,7 @@ func (r *REPL) completeLine(line string, cur int) []string {
 		return filterPrefix(commandNames(), prefix)
 	}
 	switch fields[0] {
-	case "node", "image", "key", "env":
+	case "key", "env":
 		if wordIdx == 1 {
 			return filterPrefix(subcommandNames(fields[0]), prefix)
 		}
@@ -207,19 +207,9 @@ func (r *REPL) completeLine(line string, cur int) []string {
 	}
 }
 
-// flagsFor lists the flags a top-level command accepts, sorted. parseArgv
-// accepts the size and placement flags on every command; only new and
-// resize act on all of them.
+// flagsFor lists the flags a top-level command accepts, sorted.
 func flagsFor(command string) []string {
-	flags := []string{"--json"}
-	switch command {
-	case "new":
-		flags = append(flags, "--image", "--node", "--cpu", "--memory", "--disk")
-	case "resize":
-		flags = append(flags, "--cpu", "--memory", "--disk")
-	}
-	sort.Strings(flags)
-	return flags
+	return []string{"--json"}
 }
 
 // commandNames lists every top-level command name, sorted.
@@ -263,7 +253,7 @@ func (r *REPL) objectNames(cmd string, argIdx int) []string {
 	var names []string
 	var err error
 	switch cmd {
-	case "ssh", "rm", "restart", "stat", "resize", "rename":
+	case "ssh", "rm", "stat", "rename":
 		if argIdx == 0 {
 			var views []control.ComputerView
 			if views, err = r.Svc.ListComputers(); err == nil {
@@ -272,29 +262,6 @@ func (r *REPL) objectNames(cmd string, argIdx int) []string {
 				}
 			}
 		}
-	case "node rm", "node tag":
-		if argIdx == 0 {
-			var views []control.NodeView
-			if views, err = r.Svc.ListNodes(); err == nil {
-				for _, v := range views {
-					names = append(names, v.Name)
-				}
-			}
-		}
-	case "image rm", "image default":
-		if argIdx == 0 {
-			var views []control.ImageView
-			if views, err = r.Svc.ListImages(); err == nil {
-				for _, v := range views {
-					names = append(names, v.Name)
-				}
-			}
-		}
-	case "image pull":
-		if argIdx == 1 {
-			return r.objectNames("node rm", 0)
-		}
-		return r.objectNames("image rm", 0)
 	case "env rm":
 		if argIdx == 0 {
 			names, err = r.Svc.EnvNames()
@@ -322,7 +289,7 @@ func filterPrefix(names []string, prefix string) []string {
 
 // Exec runs one already-split command. The error is not written; the caller prints it.
 func (r *REPL) Exec(argv []string) error {
-	pos, flags, asJSON, err := parseArgv(argv)
+	pos, _, asJSON, err := parseArgv(argv)
 	if err != nil {
 		return err
 	}
@@ -330,7 +297,7 @@ func (r *REPL) Exec(argv []string) error {
 		return errors.New("unknown command")
 	}
 	name, args := pos[0], pos[1:]
-	if name == "node" || name == "image" || name == "key" || name == "env" {
+	if name == "key" || name == "env" {
 		if len(args) == 0 {
 			return fmt.Errorf("%q needs a subcommand — run help %s", name, name)
 		}
@@ -338,8 +305,6 @@ func (r *REPL) Exec(argv []string) error {
 		args = args[1:]
 	}
 	switch name {
-	case "new":
-		return r.cmdNew(args, flags, asJSON)
 	case "ls":
 		return r.write(func() (string, error) {
 			list, err := r.Svc.ListComputers()
@@ -358,18 +323,11 @@ func (r *REPL) Exec(argv []string) error {
 		return r.Bridge(args[0])
 	case "rm":
 		return r.cmdRm(args)
-	case "restart":
-		if len(args) != 1 {
-			return errors.New("usage: restart <name>")
-		}
-		return r.Svc.Restart(r.ctx(), args[0])
 	case "rename":
 		if len(args) != 2 {
 			return errors.New("usage: rename <name> <new>")
 		}
-		return r.Svc.Rename(r.ctx(), args[0], args[1])
-	case "resize":
-		return r.cmdResize(args, flags)
+		return r.Svc.Rename(args[0], args[1])
 	case "stat":
 		if len(args) != 1 {
 			return errors.New("usage: stat <name>")
@@ -379,63 +337,20 @@ func (r *REPL) Exec(argv []string) error {
 			return err
 		}
 		return r.print(control.FormatStat(view, asJSON))
-	case "node ls":
+	case "pending":
 		return r.write(func() (string, error) {
-			list, err := r.Svc.ListNodes()
-			if err != nil {
-				return "", err
-			}
-			return control.FormatNodes(list, asJSON)
+			return control.FormatPending(r.Svc.Pending(), asJSON)
 		})
-	case "node pair":
-		p, err := r.Svc.PairNode()
+	case "approve":
+		if len(args) != 1 {
+			return errors.New("usage: approve <code>")
+		}
+		msg, err := r.Svc.Approve(args[0], r.From)
 		if err != nil {
 			return err
 		}
-		_, err = io.WriteString(r.Out, control.FormatPairing(p, "node"))
-		return err
-	case "node rm":
-		if len(args) != 1 {
-			return errors.New("usage: node rm <name>")
-		}
-		return r.Svc.RemoveNode(args[0])
-	case "node tag":
-		if len(args) != 2 || !strings.Contains(args[1], "=") {
-			return errors.New("usage: node tag <name> k=v")
-		}
-		k, v, _ := strings.Cut(args[1], "=")
-		return r.Svc.TagNode(args[0], k, v)
-	case "image ls":
-		return r.write(func() (string, error) {
-			list, err := r.Svc.ListImages()
-			if err != nil {
-				return "", err
-			}
-			return control.FormatImages(list, asJSON)
-		})
-	case "image add":
-		if len(args) != 2 {
-			return errors.New("usage: image add <name> <ref>")
-		}
-		return r.Svc.AddImage(args[0], args[1])
-	case "image pull":
-		node := ""
-		if len(args) == 2 {
-			node = args[1]
-		} else if len(args) != 1 {
-			return errors.New("usage: image pull <name> [node]")
-		}
-		return r.Svc.Pull(r.ctx(), args[0], node)
-	case "image rm":
-		if len(args) != 1 {
-			return errors.New("usage: image rm <name>")
-		}
-		return r.Svc.RemoveImage(args[0])
-	case "image default":
-		if len(args) != 1 {
-			return errors.New("usage: image default <name>")
-		}
-		return r.Svc.SetDefaultImage(args[0])
+		fmt.Fprintln(r.Out, msg)
+		return nil
 	case "pair":
 		p, err := r.Svc.PairClient()
 		if err != nil {
@@ -456,13 +371,6 @@ func (r *REPL) Exec(argv []string) error {
 			return errors.New("usage: key rm <fingerprint>")
 		}
 		return r.Svc.RemoveKey(args[0])
-	case "key copy":
-		line, err := r.Svc.KeyCopy()
-		if err != nil {
-			return err
-		}
-		_, err = io.WriteString(r.Out, line)
-		return err
 	case "env set":
 		if len(args) < 2 {
 			return errors.New("usage: env set <name> <value>")
@@ -491,12 +399,6 @@ func (r *REPL) Exec(argv []string) error {
 		}
 		fmt.Fprintln(r.Out, line)
 		return nil
-	case "defaults":
-		d, err := r.Svc.Defaults()
-		if err != nil {
-			return err
-		}
-		return r.print(control.FormatDefaults(d, asJSON))
 	case "help":
 		return r.cmdHelp(pos)
 	case "exit", "quit", "logout":
@@ -511,100 +413,6 @@ func (r *REPL) Exec(argv []string) error {
 	default:
 		return fmt.Errorf("unknown command %q — run help", name)
 	}
-}
-
-func (r *REPL) cmdNew(args []string, flags map[string]string, asJSON bool) error {
-	def, err := r.Svc.Defaults()
-	if err != nil {
-		return err
-	}
-	var name string
-	if len(args) > 0 {
-		name = args[0]
-	} else if r.Interactive {
-		name, err = r.ask("name", "")
-		if err != nil {
-			return err
-		}
-	}
-	if name == "" {
-		return errors.New("name is required")
-	}
-	image := flags["image"]
-	if image == "" {
-		image, err = r.ask("image", def.Image)
-		if err != nil {
-			return err
-		}
-	}
-	node := flags["node"]
-	if node == "" {
-		node, err = r.ask("node", def.Node)
-		if err != nil {
-			return err
-		}
-	}
-	cpu := def.CPU
-	if raw := flags["cpu"]; raw != "" {
-		cpu, err = size.ParseCPU(raw)
-		if err != nil {
-			return err
-		}
-	} else if r.Interactive {
-		raw, err = r.ask("cpu", size.FormatCPU(def.CPU))
-		if err != nil {
-			return err
-		}
-		if raw != "" {
-			cpu, err = size.ParseCPU(raw)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	memory := def.Memory
-	if raw := flags["memory"]; raw != "" {
-		memory, err = size.ParseBytes(raw)
-		if err != nil {
-			return err
-		}
-	} else if r.Interactive {
-		raw, err = r.ask("memory", size.FormatBytes(def.Memory))
-		if err != nil {
-			return err
-		}
-		if raw != "" {
-			memory, err = size.ParseBytes(raw)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	disk := def.Disk
-	if raw := flags["disk"]; raw != "" {
-		disk, err = size.ParseBytes(raw)
-		if err != nil {
-			return err
-		}
-	} else if r.Interactive {
-		raw, err = r.ask("disk", size.FormatBytes(def.Disk))
-		if err != nil {
-			return err
-		}
-		if raw != "" {
-			disk, err = size.ParseBytes(raw)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	created, err := r.Svc.Create(r.ctx(), control.CreateInput{
-		Name: name, Image: image, Node: node, CPU: cpu, Memory: memory, Disk: disk,
-	})
-	if err != nil {
-		return err
-	}
-	return r.print(control.FormatCreated(created, asJSON))
 }
 
 func (r *REPL) cmdRm(args []string) error {
@@ -627,72 +435,7 @@ func (r *REPL) cmdRm(args []string) error {
 	if confirm != name {
 		return errors.New("name did not match")
 	}
-	return r.Svc.Delete(r.ctx(), name)
-}
-
-func (r *REPL) cmdResize(args []string, flags map[string]string) error {
-	if len(args) != 1 {
-		return errors.New("usage: resize <name>")
-	}
-	in := control.ResizeInput{Name: args[0]}
-	if raw := flags["cpu"]; raw != "" {
-		v, err := size.ParseCPU(raw)
-		if err != nil {
-			return err
-		}
-		in.CPU = &v
-	}
-	if raw := flags["memory"]; raw != "" {
-		v, err := size.ParseBytes(raw)
-		if err != nil {
-			return err
-		}
-		in.Memory = &v
-	}
-	if raw := flags["disk"]; raw != "" {
-		v, err := size.ParseBytes(raw)
-		if err != nil {
-			return err
-		}
-		in.Disk = &v
-	}
-	if in.CPU == nil && in.Memory == nil && in.Disk == nil {
-		if !r.Interactive {
-			return errors.New("nothing to change")
-		}
-		cur, err := r.Svc.Stat(r.ctx(), args[0])
-		if err != nil {
-			return err
-		}
-		if raw, err := r.ask("cpu", size.FormatCPU(cur.CPU)); err != nil {
-			return err
-		} else if raw != "" && raw != size.FormatCPU(cur.CPU) {
-			v, err := size.ParseCPU(raw)
-			if err != nil {
-				return err
-			}
-			in.CPU = &v
-		}
-		if raw, err := r.ask("memory", size.FormatBytes(cur.Memory)); err != nil {
-			return err
-		} else if raw != "" && raw != size.FormatBytes(cur.Memory) {
-			v, err := size.ParseBytes(raw)
-			if err != nil {
-				return err
-			}
-			in.Memory = &v
-		}
-		if raw, err := r.ask("disk", size.FormatBytes(cur.Disk)); err != nil {
-			return err
-		} else if raw != "" && raw != size.FormatBytes(cur.Disk) {
-			v, err := size.ParseBytes(raw)
-			if err != nil {
-				return err
-			}
-			in.Disk = &v
-		}
-	}
-	return r.Svc.Resize(r.ctx(), in)
+	return r.Svc.Remove(name)
 }
 
 func (r *REPL) ask(prompt, def string) (string, error) {
@@ -736,7 +479,7 @@ func (r *REPL) print(text string, err error) error {
 
 func parseArgv(argv []string) (pos []string, flags map[string]string, asJSON bool, err error) {
 	flags = map[string]string{}
-	known := map[string]bool{"image": true, "node": true, "cpu": true, "memory": true, "disk": true}
+	known := map[string]bool{}
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
 		if a == "--" {
@@ -825,28 +568,13 @@ var helpHelp = []helpEntry{
 	{
 		name: "Computers",
 		subs: []helpEntry{
-			{name: "new", usage: "new [name] [--image ref] [--node n] [--cpu 2] [--memory 2G] [--disk 20G]", short: "Create a computer; asks for anything missing"},
-			{name: "ssh", usage: "ssh <name>", short: "Open a shell inside a computer"},
 			{name: "ls", usage: "ls", short: "List computers"},
-			{name: "rm", usage: "rm <name>", short: "Destroy a computer; asks for the name again"},
-			{name: "restart", usage: "restart <name>", short: "Restart a computer"},
-			{name: "resize", usage: "resize <name> [--cpu 2] [--memory 4G] [--disk 40G]", short: "Change cpu, memory or disk; asks against current values"},
-			{name: "rename", usage: "rename <name> <new-name>", short: "Rename a computer"},
-			{name: "stat", usage: "stat <name>", short: "Show detail for one computer"},
-		},
-	},
-	{
-		name: "Nodes & images",
-		subs: []helpEntry{
-			{name: "node ls", usage: "node ls", short: "List deploy nodes"},
-			{name: "node pair", usage: "node pair", short: "Print the one-time code that joins a deploy node"},
-			{name: "node rm", usage: "node rm <name>", short: "Remove a deploy node"},
-			{name: "node tag", usage: "node tag <name> k=v ...", short: "Tag a node; new targets tags by default"},
-			{name: "image ls", usage: "image ls", short: "List computer images"},
-			{name: "image add", usage: "image add <name> <ref>", short: "Register an image reference"},
-			{name: "image pull", usage: "image pull <name> [node]", short: "Pull an image onto one node or every matching node"},
-			{name: "image rm", usage: "image rm <name>", short: "Remove an image"},
-			{name: "image default", usage: "image default <name>", short: "Make an image the default for new"},
+			{name: "ssh", usage: "ssh <name>", short: "Open a shell on a computer"},
+			{name: "rm", usage: "rm <name>", short: "Delete a computer; asks for the name again"},
+			{name: "rename", usage: "rename <name> <new>", short: "Rename a computer; portals stay claimed"},
+			{name: "stat", usage: "stat <name>", short: "Live load from the agent"},
+			{name: "pending", usage: "pending", short: "Computers waiting for approval"},
+			{name: "approve", usage: "approve <code>", short: "Approve a pending join"},
 		},
 	},
 	{
@@ -855,12 +583,10 @@ var helpHelp = []helpEntry{
 			{name: "pair", usage: "pair", short: "Print a one-time password that adds your ssh key"},
 			{name: "key ls", usage: "key ls", short: "List paired ssh keys"},
 			{name: "key rm", usage: "key rm <fingerprint>", short: "Revoke an ssh key"},
-			{name: "key copy", usage: "key copy", short: "Print the server's GitHub public key and nothing else"},
-			{name: "env set", usage: "env set <name> <value>", short: "Store a secret, injected into every computer"},
-			{name: "env rm", usage: "env rm <name>", short: "Remove a secret"},
-			{name: "env ls", usage: "env ls", short: "List secret names; values are never printed"},
+			{name: "env set", usage: "env set <name> <value>", short: "Store a variable and push it to online computers"},
+			{name: "env rm", usage: "env rm <name>", short: "Remove a variable; existing sessions keep the old value"},
+			{name: "env ls", usage: "env ls", short: "List variable names; values are never printed"},
 			{name: "whoami", usage: "whoami", short: "Show the key this session authenticated with"},
-			{name: "defaults", usage: "defaults", short: "Show the default node, image and size that new uses"},
 		},
 	},
 	{
@@ -873,7 +599,7 @@ var helpHelp = []helpEntry{
 	{
 		name: "Help",
 		subs: []helpEntry{
-			{name: "help", usage: "help [all | <command>]", short: "This help; help node covers every node subcommand"},
+			{name: "help", usage: "help [all | <command>]", short: "This help; help key covers every key subcommand"},
 		},
 	},
 }
@@ -900,9 +626,8 @@ func (r *REPL) printHelpOverview() {
 	}
 	fmt.Fprintf(r.Out, "%sCommon commands:%s\n\n", bold, reset)
 	rows := []struct{ group, cmds string }{
-		{"Computers", "new  ssh  ls  rm  restart  resize  rename  stat"},
-		{"Nodes & images", "node†  image†"},
-		{"Keys & secrets", "pair  key†  env†  whoami  defaults"},
+		{"Computers", "ls  ssh  rm  rename  stat  pending  approve"},
+		{"Keys & secrets", "pair  key†  env†  whoami"},
 		{"Session", "clear  exit"},
 		{"Help", "help"},
 	}

@@ -96,26 +96,29 @@ func TestExecHelp(t *testing.T) {
 		t.Fatal(err)
 	}
 	all := buf.String()
-	for _, want := range []string{"Computers:", "env set <name> <value>", "node pair"} {
+	for _, want := range []string{"Computers:", "env set <name> <value>", "approve <code>"} {
 		if !strings.Contains(all, want) {
 			t.Fatalf("help all missing %q:\n%s", want, all)
 		}
 	}
+	if strings.Contains(all, "node pair") || strings.Contains(all, "key copy") {
+		t.Fatalf("help all still lists removed commands:\n%s", all)
+	}
 
 	buf.Reset()
-	if err := r.Exec([]string{"help", "node"}); err != nil {
+	if err := r.Exec([]string{"help", "key"}); err != nil {
 		t.Fatal(err)
 	}
-	node := buf.String()
-	if !strings.Contains(node, "node pair") || strings.Contains(node, "env set") {
-		t.Fatalf("help node printed the wrong set:\n%s", node)
+	key := buf.String()
+	if !strings.Contains(key, "key ls") || strings.Contains(key, "env set") {
+		t.Fatalf("help key printed the wrong set:\n%s", key)
 	}
 
 	buf.Reset()
 	if err := r.Exec([]string{"bogus"}); err == nil || !strings.Contains(err.Error(), `unknown command "bogus"`) {
 		t.Fatalf("bogus: err = %v, want unknown command", err)
 	}
-	if err := r.Exec([]string{"node"}); err == nil || !strings.Contains(err.Error(), "needs a subcommand") {
-		t.Fatalf("bare node: err = %v, want needs-a-subcommand", err)
+	if err := r.Exec([]string{"key"}); err == nil || !strings.Contains(err.Error(), "needs a subcommand") {
+		t.Fatalf("bare key: err = %v, want needs-a-subcommand", err)
 	}
 }

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,7 +47,7 @@ func TestPermissionsAndPasswordNotStored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.NewPairing(KindClient, pw, time.Minute); err != nil {
+	if _, err := s.NewPairing(pw, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(path)
@@ -56,10 +57,13 @@ func TestPermissionsAndPasswordNotStored(t *testing.T) {
 	if strings.Contains(string(raw), pw) {
 		t.Fatal("password was written to sqlite")
 	}
-	if err := s.ConsumePairing(KindClient, pw); err != nil {
+	if strings.Contains(string(raw), "kind") && strings.Contains(string(raw), "nodes") {
+		t.Fatal("old schema leaked into a new database")
+	}
+	if err := s.ConsumePairing(pw); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ConsumePairing(KindClient, pw); err != ErrUsed {
+	if err := s.ConsumePairing(pw); err != ErrUsed {
 		t.Fatalf("second consume %v", err)
 	}
 }
@@ -69,16 +73,66 @@ func TestPairingExpiry(t *testing.T) {
 	start := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	s.SetNow(func() time.Time { return start })
 	pw := "abcd-efgh-ijkl-mnop-qrst"
-	if _, err := s.NewPairing(KindClient, pw, time.Minute); err != nil {
+	if _, err := s.NewPairing(pw, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	s.SetNow(func() time.Time { return start.Add(2 * time.Minute) })
-	if err := s.ConsumePairing(KindClient, pw); err != ErrExpired {
+	if err := s.ConsumePairing(pw); err != ErrExpired {
 		t.Fatalf("%v", err)
 	}
-	live, err := s.HasLivePairing(KindClient)
+	live, err := s.HasLivePairing()
 	if err != nil || live {
 		t.Fatalf("live %v %v", live, err)
+	}
+}
+
+func TestPairingAttemptsBurnTheOnlyPassword(t *testing.T) {
+	s := open(t)
+	pw := "abcd-efgh-ijkl-mnop-qrst"
+	if _, err := s.NewPairing(pw, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := s.ConsumePairing("nope-nope-nope-nope-nope"); err != ErrNotFound {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+		live, err := s.HasLivePairing()
+		if err != nil || !live {
+			t.Fatalf("still live after %d: %v %v", i, live, err)
+		}
+	}
+	if err := s.ConsumePairing("nope-nope-nope-nope-nope"); err != ErrNotFound {
+		t.Fatal(err)
+	}
+	live, err := s.HasLivePairing()
+	if err != nil || live {
+		t.Fatalf("burned password still live: %v %v", live, err)
+	}
+	if err := s.ConsumePairing(pw); err != ErrUsed {
+		t.Fatalf("burned password: %v", err)
+	}
+}
+
+func TestPairingAttemptsDoNotBurnSeveral(t *testing.T) {
+	s := open(t)
+	a := "abcd-efgh-ijkl-mnop-qrst"
+	b := "qrst-mnop-ijkl-efgh-abcd"
+	if _, err := s.NewPairing(a, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.NewPairing(b, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		if err := s.ConsumePairing("xxxx-xxxx-xxxx-xxxx-xxxx"); err != ErrNotFound {
+			t.Fatal(err)
+		}
+	}
+	if err := s.ConsumePairing(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConsumePairing(b); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -95,154 +149,139 @@ func TestEnvNamesHideValues(t *testing.T) {
 	if len(names) != 1 || names[0] != "GH_TOKEN" {
 		t.Fatalf("%v", names)
 	}
-	joined := strings.Join(names, "\n")
-	if strings.Contains(joined, sentinel) {
+	if strings.Contains(strings.Join(names, "\n"), sentinel) {
 		t.Fatal("value leaked from EnvNames")
 	}
 	all, err := s.EnvAll()
 	if err != nil || all["GH_TOKEN"] != sentinel {
-		t.Fatalf("%v %v", all, err)
+		t.Fatalf("env all %v %v", all, err)
 	}
 	if err := s.DeleteEnv("GH_TOKEN"); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestPortalHoldAndRename(t *testing.T) {
-	s := open(t)
-	if err := s.CreateNode("n1", "home", "tok-home"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateNode("n2", "other", "tok-other"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.AddImage("base", "registry.example/base:latest"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateComputer(Computer{Name: "web", NodeID: "n1", Image: "base", CPU: 2, Memory: 1, Disk: 1, State: StateRunning}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateComputer(Computer{Name: "api", NodeID: "n1", Image: "base", CPU: 1, Memory: 1, Disk: 1, State: StateRunning}); err != nil {
-		t.Fatal(err)
-	}
-	p := Portal{Hostname: "web.box.example.com", Label: "web", Container: "web", NodeID: "n1", Port: 3000}
-	if err := s.ClaimPortal(p); err != nil {
-		t.Fatal(err)
-	}
-	p.Port = 3001
-	if err := s.ClaimPortal(p); err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.PortalByHost(p.Hostname)
-	if err != nil || got.Port != 3001 || got.Container != "web" {
-		t.Fatalf("%+v %v", got, err)
-	}
-	err = s.ClaimPortal(Portal{Hostname: p.Hostname, Label: "web", Container: "api", NodeID: "n1", Port: 9})
-	held, ok := err.(*HeldError)
-	if !ok || held.Holder != "web" {
+	if err := s.DeleteEnv("GH_TOKEN"); err != ErrNotFound {
 		t.Fatalf("%v", err)
-	}
-	if err := s.RenameComputer("web", "site"); err != nil {
-		t.Fatal(err)
-	}
-	got, err = s.PortalByHost(p.Hostname)
-	if err != nil || got.Container != "site" || got.Hostname != p.Hostname {
-		t.Fatalf("%+v %v", got, err)
-	}
-	if err := s.DeleteComputer("site"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.PortalByHost(p.Hostname); err != ErrNotFound {
-		t.Fatalf("portal remained: %v", err)
 	}
 }
 
-func TestNodeDeleteRefusedWhileBusy(t *testing.T) {
+func TestComputerTokenAndPortals(t *testing.T) {
 	s := open(t)
-	if err := s.CreateNode("n1", "home", "tok"); err != nil {
+	const token = "raw-token-not-stored"
+	if err := s.CreateComputer("home", secret.Hash(token), ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddImage("base", "ref"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateComputer(Computer{Name: "web", NodeID: "n1", Image: "base", CPU: 1, Memory: 1, Disk: 1, State: StateRunning}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteNode("n1"); err != ErrInUse {
-		t.Fatalf("%v", err)
-	}
-	if err := s.DeleteImage("base"); err != ErrInUse {
-		t.Fatalf("image %v", err)
-	}
-}
-
-func TestNodeTokenLookupDoesNotUseName(t *testing.T) {
-	s := open(t)
-	if err := s.CreateNode("n1", "home", "tok-1"); err != nil {
-		t.Fatal(err)
-	}
-	n, err := s.NodeByToken("tok-1")
-	if err != nil || n.Name != "home" {
-		t.Fatalf("%+v %v", n, err)
-	}
-	if _, err := s.NodeByToken("nope"); err != ErrNotFound {
-		t.Fatalf("%v", err)
-	}
-	tok, err := s.NodeToken("n1")
-	if err != nil || tok != "tok-1" {
-		t.Fatalf("%s %v", tok, err)
-	}
-	nodes, err := s.ListNodes()
+	raw, err := os.ReadFile(s.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// List path does not select the token column into Node.
-	if len(nodes) != 1 || nodes[0].Name != "home" {
-		t.Fatalf("%+v", nodes)
+	if strings.Contains(string(raw), token) {
+		t.Fatal("raw token was stored")
 	}
-}
-
-func TestHeartbeatImages(t *testing.T) {
-	s := open(t)
-	if err := s.CreateNode("n1", "home", "tok"); err != nil {
+	ok, err := s.TokenMatches("home", token)
+	if err != nil || !ok {
+		t.Fatalf("match %v %v", ok, err)
+	}
+	ok, err = s.TokenMatches("home", "other")
+	if err != nil || ok {
+		t.Fatalf("bad token %v %v", ok, err)
+	}
+	ok, err = s.TokenMatches("gone", token)
+	if err != nil || ok {
+		t.Fatalf("missing computer %v %v", ok, err)
+	}
+	if err := s.SetComputerInfo("home", "alice", "ssh-ed25519 AAAA"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddImage("base", "ref"); err != nil {
+	if err := s.SetComputerInfo("home", "", "ssh-ed25519 BBBB"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetDefaultImage("base"); err != nil {
-		t.Fatal(err)
-	}
-	def, err := s.DefaultImage()
-	if err != nil || !def.Default || def.Name != "base" {
-		t.Fatalf("%+v %v", def, err)
-	}
-	if err := s.Heartbeat("n1", Heartbeat{CPU: 4, Memory: 8, Disk: 9, Images: []string{"base"}}); err != nil {
-		t.Fatal(err)
-	}
-	n, err := s.NodeByName("home")
+	c, err := s.Computer("home")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n.CPU != 4 || len(n.Images) != 1 || n.Images[0] != "base" || n.LastHeartbeat.IsZero() {
-		t.Fatalf("%+v", n)
+	if c.LoginUser != "alice" || c.HostKey != "ssh-ed25519 BBBB" {
+		t.Fatalf("info %+v", c)
+	}
+	if err := s.ClaimPortal("web.example.com", "home", 3000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateComputer("other", secret.Hash("tok2"), "bob"); err != nil {
+		t.Fatal(err)
+	}
+	err = s.ClaimPortal("web.example.com", "other", 9)
+	var held *HeldError
+	if !errors.As(err, &held) || held.Holder != "home" {
+		t.Fatalf("held %v", err)
+	}
+	if err := s.ClaimPortal("web.example.com", "home", 4000); err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.PortalByHost("web.example.com")
+	if err != nil || p.Port != 4000 || p.Computer != "home" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if err := s.RenameComputer("home", "house"); err != nil {
+		t.Fatal(err)
+	}
+	p, err = s.PortalByHost("web.example.com")
+	if err != nil || p.Computer != "house" {
+		t.Fatalf("rename portal %+v %v", p, err)
+	}
+	ok, err = s.TokenMatches("house", token)
+	if err != nil || !ok {
+		t.Fatal("token should follow the rename")
+	}
+	if err := s.ReleasePortal("web.example.com", "other"); err != ErrNotFound {
+		t.Fatalf("release other %v", err)
+	}
+	if err := s.DeleteComputer("house"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PortalByHost("web.example.com"); err != ErrNotFound {
+		t.Fatalf("portal survived delete %v", err)
+	}
+	if _, err := s.Computer("house"); err != ErrNotFound {
+		t.Fatal(err)
+	}
+	ok, err = s.TokenMatches("house", token)
+	if err != nil || ok {
+		t.Fatal("revoked token still matched")
 	}
 }
 
 func TestKeyRemove(t *testing.T) {
 	s := open(t)
-	if err := s.BindKey("ssh-ed25519 AAAA box", "laptop", "SHA256:abc"); err != nil {
+	if err := s.BindKey("ssh-ed25519 AAAA laptop", "laptop", "SHA256:abc"); err != nil {
 		t.Fatal(err)
 	}
-	k, err := s.FindKeyByFingerprint("laptop")
+	k, err := s.FindKeyByFingerprint("SHA256:abc")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.RemoveKey(k.ID); err != nil {
 		t.Fatal(err)
 	}
-	keys, err := s.ListKeys()
-	if err != nil || len(keys) != 0 {
-		t.Fatalf("%v %v", keys, err)
+	if _, err := s.FindKeyByFingerprint("SHA256:abc"); err != ErrNotFound {
+		t.Fatal(err)
+	}
+	if err := s.RemoveKey(k.ID); err != ErrNotFound {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestMetaRoundTrip(t *testing.T) {
+	s := open(t)
+	if _, ok, err := s.Meta("domain"); err != nil || ok {
+		t.Fatalf("missing %v %v", ok, err)
+	}
+	if err := s.SetMeta("ssh_addr", ":22"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMeta("ssh_addr", "127.0.0.1:22"); err != nil {
+		t.Fatal(err)
+	}
+	v, ok, err := s.Meta("ssh_addr")
+	if err != nil || !ok || v != "127.0.0.1:22" {
+		t.Fatalf("%q %v %v", v, ok, err)
 	}
 }

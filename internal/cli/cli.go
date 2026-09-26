@@ -112,30 +112,45 @@ func runHost(o Options) error {
 }
 
 const hostUsage = `usage:
-  box serve --domain <domain>
+  box serve --domain <domain> [--ssh-addr addr] [--http-addr addr] [--quic-addr addr]
   box pair
-  box node pair
   box node
   box node join --server <host:port> --code <code> --name <name>
-  box key ls|rm|copy
+  box key ls|rm
   box env ls|set|rm
   box status
 `
 
 func serve(o Options) error {
-	domain := ""
+	domain, sshAddr, httpAddr, quicAddr := "", "", "", ""
 	args := o.Args[1:]
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--domain" && i+1 < len(args) {
+		flag := args[i]
+		switch flag {
+		case "--domain", "--ssh-addr", "--http-addr", "--quic-addr":
+			if i+1 >= len(args) {
+				fmt.Fprint(o.Stderr, hostUsage)
+				return errUsage
+			}
 			i++
-			domain = args[i]
-			continue
+			switch flag {
+			case "--domain":
+				domain = args[i]
+			case "--ssh-addr":
+				sshAddr = args[i]
+			case "--http-addr":
+				httpAddr = args[i]
+			case "--quic-addr":
+				quicAddr = args[i]
+			}
+		default:
+			fmt.Fprint(o.Stderr, hostUsage)
+			return errUsage
 		}
-		fmt.Fprint(o.Stderr, hostUsage)
-		return errUsage
 	}
 	srv, err := server.Start(o.Context, server.Config{
 		Domain: domain, DataDir: o.DataDir, Stdout: o.Stdout,
+		SSHAddr: sshAddr, HTTPAddr: httpAddr, QUICAddr: quicAddr,
 		SocketPath: o.ServerSocket,
 	})
 	if err != nil {
@@ -153,7 +168,8 @@ func runNode(o Options) error {
 	}
 	switch args[0] {
 	case "pair":
-		return localPair(o, "node_pair", "node")
+		fmt.Fprintln(o.Stderr, "node pairing is gone")
+		return errFail
 	case "join":
 		return nodeJoin(o, args[1:])
 	default:
@@ -265,15 +281,8 @@ func localKey(o Options) error {
 		}
 		return nil
 	case "copy":
-		var resp struct {
-			Public string `json:"public"`
-		}
-		if err := localCall(o, "key_copy", nil, &resp); err != nil {
-			fmt.Fprintln(o.Stderr, err.Error())
-			return errFail
-		}
-		_, err := io.WriteString(o.Stdout, resp.Public)
-		return err
+		fmt.Fprintln(o.Stderr, "key copy is gone")
+		return errFail
 	default:
 		fmt.Fprint(o.Stderr, hostUsage)
 		return errUsage

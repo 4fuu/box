@@ -6,12 +6,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,74 +18,119 @@ import (
 	"testing"
 	"time"
 
-	"github.com/4fuu/box/internal/guest"
 	"github.com/4fuu/box/internal/keys"
-	"github.com/4fuu/box/internal/node"
-	"github.com/4fuu/box/internal/runtime"
+	"github.com/4fuu/box/internal/rpc"
+	"github.com/4fuu/box/internal/secret"
 	"github.com/4fuu/box/internal/server"
+	"github.com/4fuu/box/internal/tunnel"
 	"golang.org/x/crypto/ssh"
 )
 
 func TestServeRequiresDomain(t *testing.T) {
 	_, err := server.Start(context.Background(), server.Config{
-		DataDir: t.TempDir(), SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0",
+		DataDir: t.TempDir(), SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", QUICAddr: "127.0.0.1:0",
 	})
 	if err == nil || !strings.Contains(err.Error(), "--domain") {
 		t.Fatal(err)
 	}
 }
 
-func TestServerControlPlane(t *testing.T) {
+func TestAddrPersistence(t *testing.T) {
 	dir := t.TempDir()
-	nodeDir := t.TempDir()
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, r.Host)
-	}))
-	defer up.Close()
+	ssh1, http1, quic1 := freeTCP(t), freeTCP(t), freeUDP(t)
+	srv, _ := start(t, dir, "box.example.com", ssh1, http1, quic1)
+	if srv.SSHAddr() != ssh1 || srv.HTTPAddr() != http1 || srv.QUICAddr() != quic1 {
+		t.Fatalf("bound %s %s %s, want %s %s %s", srv.SSHAddr(), srv.HTTPAddr(), srv.QUICAddr(), ssh1, http1, quic1)
+	}
+	fp := srv.QUICFingerprint()
+	if fp == "" {
+		t.Fatal("no fingerprint")
+	}
+	for _, name := range []string{"quic.pem", "splice_ed25519"} {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode %o", name, fi.Mode().Perm())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "github_ed25519")); !os.IsNotExist(err) {
+		t.Fatal("github key should not be generated")
+	}
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	var rpcAddr string
-	var rpcMu sync.Mutex
-	var backendAddr string
-	var backendPub ssh.PublicKey
-	var backendDials int
+	ssh2, http2, quic2 := freeTCP(t), freeTCP(t), freeUDP(t)
+	again, _ := start(t, dir, "other.example", ssh2, http2, quic2)
+	if again.SSHAddr() != ssh1 || again.HTTPAddr() != http1 || again.QUICAddr() != quic1 {
+		t.Fatalf("second start used flags: %s %s %s", again.SSHAddr(), again.HTTPAddr(), again.QUICAddr())
+	}
+	if again.QUICFingerprint() != fp {
+		t.Fatal("quic certificate was regenerated")
+	}
+	var st struct {
+		Domain string `json:"domain"`
+	}
+	if err := localCall(t, filepath.Join(dir, "box.sock"), "status", nil, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Domain != "box.example.com" {
+		t.Fatalf("domain changed to %s", st.Domain)
+	}
+}
+
+func TestUnknownHost421(t *testing.T) {
+	dir := t.TempDir()
+	srv, _ := start(t, dir, "box.example.com", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
+	if status := getHost(t, srv.HTTPAddr(), "nope.box.example.com"); status != 421 {
+		t.Fatalf("status %d", status)
+	}
+	if status := getHost(t, srv.HTTPAddr(), "box.example.com"); status != 421 {
+		t.Fatalf("apex %d", status)
+	}
+}
+
+func TestJoinRejectsBadPasswordAndReservedName(t *testing.T) {
+	dir := t.TempDir()
+	srv, greet := start(t, dir, "box.example.com", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
+	if _, _, err := sshPasswordRun(t, srv.SSHAddr(), "join+home", "not-a-hash", "x"); err == nil {
+		t.Fatal("non-hex join password was accepted")
+	}
+	out, _, err := sshPasswordRun(t, srv.SSHAddr(), "join+box", secret.Hash("abcdef"), "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `"error":"rejected"`) {
+		t.Fatalf("reserved join: %s", out)
+	}
+	signer, _, err := keys.GenerateSigner("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Bind the key, then a key auth to join+ must not park a session.
+	pass := passwordOf(t, greet)
+	if _, _, err := sshRun(t, srv.SSHAddr(), "pair+"+pass, signer, "ls"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sshRun(t, srv.SSHAddr(), "join+home", signer, "x"); err == nil {
+		t.Fatal("bound key opened join+")
+	}
+}
+
+func TestComputersTunnel(t *testing.T) {
+	dir := t.TempDir()
 	var buf bytes.Buffer
 	srv, err := server.Start(context.Background(), server.Config{
-		Domain:     "box.example.com",
-		DataDir:    dir,
-		SSHAddr:    "127.0.0.1:0",
-		HTTPAddr:   "127.0.0.1:0",
-		SocketPath: filepath.Join(dir, "box.sock"),
-		FRPVhost:   up.Listener.Addr().String(),
-		Stdout:     &buf,
-		Dial: func(ctx context.Context, nodeID, proxy string) (net.Conn, error) {
-			if proxy != "rpc" {
-				return nil, fmt.Errorf("no %s", proxy)
-			}
-			rpcMu.Lock()
-			addr := rpcAddr
-			rpcMu.Unlock()
-			if addr == "" {
-				return nil, fmt.Errorf("rpc not ready")
-			}
-			return net.Dial("tcp", addr)
-		},
-		Backend: func(ctx context.Context, computer string) (net.Conn, ssh.PublicKey, error) {
-			backendDials++
-			if backendAddr == "" || computer != "web" {
-				return nil, nil, fmt.Errorf("no backend")
-			}
-			c, err := net.Dial("tcp", backendAddr)
-			if err != nil {
-				return nil, nil, err
-			}
-			return c, backendPub, nil
-		},
+		Domain: "box.example.com", DataDir: dir,
+		SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", QUICAddr: "127.0.0.1:0",
+		SocketPath: filepath.Join(dir, "box.sock"), Stdout: &buf,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { srv.Close() })
-
 	pass := passwordOf(t, buf.String())
 	rawDB, err := os.ReadFile(filepath.Join(dir, "box.db"))
 	if err != nil {
@@ -100,353 +144,223 @@ func TestServerControlPlane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, errOut, err := sshRun(t, srv.SSHAddr(), "pair+"+pass, signer, "image add base registry.example/base:latest")
-	if err != nil {
-		t.Fatalf("image add: %v\n%s\n%s", err, out, errOut)
+	if _, errOut, err := sshRun(t, srv.SSHAddr(), "pair+"+pass, signer, "whoami"); err != nil {
+		t.Fatalf("pair: %v %s", err, errOut)
 	}
-	if _, errOut, err = sshRun(t, srv.SSHAddr(), "box", signer, "image default base"); err != nil {
-		t.Fatalf("default: %v %s", err, errOut)
+	if _, _, err := sshPasswordRun(t, srv.SSHAddr(), "home", "not-a-token", "x"); err == nil {
+		t.Fatal("unknown computer accepted a password")
 	}
-	out, errOut, err = sshRun(t, srv.SSHAddr(), "box", signer, "node pair")
-	if err != nil {
-		t.Fatalf("node pair: %v %s", err, errOut)
-	}
-	code := ""
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "code: ") {
-			code = strings.TrimPrefix(line, "code: ")
-		}
-	}
-	if code == "" {
-		t.Fatalf("no code in %q", out)
-	}
-	apiBase := "http://" + srv.HTTPAddr() + "/box/node/v1"
-	if err := node.Join(context.Background(), apiBase, "127.0.0.1:7000", code, "home", nodeDir); err != nil {
-		t.Fatal(err)
-	}
-	ctrl, err := node.Open(nodeDir, apiBase)
+
+	code, err := secret.ApprovalCode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeRuntime{}
-	ctrl.Runtime = fake
-	ctrl.Capacity = func() (int, int64, int64, error) { return 8, 16 << 30, 200 << 30, nil }
-	nodeCtx, cancelNode := context.WithCancel(context.Background())
-	t.Cleanup(cancelNode)
-	go ctrl.Serve(nodeCtx)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if addr := ctrl.RPCAddr(); addr != "" {
-			rpcMu.Lock()
-			rpcAddr = addr
-			rpcMu.Unlock()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("rpc did not listen")
-		}
-		time.Sleep(20 * time.Millisecond)
+	type joined struct {
+		out string
+		err error
 	}
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		out, errOut, err = sshRun(t, srv.SSHAddr(), "box", signer, "node ls")
-		if err == nil && strings.Contains(out, "home") && strings.Contains(out, "yes") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("node not online: %v\n%s\n%s", err, out, errOut)
-		}
-		time.Sleep(30 * time.Millisecond)
+	joinCh := make(chan joined, 1)
+	go func() {
+		out, _, err := sshPasswordRun(t, srv.SSHAddr(), "join+home", secret.Hash(code), "x")
+		joinCh <- joined{out, err}
+	}()
+	waitPending(t, srv.SSHAddr(), signer, "home")
+	approved, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "approve "+code)
+	if err != nil {
+		t.Fatalf("approve: %v %s", err, errOut)
 	}
-	if _, errOut, err = sshRun(t, srv.SSHAddr(), "box", signer, "env set GH_TOKEN ghp_secret"); err != nil {
-		t.Fatalf("env set: %v %s", err, errOut)
+	if !strings.Contains(approved, "approved home") {
+		t.Fatalf("approve output %q", approved)
 	}
-	out, errOut, err = sshRun(t, srv.SSHAddr(), "box", signer, "env ls")
+	var got joined
+	select {
+	case got = <-joinCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("join did not finish")
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	var reply struct {
+		Token       string `json:"token"`
+		QUIC        string `json:"quic"`
+		Fingerprint string `json:"fingerprint"`
+		Domain      string `json:"domain"`
+		HTTPPort    int    `json:"http_port"`
+		Error       string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(got.out), &reply); err != nil {
+		t.Fatalf("join json %q: %v", got.out, err)
+	}
+	if reply.Error != "" || reply.Token == "" || reply.Domain != "box.example.com" || reply.Fingerprint != srv.QUICFingerprint() {
+		t.Fatalf("%+v", reply)
+	}
+	if reply.QUIC != "box.example.com:"+portOf(srv.QUICAddr()) {
+		t.Fatalf("quic %q", reply.QUIC)
+	}
+	if reply.HTTPPort != atoiPort(srv.HTTPAddr()) {
+		t.Fatalf("http port %d vs %s", reply.HTTPPort, srv.HTTPAddr())
+	}
+	walkNoSecret(t, dir, reply.Token)
+	walkNoSecret(t, dir, code)
+
+	bootOut, _, err := sshPasswordRun(t, srv.SSHAddr(), "home", reply.Token, "boot")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out, "ghp_secret") || !strings.Contains(out, "GH_TOKEN") {
-		t.Fatalf("env ls leaked or missed name: %q", out)
+	if strings.Contains(bootOut, reply.Token) || !strings.Contains(bootOut, `"quic"`) || strings.Contains(bootOut, `"token"`) {
+		t.Fatalf("bootstrap %s", bootOut)
 	}
-	if _, errOut, err = sshRun(t, srv.SSHAddr(), "box", signer, "image pull base home"); err != nil {
-		t.Fatalf("pull: %v %s", err, errOut)
+	if _, _, err := sshPasswordRun(t, srv.SSHAddr(), "home", "not-the-token", "boot"); err == nil {
+		t.Fatal("bad token opened a session")
 	}
-	if err := ctrl.Heartbeat(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	out, errOut, err = sshRun(t, srv.SSHAddr(), "box", signer, "new web --image base --node home --cpu 2 --memory 2G --disk 20G --json")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	badSess, err := tunnel.Dial(ctx, srv.QUICAddr(), srv.QUICFingerprint())
 	if err != nil {
-		t.Fatalf("new: %v\n%s\n%s", err, out, errOut)
-	}
-	if !strings.Contains(out, "ssh web@box.example.com") {
-		t.Fatalf("new output %s", out)
-	}
-	if status := getHost(t, srv.HTTPAddr(), "web.box.example.com"); status != 421 {
-		t.Fatalf("portal before claim: %d", status)
-	}
-	var portals bytes.Buffer
-	if err := guest.Run(filepath.Join(nodeDir, "guests", "web.sock"), []string{"portal", "add", "web", "3000"}, &portals, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(portals.String()) != "http://web.box.example.com" {
-		t.Fatalf("portal %q", portals.String())
+	if _, err := badSess.Hello(ctx, tunnel.Identity{Name: "home", Token: "not-the-token", User: "alice"}); err == nil {
+		t.Fatal("bad token hello succeeded")
 	}
-	if body, status := get(t, srv.HTTPAddr(), "web.box.example.com"); status != 200 || body != "web.box.example.com" {
+	_ = badSess.Close()
+
+	hostKey, hostLine := newKey(t)
+	_, otherLine := newKey(t)
+	agent, err := tunnel.Dial(ctx, srv.QUICAddr(), reply.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	if _, err := agent.Hello(ctx, tunnel.Identity{
+		Name: "home", Token: reply.Token, User: "alice", HostKey: hostLine, AgentVersion: "t1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent.Handle(func(op string, _ json.RawMessage) (any, error) {
+		if op == tunnel.OpStat {
+			return tunnel.StatResponse{CPU: 0.25, Memory: 11, Disk: 22, Uptime: 33}, nil
+		}
+		return nil, nil
+	})
+	authed := make(chan ssh.PublicKey, 1)
+	go acceptAgent(ctx, agent, hostKey, authed)
+
+	var add tunnel.PortalAddResponse
+	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: 3000}, &add); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(add.URL, "web.box.example.com:") || add.Port != 3000 {
+		t.Fatalf("portal %+v", add)
+	}
+	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web.other", Port: 1}, nil); err == nil {
+		t.Fatal("dot label was claimed")
+	}
+	body, status := get(t, srv.HTTPAddr(), "web.box.example.com")
+	if status != 200 || body != "pong" {
 		t.Fatalf("proxy %d %q", status, body)
 	}
 	if status := getHost(t, srv.HTTPAddr(), "nope.box.example.com"); status != 421 {
-		t.Fatalf("unknown host %d", status)
+		t.Fatalf("unknown %d", status)
 	}
-	if len(fake.specs) != 1 || fake.specs[0].Env["GH_TOKEN"] != "ghp_secret" {
-		t.Fatalf("env not injected: %+v", fake.specs)
-	}
-	walkNoSecret(t, nodeDir, "ghp_secret")
-	copied, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "key copy")
+	statOut, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "stat home")
 	if err != nil {
-		t.Fatalf("key copy: %v %s", err, errOut)
+		t.Fatalf("stat: %v %s", err, errOut)
 	}
-	pub, err := os.ReadFile(filepath.Join(dir, "github_ed25519.pub"))
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(statOut, "0.25") || !strings.Contains(statOut, "33") {
+		t.Fatalf("stat %q", statOut)
 	}
-	if copied != string(pub) {
-		t.Fatalf("key copy %q pub %q", copied, pub)
-	}
-	authorized, _, _, _, err := ssh.ParseAuthorizedKey(pub)
+	lsOut, _, err := sshRun(t, srv.SSHAddr(), "box", signer, "ls --json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	backendAddr, backendPub = startBackend(t, authorized)
-	out, errOut, err = sshRun(t, srv.SSHAddr(), "web", signer, "echo hi")
-	if err != nil {
-		t.Fatalf("splice: %v\n%s\n%s", err, out, errOut)
-	}
-	if strings.TrimSpace(out) != "ran echo hi" {
-		t.Fatalf("splice output %q", out)
-	}
-	if backendDials != 1 {
-		t.Fatalf("dials %d", backendDials)
-	}
-	stranger, _, err := keys.GenerateSigner("stranger")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err = sshRun(t, srv.SSHAddr(), "web", stranger, "echo hi"); err == nil {
-		t.Fatal("unknown key reached a computer")
-	}
-	if backendDials != 1 {
-		t.Fatal("unknown key opened a backend connection")
+	if !strings.Contains(lsOut, `"online":true`) || !strings.Contains(lsOut, "t1") || !strings.Contains(lsOut, "web") {
+		t.Fatalf("ls %s", lsOut)
 	}
 
-	// A restart does not print another password.
-	srv.Close()
-	var buf2 bytes.Buffer
-	srv2, err := server.Start(context.Background(), server.Config{
-		DataDir: dir, SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0",
-		SocketPath: filepath.Join(dir, "box.sock"), Stdout: &buf2,
-	})
+	spliceOut, errOut, err := sshRun(t, srv.SSHAddr(), "home", signer, "echo")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("splice: %v %s", err, errOut)
 	}
-	srv2.Close()
-	if strings.Contains(buf2.String(), "one-time password") {
-		t.Fatalf("second start printed a password: %s", buf2.String())
+	if spliceOut != "hi\n" {
+		t.Fatalf("splice output %q", spliceOut)
 	}
-}
-
-func startBackend(t *testing.T, authorized ssh.PublicKey) (string, ssh.PublicKey) {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := &ssh.ServerConfig{
-		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if meta.User() != "box" || !sameKey(key, authorized) {
-				return nil, fmt.Errorf("rejected")
-			}
-			return &ssh.Permissions{}, nil
-		},
-	}
-	cfg.AddHostKey(signer)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go serveBackend(conn, cfg)
+	select {
+	case key := <-authed:
+		want := publicFrom(t, filepath.Join(dir, "splice_ed25519.pub"))
+		if !sameKey(key, want) {
+			t.Fatal("splice did not authenticate with the splice key")
 		}
-	}()
-	return ln.Addr().String(), signer.PublicKey()
-}
-
-func serveBackend(conn net.Conn, cfg *ssh.ServerConfig) {
-	defer conn.Close()
-	sc, chans, reqs, err := ssh.NewServerConn(conn, cfg)
-	if err != nil {
-		return
+	case <-time.After(2 * time.Second):
+		t.Fatal("ssh server did not see a key")
 	}
-	defer sc.Close()
-	go ssh.DiscardRequests(reqs)
-	for ch := range chans {
-		if ch.ChannelType() != "session" {
-			ch.Reject(ssh.UnknownChannelType, "unsupported")
-			continue
-		}
-		channel, requests, err := ch.Accept()
-		if err != nil {
-			continue
-		}
-		go func() {
-			defer channel.Close()
-			for req := range requests {
-				if req.Type != "exec" {
-					req.Reply(false, nil)
-					continue
-				}
-				var payload struct{ Value string }
-				ssh.Unmarshal(req.Payload, &payload)
-				req.Reply(true, nil)
-				fmt.Fprintf(channel, "ran %s\n", payload.Value)
-				_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
-				return
-			}
-		}()
-	}
-}
-
-func sameKey(a, b ssh.PublicKey) bool {
-	ab, bb := a.Marshal(), b.Marshal()
-	if len(ab) != len(bb) {
-		return false
-	}
-	return subtle.ConstantTimeCompare(ab, bb) == 1
-}
-
-func passwordOf(t *testing.T, out string) string {
-	t.Helper()
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "one-time password: ") {
-			return strings.TrimPrefix(line, "one-time password: ")
-		}
-	}
-	t.Fatalf("no password in %q", out)
-	return ""
-}
-
-func sshRun(t *testing.T, addr, user string, signer ssh.Signer, cmd string) (string, string, error) {
-	t.Helper()
-	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-	client, err := ssh.Dial("tcp", addr, cfg)
-	if err != nil {
-		return "", "", err
-	}
-	defer client.Close()
-	sess, err := client.NewSession()
-	if err != nil {
-		return "", "", err
-	}
-	defer sess.Close()
-	var stdout, stderr bytes.Buffer
-	sess.Stdout = &stdout
-	sess.Stderr = &stderr
-	err = sess.Run(cmd)
-	return stdout.String(), stderr.String(), err
-}
-
-func getHost(t *testing.T, addr, host string) int {
-	t.Helper()
-	_, status := get(t, addr, host)
-	return status
-}
-
-func get(t *testing.T, addr, host string) (string, int) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+	keysOut, _, err := sshRun(t, srv.SSHAddr(), "box", signer, "key ls")
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Host = host
-	resp, err := http.DefaultClient.Do(req)
+	pub, err := os.ReadFile(filepath.Join(dir, "splice_ed25519.pub"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
-}
+	if strings.Contains(keysOut, strings.TrimSpace(string(pub))) {
+		t.Fatal("key ls listed the splice key")
+	}
 
-func walkNoSecret(t *testing.T, dir, secret string) {
-	t.Helper()
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || d.Type()&os.ModeSocket != 0 {
-			return err
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if strings.Contains(string(b), secret) {
-			t.Errorf("secret written to %s", path)
-		}
-		return nil
-	})
+	_ = agent.Close()
+	bad, err := tunnel.Dial(ctx, srv.QUICAddr(), reply.Fingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer bad.Close()
+	if _, err := bad.Hello(ctx, tunnel.Identity{
+		Name: "home", Token: reply.Token, User: "alice", HostKey: otherLine, AgentVersion: "t2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bad.Handle(func(string, json.RawMessage) (any, error) { return nil, nil })
+	go acceptAgent(ctx, bad, hostKey, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, _, err := sshRun(t, srv.SSHAddr(), "box", signer, "ls")
+		if err == nil && strings.Contains(out, "t2") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replacement tunnel not visible: %v %s", err, out)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_, errOut, err = sshRun(t, srv.SSHAddr(), "home", signer, "echo")
+	if err == nil || !strings.Contains(errOut, "host key mismatch") {
+		t.Fatalf("mismatch: %v %s", err, errOut)
+	}
+
+	_ = bad.Close()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if status := getHost(t, srv.HTTPAddr(), "web.box.example.com"); status == 502 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("online portal after disconnect")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "rm home"); err == nil || !strings.Contains(errOut, "asks for the name") {
+		t.Fatalf("rm without confirm: %v %s", err, errOut)
+	}
+	if _, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "rm home home"); err != nil {
+		t.Fatalf("rm: %v %s", err, errOut)
+	}
+	if _, _, err := sshPasswordRun(t, srv.SSHAddr(), "home", reply.Token, "boot"); err == nil {
+		t.Fatal("revoked token still authenticated")
+	}
+	if err := localCall(t, filepath.Join(dir, "box.sock"), "bind", map[string]string{"key": "x"}, nil); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("socket bind: %v", err)
+	}
 }
 
-type fakeRuntime struct {
-	mu    sync.Mutex
-	specs []runtime.Spec
-}
-
-func (f *fakeRuntime) PrepareHome(context.Context, string, string) error { return nil }
-func (f *fakeRuntime) VolumeCreate(context.Context, string) error        { return nil }
-func (f *fakeRuntime) VolumeRemove(context.Context, string) error        { return nil }
-func (f *fakeRuntime) CopyVolume(context.Context, string, string, string) error {
-	return nil
-}
-func (f *fakeRuntime) Run(_ context.Context, spec runtime.Spec) (runtime.Inspected, error) {
-	f.mu.Lock()
-	f.specs = append(f.specs, spec)
-	f.mu.Unlock()
-	return runtime.Inspected{BridgeIP: "10.88.0.2", SSHPort: 2200, Running: true}, nil
-}
-func (f *fakeRuntime) RemoveContainer(context.Context, string) error { return nil }
-func (f *fakeRuntime) RenameContainer(context.Context, string, string) error {
-	return nil
-}
-func (f *fakeRuntime) UpdateResources(context.Context, string, *float64, *int64) error {
-	return nil
-}
-func (f *fakeRuntime) Inspect(context.Context, string) (runtime.Inspected, error) {
-	return runtime.Inspected{BridgeIP: "10.88.0.2", SSHPort: 2200, Running: true}, nil
-}
-func (f *fakeRuntime) Pull(context.Context, string) error { return nil }
-func (f *fakeRuntime) ImageExists(context.Context, string) (bool, error) {
-	return true, nil
-}
-func (f *fakeRuntime) Stats(context.Context, string) (int64, int64, bool) { return 0, 0, false }
-
-// TestPairOverPTY walks the interactive pairing path the way stock OpenSSH
-// uses it: a PTY is allocated, so the client sends raw bytes and Enter
-// arrives as \r. The password prompt must accept it, bind the key, and drop
-// into the REPL, whose lines must also terminate on \r.
 func TestPairOverPTY(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
@@ -455,6 +369,7 @@ func TestPairOverPTY(t *testing.T) {
 		DataDir:    dir,
 		SSHAddr:    "127.0.0.1:0",
 		HTTPAddr:   "127.0.0.1:0",
+		QUICAddr:   "127.0.0.1:0",
 		SocketPath: filepath.Join(dir, "box.sock"),
 		Stdout:     &buf,
 	})
@@ -519,10 +434,297 @@ func TestPairOverPTY(t *testing.T) {
 	if err := sess.Wait(); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-
-	// The key is bound now: the plain exec path works without any password.
 	if _, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "ls"); err != nil {
 		t.Fatalf("exec after pair: %v %s", err, errOut)
+	}
+}
+
+func start(t *testing.T, dir, domain, sshAddr, httpAddr, quicAddr string) (*server.Server, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	srv, err := server.Start(context.Background(), server.Config{
+		Domain: domain, DataDir: dir,
+		SSHAddr: sshAddr, HTTPAddr: httpAddr, QUICAddr: quicAddr,
+		SocketPath: filepath.Join(dir, "box.sock"), Stdout: &buf,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	return srv, buf.String()
+}
+
+func waitPending(t *testing.T, addr string, signer ssh.Signer, name string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, _, err := sshRun(t, addr, "box", signer, "pending")
+		if err == nil && strings.Contains(out, name) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pending missing %s: %v %s", name, err, out)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func acceptAgent(ctx context.Context, sess *tunnel.Session, host ssh.Signer, authed chan ssh.PublicKey) {
+	for {
+		kind, _, conn, err := sess.Accept(ctx)
+		if err != nil {
+			return
+		}
+		switch kind {
+		case tunnel.KindPortal:
+			go httpPong(conn)
+		case tunnel.KindSSH:
+			go serveAgentSSH(conn, host, authed)
+		default:
+			conn.Close()
+		}
+	}
+}
+
+func httpPong(conn net.Conn) {
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil || line == "\r\n" {
+			break
+		}
+	}
+	body := "pong"
+	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+}
+
+func serveAgentSSH(conn net.Conn, host ssh.Signer, authed chan ssh.PublicKey) {
+	defer conn.Close()
+	cfg := &ssh.ServerConfig{
+		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if authed != nil {
+				select {
+				case authed <- key:
+				default:
+				}
+			}
+			return &ssh.Permissions{}, nil
+		},
+	}
+	cfg.AddHostKey(host)
+	sc, chans, reqs, err := ssh.NewServerConn(conn, cfg)
+	if err != nil {
+		return
+	}
+	defer sc.Close()
+	go ssh.DiscardRequests(reqs)
+	for nch := range chans {
+		if nch.ChannelType() != "session" {
+			nch.Reject(ssh.UnknownChannelType, "no")
+			continue
+		}
+		ch, reqs, err := nch.Accept()
+		if err != nil {
+			continue
+		}
+		go func() {
+			defer ch.Close()
+			for req := range reqs {
+				if req.Type == "exec" {
+					req.Reply(true, nil)
+					_, _ = io.WriteString(ch, "hi\n")
+					_, _ = ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+					return
+				}
+				req.Reply(false, nil)
+			}
+		}()
+	}
+}
+
+func newKey(t *testing.T) (ssh.Signer, string) {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	return signer, line
+}
+
+func publicFrom(t *testing.T, path string) ssh.PublicKey {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+func sameKey(a, b ssh.PublicKey) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return bytes.Equal(a.Marshal(), b.Marshal())
+}
+
+func freeTCP(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+func freeUDP(t *testing.T) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := pc.LocalAddr().String()
+	pc.Close()
+	return addr
+}
+
+func portOf(addr string) string {
+	_, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
+func atoiPort(addr string) int {
+	var n int
+	fmt.Sscanf(portOf(addr), "%d", &n)
+	return n
+}
+
+func localCall(t *testing.T, sock, op string, req, resp any) error {
+	t.Helper()
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	return rpc.Call(conn, op, req, resp)
+}
+
+func passwordOf(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "one-time password: ") {
+			return strings.TrimPrefix(line, "one-time password: ")
+		}
+	}
+	t.Fatalf("no password in %q", out)
+	return ""
+}
+
+func sshRun(t *testing.T, addr, user string, signer ssh.Signer, cmd string) (string, string, error) {
+	t.Helper()
+	cfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	}
+	client, err := ssh.Dial("tcp", addr, cfg)
+	if err != nil {
+		return "", "", err
+	}
+	defer client.Close()
+	sess, err := client.NewSession()
+	if err != nil {
+		return "", "", err
+	}
+	defer sess.Close()
+	var stdout, stderr bytes.Buffer
+	sess.Stdout = &stdout
+	sess.Stderr = &stderr
+	err = sess.Run(cmd)
+	return stdout.String(), stderr.String(), err
+}
+
+func sshPasswordRun(t *testing.T, addr, user, password, cmd string) (string, string, error) {
+	t.Helper()
+	cfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.Password(password)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	}
+	client, err := ssh.Dial("tcp", addr, cfg)
+	if err != nil {
+		return "", "", err
+	}
+	defer client.Close()
+	sess, err := client.NewSession()
+	if err != nil {
+		return "", "", err
+	}
+	defer sess.Close()
+	var stdout, stderr bytes.Buffer
+	sess.Stdout = &stdout
+	sess.Stderr = &stderr
+	err = sess.Run(cmd)
+	return stdout.String(), stderr.String(), err
+}
+
+func getHost(t *testing.T, addr, host string) int {
+	t.Helper()
+	_, status := get(t, addr, host)
+	return status
+}
+
+func get(t *testing.T, addr, host string) (string, int) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = host
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body), resp.StatusCode
+}
+
+func walkNoSecret(t *testing.T, dir, secret string) {
+	t.Helper()
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Type()&os.ModeSocket != 0 {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(b), secret) {
+			t.Errorf("secret written to %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

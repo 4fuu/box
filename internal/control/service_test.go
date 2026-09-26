@@ -3,212 +3,239 @@ package control
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/4fuu/box/internal/rpc"
+	"github.com/4fuu/box/internal/approve"
+	"github.com/4fuu/box/internal/secret"
 	"github.com/4fuu/box/internal/store"
+	"github.com/4fuu/box/internal/tunnel"
 )
 
-type fakeNodes struct {
-	creates []rpc.CreateBody
-	pulls   []string
-	deleted []string
-	fail    error
-}
-
-func (f *fakeNodes) Create(_ context.Context, _ string, body rpc.CreateBody) error {
-	if f.fail != nil {
-		return f.fail
-	}
-	f.creates = append(f.creates, body)
-	return nil
-}
-func (f *fakeNodes) Delete(_ context.Context, _, name string) error {
-	f.deleted = append(f.deleted, name)
-	return nil
-}
-func (f *fakeNodes) Restart(context.Context, string, rpc.CreateBody) error { return nil }
-func (f *fakeNodes) Rename(context.Context, string, string, string) error  { return nil }
-func (f *fakeNodes) Resize(context.Context, string, rpc.ResizeBody) error  { return nil }
-func (f *fakeNodes) Pull(_ context.Context, _ string, body rpc.PullBody) error {
-	f.pulls = append(f.pulls, body.Name)
-	return nil
-}
-func (f *fakeNodes) SyncKeys(context.Context, string, []string) error { return nil }
-func (f *fakeNodes) HostKey(context.Context, string, string) (string, error) {
-	return "", nil
-}
-func (f *fakeNodes) Stat(context.Context, string, string) (rpc.StatBody, error) {
-	return rpc.StatBody{}, nil
-}
-
-func newSvc(t *testing.T) (*Service, *fakeNodes) {
+func newSvc(t *testing.T) *Service {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "box.db"))
+	st, err := store.Open(t.TempDir() + "/box.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	nodes := &fakeNodes{}
 	return &Service{
-		Store: st, Nodes: nodes, Domain: "box.example.com",
-		GitHubPublic: "ssh-ed25519 AAAAGH github\n",
-	}, nodes
-}
-
-func pairNode(t *testing.T, svc *Service, name string) {
-	t.Helper()
-	p, err := svc.PairNode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, _, err := svc.JoinNode(name, p.Secret); err != nil {
-		t.Fatal(err)
-	}
-	n, err := svc.Store.NodeByName(name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.Store.Heartbeat(n.ID, store.Heartbeat{CPU: 4, Memory: 8 * 1 << 30, Disk: 100 * 1 << 30}); err != nil {
-		t.Fatal(err)
+		Store: st, Domain: "box.example.com", Queue: approve.New(), Live: NewLive(),
+		SplicePublic: "ssh-ed25519 AAAASPLICE box-splice",
+		HTTPPort:     func() int { return 80 },
 	}
 }
 
-func TestCreateDoesNotClaimPortal(t *testing.T) {
-	svc, nodes := newSvc(t)
-	pairNode(t, svc, "home")
-	if err := svc.AddImage("base", "registry.example/base:latest"); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.SetDefaultImage("base"); err != nil {
-		t.Fatal(err)
-	}
-	_, err := svc.Create(context.Background(), CreateInput{Name: "web", Image: "base", Node: "home"})
-	if err == nil || !strings.Contains(err.Error(), "image pull base") {
-		t.Fatalf("expected pull hint, got %v", err)
-	}
-	if err := svc.Pull(context.Background(), "base", "home"); err != nil {
-		t.Fatal(err)
-	}
-	created, err := svc.Create(context.Background(), CreateInput{Name: "web", Image: "base", Node: "home", CPU: 2, Memory: 2 << 30, Disk: 20 << 30})
+func TestPairingAndEnvHideValues(t *testing.T) {
+	svc := newSvc(t)
+	p, err := svc.PairClient()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.SSH != "ssh web@box.example.com" || created.HTTP != "http://web.box.example.com" {
-		t.Fatalf("%+v", created)
+	if strings.Contains(p.Secret, "\n") || p.Secret == "" {
+		t.Fatal(p.Secret)
 	}
-	if _, err := svc.Store.PortalByHost("web.box.example.com"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("new registered a portal: %v", err)
-	}
-	if len(nodes.creates) != 1 {
-		t.Fatalf("creates %d", len(nodes.creates))
-	}
-	body := nodes.creates[0]
-	joined := strings.Join(body.AuthorizedKeys, "\n")
-	if !strings.Contains(joined, "AAAAGH") {
-		t.Fatalf("github key missing from authorized keys: %v", body.AuthorizedKeys)
-	}
-	const secret = "ghp_do_not_print"
-	if _, err := svc.SetEnv("GH_TOKEN", secret); err != nil {
+	if err := svc.ConsumeClient(p.Secret); err != nil {
 		t.Fatal(err)
+	}
+	if err := svc.ConsumeClient(p.Secret); err == nil {
+		t.Fatal("password worked twice")
+	}
+	const sentinel = "ghp_secret"
+	msg, err := svc.SetEnv("GH_TOKEN", sentinel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(msg, sentinel) {
+		t.Fatal(msg)
 	}
 	names, err := svc.EnvNames()
+	if err != nil || len(names) != 1 || names[0] != "GH_TOKEN" {
+		t.Fatalf("%v %v", names, err)
+	}
+	text, err := FormatEnv(names, false)
+	if err != nil || strings.Contains(text, sentinel) {
+		t.Fatal(text)
+	}
+}
+
+func TestAuthorizedLinesIncludeSpliceNotEnv(t *testing.T) {
+	svc := newSvc(t)
+	if err := svc.Store.BindKey("ssh-ed25519 AAAACLIENT laptop", "laptop", "SHA256:laptop"); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := svc.AuthorizedLines()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(strings.Join(names, " "), secret) {
-		t.Fatal("env ls returned a value")
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "AAAACLIENT") || !strings.Contains(joined, "AAAASPLICE") {
+		t.Fatalf("%v", lines)
 	}
-	msg, _ := svc.SetEnv("GH_TOKEN", secret)
-	if strings.Contains(msg, secret) || !strings.Contains(msg, "restart") {
-		t.Fatalf("msg %q", msg)
+	if strings.Contains(joined, "environment=") {
+		t.Fatal(joined)
+	}
+	keys, err := svc.Keys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		if strings.Contains(k.Comment, "splice") || strings.Contains(k.Fingerprint, "AAAASPLICE") {
+			t.Fatal("splice key listed as a client key")
+		}
+	}
+	if len(keys) != 1 || keys[0].Comment != "laptop" {
+		t.Fatalf("%+v", keys)
 	}
 }
 
-func TestReservedAndPortalHold(t *testing.T) {
-	svc, _ := newSvc(t)
-	if _, err := svc.Create(context.Background(), CreateInput{Name: "box"}); err == nil {
-		t.Fatal("box should be reserved")
-	}
-	if _, err := svc.Create(context.Background(), CreateInput{Name: "a+b"}); err == nil {
-		t.Fatal("plus")
-	}
-	pairNode(t, svc, "home")
-	if err := svc.AddImage("base", "ref"); err != nil {
+func TestPortalHoldRenameRemove(t *testing.T) {
+	svc := newSvc(t)
+	if err := svc.Store.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Pull(context.Background(), "base", "home"); err != nil {
+	if _, err := svc.AddPortal("home", "web.other", 80); err == nil {
+		t.Fatal("dot label")
+	}
+	res, err := svc.AddPortal("home", "web", 3000)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Create(context.Background(), CreateInput{Name: "web", Node: "home", Image: "base"}); err != nil {
+	if res.URL != "http://web.box.example.com" || res.Host != "web.box.example.com" || res.Port != 3000 {
+		t.Fatalf("%+v", res)
+	}
+	svc.HTTPPort = func() int { return 8080 }
+	res, err = svc.AddPortal("home", "api", 4000)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Create(context.Background(), CreateInput{Name: "api", Node: "home", Image: "base"}); err != nil {
+	if res.URL != "http://api.box.example.com:8080" {
+		t.Fatal(res.URL)
+	}
+	if err := svc.Store.CreateComputer("other", secret.Hash("tok2"), "bob"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ClaimPortal("web", "app", 3000); err != nil {
+	if _, err := svc.AddPortal("other", "web", 1); err == nil || !strings.Contains(err.Error(), "held by home") {
 		t.Fatal(err)
 	}
-	_, err := svc.ClaimPortal("api", "app", 3001)
-	if err == nil || !strings.Contains(err.Error(), "held by web") {
-		t.Fatalf("%v", err)
+	check, err := svc.CheckPortal("web")
+	if err != nil || check.Free || check.Holder != "home" {
+		t.Fatalf("%+v %v", check, err)
 	}
-	free, holder, err := svc.CheckPortal("app")
-	if err != nil || free || holder != "web" {
-		t.Fatalf("free %v holder %s %v", free, holder, err)
-	}
-	if err := svc.RemoveNode("home"); err == nil || !strings.Contains(err.Error(), "still has computers") {
-		t.Fatalf("%v", err)
-	}
-}
-
-func TestOfflineAndShrink(t *testing.T) {
-	svc, _ := newSvc(t)
-	start := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
-	svc.Store.SetNow(func() time.Time { return start })
-	pairNode(t, svc, "home")
-	if err := svc.AddImage("base", "ref"); err != nil {
+	if err := svc.Rename("home", "house"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Pull(context.Background(), "base", "home"); err != nil {
-		t.Fatal(err)
+	check, err = svc.CheckPortal("web")
+	if err != nil || check.Holder != "house" {
+		t.Fatalf("%+v %v", check, err)
 	}
-	if _, err := svc.Create(context.Background(), CreateInput{Name: "web", Node: "home", Image: "base"}); err != nil {
-		t.Fatal(err)
-	}
-	svc.Store.SetNow(func() time.Time { return start.Add(2 * time.Hour) })
 	list, err := svc.ListComputers()
-	if err != nil {
+	if err != nil || len(list) != 2 {
+		t.Fatal(list, err)
+	}
+	var house ComputerView
+	for _, c := range list {
+		if c.Name == "house" {
+			house = c
+		}
+	}
+	if house.User != "alice" || house.Online || len(house.Portals) != 2 {
+		t.Fatalf("%+v", house)
+	}
+	if err := svc.Remove("house"); err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 1 || list[0].State != "offline" {
-		t.Fatalf("%+v", list)
-	}
-	svc.Store.SetNow(func() time.Time { return start })
-	// Refresh heartbeat so resize is allowed, then shrink.
-	n, err := svc.Store.NodeByName("home")
-	if err != nil {
+	if _, err := svc.CheckPortal("web"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Store.Heartbeat(n.ID, store.Heartbeat{CPU: 4, Memory: 8 << 30, Disk: 100 << 30, Images: []string{"base"}}); err != nil {
-		t.Fatal(err)
+	free, err := svc.CheckPortal("web")
+	if err != nil || !free.Free {
+		t.Fatalf("%+v %v", free, err)
 	}
-	small := int64(1 << 30)
-	if err := svc.Resize(context.Background(), ResizeInput{Name: "web", Disk: &small}); err == nil || !strings.Contains(err.Error(), "disk only grows") {
-		t.Fatalf("%v", err)
+	if _, err := svc.Stat(context.Background(), "house"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatal(err)
 	}
 }
 
-func TestKeyCopyIsOnlyThePublicLine(t *testing.T) {
-	svc, _ := newSvc(t)
-	line, err := svc.KeyCopy()
+func TestStatOffline(t *testing.T) {
+	svc := newSvc(t)
+	if err := svc.Store.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.Stat(context.Background(), "home")
+	if err == nil || !strings.Contains(err.Error(), "offline") {
+		t.Fatal(err)
+	}
+}
+
+func TestApproveSurfacesQueueErrors(t *testing.T) {
+	svc := newSvc(t)
+	if _, err := svc.Approve("nope", "a"); !errors.Is(err, approve.ErrNotFound) {
+		t.Fatal(err)
+	}
+	code := "a3Kf9Q"
+	if err := svc.Queue.Submit("home", "1.2.3.4:9", "", secret.Hash(code)); err != nil {
+		t.Fatal(err)
+	}
+	var granted approve.Pending
+	svc.Grant = func(p approve.Pending) error {
+		granted = p
+		return nil
+	}
+	msg, err := svc.Approve(code, "local")
+	if err != nil || msg != "approved home" || granted.Name != "home" {
+		t.Fatalf("%q %v %+v", msg, err, granted)
+	}
+	if _, err := svc.Approve(code, "local"); !errors.Is(err, approve.ErrNotFound) {
+		t.Fatal(err)
+	}
+}
+
+func TestReservedNames(t *testing.T) {
+	svc := newSvc(t)
+	if err := svc.Rename("nope", "box"); err == nil {
+		t.Fatal("box")
+	}
+	if err := svc.Rename("nope", "join"); err == nil {
+		t.Fatal("join")
+	}
+	if svc.IsComputer("box") || svc.IsComputer("join") || svc.IsComputer("pair+x") {
+		t.Fatal("reserved looked like a computer")
+	}
+}
+
+func TestPendingJSONOmitsCode(t *testing.T) {
+	svc := newSvc(t)
+	code := "a3Kf9Q"
+	if err := svc.Queue.Submit("home", "9.9.9.9:1", "alice", secret.Hash(code)); err != nil {
+		t.Fatal(err)
+	}
+	text, err := FormatPending(svc.Pending(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if line != "ssh-ed25519 AAAAGH github\n" {
-		t.Fatalf("%q", line)
+	if strings.Contains(text, code) || strings.Contains(text, secret.Hash(code)) {
+		t.Fatal(text)
+	}
+	if !strings.Contains(text, "home") || !strings.Contains(text, "alice") {
+		t.Fatal(text)
+	}
+}
+
+func TestFormatStat(t *testing.T) {
+	text, err := FormatStat(tunnel.StatResponse{CPU: 0.5, Memory: 10, Disk: 20, Uptime: 30}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "0.5") || !strings.Contains(text, "uptime") {
+		t.Fatal(text)
+	}
+}
+
+func TestRemoveMissing(t *testing.T) {
+	svc := newSvc(t)
+	err := svc.Remove("nope")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatal(err)
 	}
 }

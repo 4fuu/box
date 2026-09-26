@@ -285,6 +285,24 @@ type Conn struct {
 func (c *Conn) Name() string       { return c.id.Name }
 func (c *Conn) Identity() Identity { return c.id }
 
+// Done closes when the control stream ends. The computer is offline after that.
+func (c *Conn) Done() <-chan struct{} {
+	if c.ctrl == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	return c.ctrl.closed
+}
+
+// RemoteAddr is the computer's QUIC address. Nil before the handshake finishes.
+func (c *Conn) RemoteAddr() net.Addr {
+	if c.ctrl == nil || c.ctrl.qconn == nil {
+		return nil
+	}
+	return c.ctrl.qconn.RemoteAddr()
+}
+
 // Handle sets the function called for computer requests on the control stream.
 func (c *Conn) Handle(h Handler) { c.ctrl.Handle(h) }
 

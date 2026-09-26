@@ -11,10 +11,10 @@ import (
 var labelRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 var envRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// Computer is a container name and an SSH username.
-// box and pair are reserved. '+' and '.' are reserved for pair+ and hostnames.
+// Computer is an SSH username. box, pair, and join are reserved.
+// '+' and '.' are reserved for pair+, join+, and hostnames.
 func Computer(name string) error {
-	if name == "box" || name == "pair" {
+	if name == "box" || name == "pair" || name == "join" {
 		return fmt.Errorf("name %s is reserved", name)
 	}
 	if strings.Contains(name, "+") || strings.Contains(name, ".") {

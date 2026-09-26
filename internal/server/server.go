@@ -1,9 +1,9 @@
-// Package server is `box serve`: SSH entry, HTTP routing, SQLite, pairing, and env.
+// Package server is `box serve`: SSH entry, HTTP portals, QUIC tunnels, SQLite.
 package server
 
 import (
 	"context"
-	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,48 +14,53 @@ import (
 	"net/http/httputil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/4fuu/box/internal/api"
+	"github.com/4fuu/box/internal/approve"
 	"github.com/4fuu/box/internal/control"
-	"github.com/4fuu/box/internal/frp"
 	"github.com/4fuu/box/internal/ident"
 	"github.com/4fuu/box/internal/keys"
 	"github.com/4fuu/box/internal/paths"
 	"github.com/4fuu/box/internal/rpc"
 	"github.com/4fuu/box/internal/store"
+	"github.com/4fuu/box/internal/tunnel"
 	"golang.org/x/crypto/ssh"
 )
 
 // Config is how the server process is started.
-// Domain is required the first time. Later starts reuse the stored domain.
+// Domain is required the first time. Later starts reuse the stored domain
+// and the stored listen addresses; flags are ignored once those exist.
 type Config struct {
 	Domain     string
 	DataDir    string
 	SSHAddr    string
 	HTTPAddr   string
+	QUICAddr   string
 	SocketPath string
-	FRPVhost   string
 	Stdout     io.Writer
-	// Dial reaches a node proxy. "rpc" is the controller. "ssh/<name>" is that computer's sshd.
-	Dial func(ctx context.Context, nodeID, proxy string) (net.Conn, error)
-	// Backend, when set, is used instead of Dial for the container SSH handshake.
-	Backend func(ctx context.Context, computer string) (net.Conn, ssh.PublicKey, error)
 }
 
 // Server is a running box serve.
 type Server struct {
-	cfg      Config
-	store    *store.Store
-	svc      *control.Service
-	httpLn   net.Listener
-	sshLn    net.Listener
-	sockLn   net.Listener
-	httpSrv  *http.Server
-	sshSrv   *sshServer
-	github   ssh.Signer
+	cfg         Config
+	store       *store.Store
+	svc         *control.Service
+	httpLn      net.Listener
+	sshLn       net.Listener
+	sockLn      net.Listener
+	httpSrv     *http.Server
+	sshSrv      *sshServer
+	quic        *tunnel.Server
+	splice      ssh.Signer
+	fingerprint string
+	httpPort    int
+	quicPort    int
+
+	mu       sync.Mutex
+	waiters  map[string]*joinWaiter
 	cancel   context.CancelFunc
 	once     sync.Once
 	closeErr error
@@ -66,64 +71,43 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.DataDir == "" {
 		cfg.DataDir = paths.DataDir
 	}
-	if cfg.SSHAddr == "" {
-		cfg.SSHAddr = paths.SSHListen
-	}
-	if cfg.HTTPAddr == "" {
-		cfg.HTTPAddr = paths.HTTPListen
-	}
 	if cfg.SocketPath == "" {
 		cfg.SocketPath = paths.ServerSocket
-	}
-	if cfg.FRPVhost == "" {
-		cfg.FRPVhost = fmt.Sprintf("127.0.0.1:%d", paths.FRPVHostPort)
 	}
 	if cfg.Stdout == nil {
 		cfg.Stdout = os.Stdout
 	}
-	dbPath := filepath.Join(cfg.DataDir, "box.db")
-	if cfg.Domain == "" {
-		if _, statErr := os.Stat(dbPath); errors.Is(statErr, os.ErrNotExist) {
-			return nil, errors.New("domain is set when the server starts: box serve --domain <domain>")
-		}
-	}
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return nil, err
 	}
+	dbPath := filepath.Join(cfg.DataDir, "box.db")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		return nil, err
 	}
-	domain := cfg.Domain
-	if domain != "" {
-		domain, err = ident.Domain(domain)
-		if err != nil {
-			st.Close()
-			return nil, err
-		}
-		if err := st.SetMeta("domain", domain); err != nil {
-			st.Close()
-			return nil, err
-		}
-	} else {
-		stored, ok, err := st.Meta("domain")
-		if err != nil {
-			st.Close()
-			return nil, err
-		}
-		if !ok || stored == "" {
-			st.Close()
-			return nil, errors.New("domain is set when the server starts: box serve --domain <domain>")
-		}
-		domain = stored
-	}
-	ghPath := filepath.Join(cfg.DataDir, "github_ed25519")
-	ghLine, err := keys.Generate(ghPath, "box")
+	domain, err := persistedDomain(st, cfg.Domain)
 	if err != nil {
 		st.Close()
 		return nil, err
 	}
-	signer, err := keys.Signer(ghPath)
+	sshAddr, httpAddr, quicAddr, err := persistedAddrs(st, cfg.SSHAddr, cfg.HTTPAddr, cfg.QUICAddr)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	cfg.SSHAddr, cfg.HTTPAddr, cfg.QUICAddr = sshAddr, httpAddr, quicAddr
+
+	splicePath := filepath.Join(cfg.DataDir, "splice_ed25519")
+	spliceLine, err := keys.Generate(splicePath, "box-splice")
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	if err := os.Chmod(splicePath, 0o600); err != nil {
+		st.Close()
+		return nil, err
+	}
+	signer, err := keys.Signer(splicePath)
 	if err != nil {
 		st.Close()
 		return nil, err
@@ -133,29 +117,97 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		st.Close()
 		return nil, err
 	}
-	svc := &control.Service{Store: st, Domain: domain, GitHubPublic: ghLine}
-	tok, err := svc.EnsureFRPToken()
+	cert, fp, err := loadOrCreateCert(filepath.Join(cfg.DataDir, "quic.pem"))
 	if err != nil {
 		st.Close()
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(cfg.DataDir, "frps.toml"), []byte(frp.ServerTOML(paths.FRPPort, paths.FRPVHostPort, tok)), 0o600); err != nil {
-		st.Close()
-		return nil, err
+	svc := &control.Service{
+		Store:        st,
+		Domain:       domain,
+		SplicePublic: strings.TrimSpace(spliceLine),
+		Queue:        approve.New(),
+		Live:         control.NewLive(),
 	}
 	if err := printFirstPassword(svc, st, cfg.Stdout); err != nil {
 		st.Close()
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, svc: svc, github: signer}
-	s.svc.Nodes = dialClient{dial: cfg.Dial}
+	s := &Server{
+		cfg:         cfg,
+		store:       st,
+		svc:         svc,
+		splice:      signer,
+		fingerprint: fp,
+		waiters:     map[string]*joinWaiter{},
+	}
+	svc.Grant = s.grant
+	svc.HTTPPort = func() int { return s.httpPort }
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
-	if err := s.listen(ctx, hostKey); err != nil {
+	if err := s.listen(ctx, hostKey, cert); err != nil {
 		s.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+func persistedDomain(st *store.Store, flag string) (string, error) {
+	stored, ok, err := st.Meta("domain")
+	if err != nil {
+		return "", err
+	}
+	if ok && stored != "" {
+		return stored, nil
+	}
+	if strings.TrimSpace(flag) == "" {
+		return "", errors.New("domain is set when the server starts: box serve --domain <domain>")
+	}
+	domain, err := ident.Domain(flag)
+	if err != nil {
+		return "", err
+	}
+	if err := st.SetMeta("domain", domain); err != nil {
+		return "", err
+	}
+	return domain, nil
+}
+
+func persistedAddrs(st *store.Store, sshAddr, httpAddr, quicAddr string) (string, string, string, error) {
+	storedSSH, okS, err := st.Meta("ssh_addr")
+	if err != nil {
+		return "", "", "", err
+	}
+	storedHTTP, okH, err := st.Meta("http_addr")
+	if err != nil {
+		return "", "", "", err
+	}
+	storedQUIC, okQ, err := st.Meta("quic_addr")
+	if err != nil {
+		return "", "", "", err
+	}
+	if okS && okH && okQ && storedSSH != "" && storedHTTP != "" && storedQUIC != "" {
+		return storedSSH, storedHTTP, storedQUIC, nil
+	}
+	if sshAddr == "" {
+		sshAddr = ":22"
+	}
+	if httpAddr == "" {
+		httpAddr = ":80"
+	}
+	if quicAddr == "" {
+		quicAddr = ":7443"
+	}
+	if err := st.SetMeta("ssh_addr", sshAddr); err != nil {
+		return "", "", "", err
+	}
+	if err := st.SetMeta("http_addr", httpAddr); err != nil {
+		return "", "", "", err
+	}
+	if err := st.SetMeta("quic_addr", quicAddr); err != nil {
+		return "", "", "", err
+	}
+	return sshAddr, httpAddr, quicAddr, nil
 }
 
 func printFirstPassword(svc *control.Service, st *store.Store, w io.Writer) error {
@@ -176,14 +228,23 @@ func printFirstPassword(svc *control.Service, st *store.Store, w io.Writer) erro
 	return st.SetMeta("initialized", "1")
 }
 
-func (s *Server) listen(ctx context.Context, hostKey string) error {
+func (s *Server) listen(ctx context.Context, hostKey string, cert tls.Certificate) error {
 	httpLn, err := net.Listen("tcp", s.cfg.HTTPAddr)
 	if err != nil {
 		return err
 	}
 	s.httpLn = httpLn
+	s.httpPort = configuredPort(s.cfg.HTTPAddr, httpLn.Addr())
 	s.httpSrv = &http.Server{Handler: s, ErrorLog: log.New(io.Discard, "", 0), ReadHeaderTimeout: 10 * time.Second}
 	go s.httpSrv.Serve(httpLn)
+
+	quicSrv, err := tunnel.Listen(s.cfg.QUICAddr, cert, s.onHello)
+	if err != nil {
+		return err
+	}
+	s.quic = quicSrv
+	s.quicPort = configuredPort(s.cfg.QUICAddr, mustAddr(quicSrv.Addr()))
+	go s.acceptTunnels(ctx)
 
 	if err := os.MkdirAll(filepath.Dir(s.cfg.SocketPath), 0o700); err != nil {
 		return err
@@ -218,7 +279,91 @@ func (s *Server) listen(ctx context.Context, hostKey string) error {
 	return nil
 }
 
-// HTTPAddr is the fixed HTTP port.
+func (s *Server) acceptTunnels(ctx context.Context) {
+	for {
+		c, err := s.quic.Accept(ctx)
+		if err != nil {
+			// A refused hello fails that computer only. The listener stays up.
+			if ctx.Err() != nil {
+				return
+			}
+			continue
+		}
+		s.attach(c)
+	}
+}
+
+func (s *Server) onHello(id tunnel.Identity) (tunnel.HelloResult, error) {
+	ok, err := s.store.TokenMatches(id.Name, id.Token)
+	if err != nil {
+		return tunnel.HelloResult{}, errors.New("unauthorized")
+	}
+	if !ok {
+		return tunnel.HelloResult{}, errors.New("unauthorized")
+	}
+	if id.User != "" || id.HostKey != "" {
+		if err := s.store.SetComputerInfo(id.Name, id.User, id.HostKey); err != nil {
+			return tunnel.HelloResult{}, errors.New("unauthorized")
+		}
+	}
+	return tunnel.HelloResult{Domain: s.svc.Domain, HTTPPort: s.httpPort}, nil
+}
+
+func (s *Server) attach(c *tunnel.Conn) {
+	old, ok := s.svc.Live.AttachIf(c.Name(), c, func() bool {
+		_, err := s.store.Computer(c.Name())
+		return err == nil
+	})
+	if !ok {
+		_ = c.Close()
+		return
+	}
+	if old != nil {
+		_ = old.Close()
+	}
+	c.Handle(s.onControl(c))
+	go func() {
+		<-c.Done()
+		s.svc.Live.Forget(c)
+	}()
+	go s.svc.PushAll(context.Background(), c)
+}
+
+func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
+	return func(op string, body json.RawMessage) (any, error) {
+		name := s.svc.Live.CurrentName(c)
+		switch op {
+		case tunnel.OpPortalCheck:
+			var req tunnel.PortalCheckRequest
+			if err := json.Unmarshal(body, &req); err != nil {
+				return nil, errors.New("bad request")
+			}
+			return s.svc.CheckPortal(req.Label)
+		case tunnel.OpPortalAdd:
+			var req tunnel.PortalAddRequest
+			if err := json.Unmarshal(body, &req); err != nil {
+				return nil, errors.New("bad request")
+			}
+			return s.svc.AddPortal(name, req.Label, req.Port)
+		case tunnel.OpPortalRm:
+			var req tunnel.PortalRmRequest
+			if err := json.Unmarshal(body, &req); err != nil {
+				return nil, errors.New("bad request")
+			}
+			return nil, s.svc.RemovePortal(name, req.Label)
+		case tunnel.OpPortalLs:
+			return s.svc.ListPortals(name)
+		default:
+			return nil, errors.New("unsupported")
+		}
+	}
+}
+
+func (s *Server) quicEndpoint() string {
+	return fmt.Sprintf("%s:%d", s.svc.Domain, s.quicPort)
+}
+
+// HTTPAddr is the HTTP port that was bound.
 func (s *Server) HTTPAddr() string {
 	if s.httpLn == nil {
 		return ""
@@ -227,7 +372,23 @@ func (s *Server) HTTPAddr() string {
 }
 
 // SSHAddr is the control SSH port.
-func (s *Server) SSHAddr() string { return s.sshLn.Addr().String() }
+func (s *Server) SSHAddr() string {
+	if s.sshLn == nil {
+		return ""
+	}
+	return s.sshLn.Addr().String()
+}
+
+// QUICAddr is the UDP port computers dial.
+func (s *Server) QUICAddr() string {
+	if s.quic == nil {
+		return ""
+	}
+	return s.quic.Addr()
+}
+
+// QUICFingerprint is the pinned certificate fingerprint.
+func (s *Server) QUICFingerprint() string { return s.fingerprint }
 
 // Close stops listeners. It is safe to call more than once.
 func (s *Server) Close() error {
@@ -242,6 +403,11 @@ func (s *Server) Close() error {
 		}
 		if s.sshSrv != nil {
 			s.sshSrv.close()
+		}
+		if s.quic != nil {
+			if err := s.quic.Close(); err != nil && s.closeErr == nil {
+				s.closeErr = err
+			}
 		}
 		if s.sshLn != nil {
 			s.sshLn.Close()
@@ -260,34 +426,27 @@ func (s *Server) Close() error {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := hostname(r.Host)
-	if p, err := s.store.PortalByHost(host); err == nil {
-		s.proxyPortal(w, r, p, host)
+	p, err := s.store.PortalByHost(host)
+	if err != nil {
+		w.WriteHeader(http.StatusMisdirectedRequest)
+		_, _ = io.WriteString(w, "unknown host\n")
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, api.Prefix) && apiHost(host, s.svc.Domain) {
-		s.nodeAPI(w, r)
+	conn := s.svc.Live.Get(p.Computer)
+	if conn == nil {
+		http.Error(w, "computer offline\n", http.StatusBadGateway)
 		return
 	}
-	w.WriteHeader(http.StatusMisdirectedRequest)
-	_, _ = io.WriteString(w, "unknown host\n")
-}
-
-func apiHost(host, domain string) bool {
-	return host == domain || host == "localhost" || host == "127.0.0.1"
-}
-
-func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Portal, host string) {
-	n, err := s.store.NodeByID(p.NodeID)
-	if err != nil || !s.svc.Online(n) {
-		http.Error(w, "node offline\n", http.StatusBadGateway)
-		return
-	}
-	target := s.cfg.FRPVhost
 	rp := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
-			req.URL.Host = target
-			req.Host = host
+			req.URL.Host = host
+		},
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return conn.OpenPortal(ctx, p.Port)
+			},
+			DisableKeepAlives: true,
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
 			http.Error(w, "bad gateway\n", http.StatusBadGateway)
@@ -295,183 +454,6 @@ func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Por
 		FlushInterval: -1,
 	}
 	rp.ServeHTTP(w, r)
-}
-
-func (s *Server) nodeAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method\n", http.StatusMethodNotAllowed)
-		return
-	}
-	path := strings.TrimPrefix(r.URL.Path, api.Prefix)
-	if path == "/join" {
-		s.join(w, r)
-		return
-	}
-	n, ok := s.authNode(r)
-	if !ok {
-		http.Error(w, "unauthorized\n", http.StatusUnauthorized)
-		return
-	}
-	switch path {
-	case "/heartbeat":
-		s.heartbeat(w, r, n)
-	case "/domain":
-		writeJSON(w, api.DomainResponse{Domain: s.svc.Domain})
-	case "/claim":
-		s.claim(w, r, n)
-	case "/check":
-		s.check(w, r)
-	case "/release":
-		s.release(w, r, n)
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func (s *Server) authNode(r *http.Request) (store.Node, bool) {
-	h := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(h, prefix) {
-		return store.Node{}, false
-	}
-	token := strings.TrimPrefix(h, prefix)
-	n, err := s.store.NodeByToken(token)
-	if err != nil {
-		return store.Node{}, false
-	}
-	// Compare the stored token so a hash match is not the only check.
-	stored, err := s.store.NodeToken(n.ID)
-	if err != nil || subtle.ConstantTimeCompare([]byte(stored), []byte(token)) != 1 {
-		return store.Node{}, false
-	}
-	return n, true
-}
-
-func (s *Server) join(w http.ResponseWriter, r *http.Request) {
-	var req api.JoinRequest
-	if err := readJSON(r, &req); err != nil {
-		http.Error(w, "invalid code\n", http.StatusBadRequest)
-		return
-	}
-	id, token, frpToken, err := s.svc.JoinNode(req.Name, req.Code)
-	if err != nil {
-		http.Error(w, err.Error()+"\n", http.StatusUnauthorized)
-		return
-	}
-	writeJSON(w, api.JoinResponse{ID: id, Token: token, FRPToken: frpToken})
-}
-
-func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, n store.Node) {
-	var req api.HeartbeatRequest
-	if err := readJSON(r, &req); err != nil {
-		http.Error(w, "bad request\n", http.StatusBadRequest)
-		return
-	}
-	comps := make([]store.ReportedComputer, 0, len(req.Computers))
-	for _, c := range req.Computers {
-		comps = append(comps, store.ReportedComputer{Name: c.Name, State: c.State})
-	}
-	if err := s.store.Heartbeat(n.ID, store.Heartbeat{
-		CPU: req.CPU, Memory: req.Memory, Disk: req.Disk,
-		UsedCPU: req.UsedCPU, UsedMemory: req.UsedMemory, UsedDisk: req.UsedDisk,
-		Images: req.Images, Computers: comps,
-	}); err != nil {
-		http.Error(w, "bad request\n", http.StatusBadRequest)
-		return
-	}
-	lines, err := s.svc.AuthorizedLines()
-	if err != nil {
-		http.Error(w, "bad request\n", http.StatusBadRequest)
-		return
-	}
-	ports, err := s.svc.PortalsForNode(n.ID)
-	if err != nil {
-		http.Error(w, "bad request\n", http.StatusBadRequest)
-		return
-	}
-	out := api.HeartbeatResponse{Domain: s.svc.Domain, Keys: lines}
-	for _, p := range ports {
-		out.Portals = append(out.Portals, api.PortalReport{Label: p.Label, Host: p.Host, Port: p.Port, Container: s.containerOf(p.Host)})
-	}
-	writeJSON(w, out)
-}
-
-func (s *Server) containerOf(host string) string {
-	p, err := s.store.PortalByHost(host)
-	if err != nil {
-		return ""
-	}
-	return p.Container
-}
-
-func (s *Server) claim(w http.ResponseWriter, r *http.Request, n store.Node) {
-	var req api.ClaimRequest
-	if err := readJSON(r, &req); err != nil {
-		http.Error(w, "bad request\n", http.StatusBadRequest)
-		return
-	}
-	c, err := s.store.Computer(req.Container)
-	if err != nil || c.NodeID != n.ID {
-		http.Error(w, "unknown computer\n", http.StatusForbidden)
-		return
-	}
-	url, err := s.svc.ClaimPortal(req.Container, req.Label, req.Port)
-	if err != nil {
-		http.Error(w, err.Error()+"\n", http.StatusConflict)
-		return
-	}
-	writeJSON(w, api.ClaimResponse{URL: url, Host: ident.Hostname(req.Label, s.svc.Domain)})
-}
-
-func (s *Server) check(w http.ResponseWriter, r *http.Request) {
-	var req api.CheckRequest
-	if err := readJSON(r, &req); err != nil {
-		http.Error(w, "bad request\n", http.StatusBadRequest)
-		return
-	}
-	free, holder, err := s.svc.CheckPortal(req.Label)
-	if err != nil {
-		http.Error(w, err.Error()+"\n", http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, api.CheckResponse{Free: free, Holder: holder})
-}
-
-func (s *Server) release(w http.ResponseWriter, r *http.Request, n store.Node) {
-	var req api.ReleaseRequest
-	if err := readJSON(r, &req); err != nil {
-		http.Error(w, "bad request\n", http.StatusBadRequest)
-		return
-	}
-	c, err := s.store.Computer(req.Container)
-	if err != nil || c.NodeID != n.ID {
-		http.Error(w, "unknown computer\n", http.StatusForbidden)
-		return
-	}
-	if err := s.svc.RemovePortal(req.Container, req.Label); err != nil {
-		http.Error(w, err.Error()+"\n", http.StatusNotFound)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func readJSON(r *http.Request, dest any) error {
-	defer r.Body.Close()
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	return dec.Decode(dest)
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	_ = enc.Encode(v)
-}
-
-func hostname(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	return strings.ToLower(host)
 }
 
 func (s *Server) acceptSock(ctx context.Context, ln net.Listener) {
@@ -495,12 +477,6 @@ func (s *Server) local(op string, body json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"secret": p.Secret, "expires": p.Expires, "kind": "client"}, nil
-	case "node_pair":
-		p, err := s.svc.PairNode()
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"secret": p.Secret, "expires": p.Expires, "kind": "node"}, nil
 	case "key_ls":
 		return s.svc.Keys()
 	case "key_rm":
@@ -511,12 +487,6 @@ func (s *Server) local(op string, body json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return nil, s.svc.RemoveKey(req.Match)
-	case "key_copy":
-		line, err := s.svc.KeyCopy()
-		if err != nil {
-			return nil, err
-		}
-		return map[string]string{"public": line}, nil
 	case "env_set":
 		var req struct {
 			Name  string `json:"name"`
@@ -544,9 +514,84 @@ func (s *Server) local(op string, body json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"names": names}, nil
+	case "ls":
+		return s.svc.ListComputers()
+	case "pending":
+		return s.svc.Pending(), nil
+	case "approve":
+		var req struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		msg, err := s.svc.Approve(req.Code, "local")
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"message": msg}, nil
+	case "rm":
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		return nil, s.svc.Remove(req.Name)
+	case "rename":
+		var req struct {
+			Old string `json:"old"`
+			New string `json:"new"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		return nil, s.svc.Rename(req.Old, req.New)
+	case "stat":
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		return s.svc.Stat(context.Background(), req.Name)
 	case "status":
 		return s.svc.Status()
 	default:
 		return nil, errors.New("unknown command")
 	}
 }
+
+func hostname(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.ToLower(host)
+}
+
+func configuredPort(addr string, actual net.Addr) int {
+	p := splitPort(addr)
+	if p == 0 && actual != nil {
+		p = splitPort(actual.String())
+	}
+	return p
+}
+
+func splitPort(addr string) int {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+type stringAddr string
+
+func (a stringAddr) Network() string { return "udp" }
+func (a stringAddr) String() string  { return string(a) }
+
+func mustAddr(s string) net.Addr { return stringAddr(s) }

@@ -10,11 +10,14 @@ import (
 	"strings"
 )
 
-const alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+const (
+	alphabet         = "abcdefghjkmnpqrstuvwxyz23456789"
+	approvalAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
 
 // ClientPassword is four-character groups the operator can type.
 func ClientPassword() (string, error) {
-	raw, err := draw(20)
+	raw, err := draw(alphabet, 20)
 	if err != nil {
 		return "", err
 	}
@@ -23,7 +26,12 @@ func ClientPassword() (string, error) {
 
 // NodeCode is a short single-use pairing code.
 func NodeCode() (string, error) {
-	return draw(8)
+	return draw(alphabet, 8)
+}
+
+// ApprovalCode is the 6-character mixed-case code a computer prints at join.
+func ApprovalCode() (string, error) {
+	return draw(approvalAlphabet, 6)
 }
 
 // Hash is what the server stores. Pairing rows keep this, not the secret.
@@ -43,15 +51,15 @@ func NormalizePassword(s string) string {
 	return s
 }
 
-func draw(n int) (string, error) {
-	max := big.NewInt(int64(len(alphabet)))
+func draw(set string, n int) (string, error) {
+	max := big.NewInt(int64(len(set)))
 	out := make([]byte, n)
 	for i := 0; i < n; i++ {
 		v, err := rand.Int(rand.Reader, max)
 		if err != nil {
 			return "", err
 		}
-		out[i] = alphabet[v.Int64()]
+		out[i] = set[v.Int64()]
 	}
 	return string(out), nil
 }

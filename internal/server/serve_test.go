@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -245,7 +247,8 @@ func TestComputersTunnel(t *testing.T) {
 		return nil, nil
 	})
 	authed := make(chan ssh.PublicKey, 1)
-	go acceptAgent(ctx, agent, hostKey, authed)
+	var sshStreams atomic.Int32
+	go acceptAgent(ctx, agent, hostKey, authed, &sshStreams)
 
 	var add tunnel.PortalAddResponse
 	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: 3000}, &add); err != nil {
@@ -306,6 +309,13 @@ func TestComputersTunnel(t *testing.T) {
 	if strings.Contains(keysOut, strings.TrimSpace(string(pub))) {
 		t.Fatal("key ls listed the splice key")
 	}
+	streams := sshStreams.Load()
+	if err := tokenMustNotSplice(t, srv.SSHAddr(), reply.Token); err != nil {
+		t.Fatal(err)
+	}
+	if got := sshStreams.Load(); got != streams {
+		t.Fatalf("token opened %d ssh streams", got-streams)
+	}
 
 	_ = agent.Close()
 	bad, err := tunnel.Dial(ctx, srv.QUICAddr(), reply.Fingerprint)
@@ -319,7 +329,7 @@ func TestComputersTunnel(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad.Handle(func(string, json.RawMessage) (any, error) { return nil, nil })
-	go acceptAgent(ctx, bad, hostKey, nil)
+	go acceptAgent(ctx, bad, hostKey, nil, nil)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		out, _, err := sshRun(t, srv.SSHAddr(), "box", signer, "ls")
@@ -358,6 +368,81 @@ func TestComputersTunnel(t *testing.T) {
 	}
 	if err := localCall(t, filepath.Join(dir, "box.sock"), "bind", map[string]string{"key": "x"}, nil); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("socket bind: %v", err)
+	}
+}
+
+func TestCancelledJoinLeavesNoComputer(t *testing.T) {
+	dir := t.TempDir()
+	srv, greet := start(t, dir, "box.example.com", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
+	pass := passwordOf(t, greet)
+	signer, _, err := keys.GenerateSigner("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sshRun(t, srv.SSHAddr(), "pair+"+pass, signer, "ls"); err != nil {
+		t.Fatal(err)
+	}
+	code, err := secret.ApprovalCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := ssh.Dial("tcp", srv.SSHAddr(), &ssh.ClientConfig{
+		User:            "join+parked",
+		Auth:            []ssh.AuthMethod{ssh.Password(secret.Hash(code))},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- sess.Run("x") }()
+	waitPending(t, srv.SSHAddr(), signer, "parked")
+	client.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("join session did not exit")
+	}
+	if _, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "approve "+code); err == nil {
+		t.Fatalf("approve after cancel succeeded: %s", errOut)
+	}
+	out, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "ls")
+	if err != nil {
+		t.Fatalf("ls: %v %s", err, errOut)
+	}
+	if strings.Contains(out, "parked") {
+		t.Fatalf("cancelled join left a computer:\n%s", out)
+	}
+}
+
+type refuseSign struct{ ssh.Signer }
+
+func (refuseSign) Sign(io.Reader, []byte) (*ssh.Signature, error) {
+	return nil, errors.New("refuse to sign")
+}
+
+func TestUnsignedPublicKeyDoesNotBurnPairing(t *testing.T) {
+	dir := t.TempDir()
+	srv, greet := start(t, dir, "box.example.com", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
+	pass := passwordOf(t, greet)
+	signer, _, err := keys.GenerateSigner("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sshRun(t, srv.SSHAddr(), "pair+"+pass, refuseSign{signer}, "ls"); err == nil {
+		t.Fatal("refused signature authenticated")
+	}
+	// The query must not have bound the key or consumed the password.
+	if _, _, err := sshRun(t, srv.SSHAddr(), "box", signer, "ls"); err == nil {
+		t.Fatal("unsigned query bound the key")
+	}
+	if _, _, err := sshRun(t, srv.SSHAddr(), "pair+"+pass, signer, "ls"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -469,7 +554,7 @@ func waitPending(t *testing.T, addr string, signer ssh.Signer, name string) {
 	}
 }
 
-func acceptAgent(ctx context.Context, sess *tunnel.Session, host ssh.Signer, authed chan ssh.PublicKey) {
+func acceptAgent(ctx context.Context, sess *tunnel.Session, host ssh.Signer, authed chan ssh.PublicKey, sshStreams *atomic.Int32) {
 	for {
 		kind, _, conn, err := sess.Accept(ctx)
 		if err != nil {
@@ -479,11 +564,47 @@ func acceptAgent(ctx context.Context, sess *tunnel.Session, host ssh.Signer, aut
 		case tunnel.KindPortal:
 			go httpPong(conn)
 		case tunnel.KindSSH:
+			if sshStreams != nil {
+				sshStreams.Add(1)
+			}
 			go serveAgentSSH(conn, host, authed)
 		default:
 			conn.Close()
 		}
 	}
+}
+
+// tokenMustNotSplice fails if a computer token can open SFTP or forwarding.
+// Those channels are a bound-key splice; the token is only the bootstrap.
+func tokenMustNotSplice(t *testing.T, addr, token string) error {
+	t.Helper()
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:            "home",
+		Auth:            []ssh.AuthMethod{ssh.Password(token)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	sess, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	// wish accepts the subsystem request before the handler runs. Wait for
+	// that handler to finish, then the caller checks that no ssh stream opened.
+	if err := sess.RequestSubsystem("sftp"); err == nil {
+		_ = sess.Wait()
+	}
+	if _, err := client.Dial("tcp", "127.0.0.1:9"); err == nil {
+		return errors.New("token opened direct-tcpip")
+	}
+	if ln, err := client.Listen("tcp", "127.0.0.1:0"); err == nil {
+		ln.Close()
+		return errors.New("token opened tcpip-forward")
+	}
+	return nil
 }
 
 func httpPong(conn net.Conn) {

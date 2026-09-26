@@ -70,15 +70,19 @@ func (h *sshServer) close() {
 
 func (h *sshServer) publicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 	user := ctx.User()
-	class, rest := classifyUser(user)
+	class, _ := classifyUser(user)
+	// pair+ is decided here only so the client can sign. golang.org/x/crypto/ssh
+	// calls this for the unsigned publickey query, before the signature exists.
 	if class == classPair {
-		if err := h.s.svc.ConsumeClient(rest); err != nil {
+		if key == nil {
 			return false
 		}
-		if key == nil || h.s.svc.Bind(key, "") != nil {
+		accept, route := publicKeyDecision(class, false, false, false)
+		if !accept {
 			return false
 		}
-		h.s.svc.PushKeys(ctx)
+		ctx.SetValue(routeKey, route)
+		return true
 	}
 	bound := false
 	if key != nil {
@@ -129,6 +133,8 @@ func (h *sshServer) password(ctx ssh.Context, password string) bool {
 
 func (h *sshServer) session(sess ssh.Session) {
 	switch sess.Context().Value(routeKey) {
+	case routeREPL:
+		h.serveREPL(sess)
 	case routeJoin:
 		h.serveJoin(sess)
 	case routeBoot:
@@ -140,19 +146,44 @@ func (h *sshServer) session(sess ssh.Session) {
 		h.serveREPL(sess)
 	case routeSplice:
 		_ = h.bridge(sess, sess.User(), true)
+	case routePair:
+		if !h.finishPair(sess) {
+			return
+		}
+		h.serveREPL(sess)
 	default:
-		user := sess.User()
-		if h.s.svc.IsComputer(user) {
-			_ = h.bridge(sess, user, true)
-			return
-		}
-		if user == "" || user == "box" || strings.HasPrefix(user, "pair+") {
-			h.serveREPL(sess)
-			return
-		}
 		fmt.Fprintln(sess.Stderr(), "unknown computer")
 		_ = sess.Exit(1)
 	}
+}
+
+// finishPair consumes the one-time password and binds the key that just
+// authenticated. The signature has already been checked; this is the same
+// moment as the interactive password prompt.
+func (h *sshServer) finishPair(sess ssh.Session) bool {
+	_, rest := classifyUser(sess.User())
+	_, _, pty := sess.Pty()
+	errOut := io.Writer(sess.Stderr())
+	if pty {
+		errOut = repl.CRLF(sess)
+	}
+	if err := h.s.svc.ConsumeClient(rest); err != nil {
+		fmt.Fprintln(errOut, err.Error())
+		_ = sess.Exit(1)
+		return false
+	}
+	if sess.PublicKey() == nil {
+		fmt.Fprintln(errOut, "no key")
+		_ = sess.Exit(1)
+		return false
+	}
+	if err := h.s.svc.Bind(sess.PublicKey(), ""); err != nil {
+		fmt.Fprintln(errOut, err.Error())
+		_ = sess.Exit(1)
+		return false
+	}
+	h.s.svc.PushKeys(sess.Context())
+	return true
 }
 
 func (h *sshServer) serveBootstrap(sess ssh.Session) {
@@ -401,8 +432,12 @@ func (h *sshServer) bridge(sess ssh.Session, computer string, closeSession bool)
 	return nil
 }
 
+func spliceRoute(ctx ssh.Context) bool {
+	return ctx.Value(routeKey) == routeSplice
+}
+
 func (h *sshServer) subsystem(sess ssh.Session) {
-	if !h.s.svc.IsComputer(sess.User()) {
+	if !spliceRoute(sess.Context()) {
 		_ = sess.Exit(1)
 		return
 	}
@@ -437,7 +472,7 @@ func (h *sshServer) subsystem(sess ssh.Session) {
 }
 
 func (h *sshServer) directTCP(srv *ssh.Server, conn *gossh.ServerConn, newChan gossh.NewChannel, ctx ssh.Context) {
-	if !h.s.svc.IsComputer(ctx.User()) {
+	if !spliceRoute(ctx) {
 		newChan.Reject(gossh.Prohibited, "port forwarding is disabled")
 		return
 	}
@@ -473,7 +508,7 @@ func (h *sshServer) directTCP(srv *ssh.Server, conn *gossh.ServerConn, newChan g
 }
 
 func (h *sshServer) tcpipForward(ctx ssh.Context, srv *ssh.Server, req *gossh.Request) (bool, []byte) {
-	if !h.s.svc.IsComputer(ctx.User()) {
+	if !spliceRoute(ctx) {
 		return false, nil
 	}
 	var payload struct {

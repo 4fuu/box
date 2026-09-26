@@ -103,9 +103,6 @@ func (s *Store) SetNow(fn func() time.Time) {
 
 func (s *Store) now() time.Time { return s.nowfn().UTC() }
 
-// Now is the clock used for expiry.
-func (s *Store) Now() time.Time { return s.now() }
-
 func (s *Store) tighten() error {
 	if err := os.Chmod(filepath.Dir(s.path), 0o700); err != nil {
 		return err

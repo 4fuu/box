@@ -332,7 +332,7 @@ func (r *REPL) Exec(argv []string) error {
 		if len(args) != 1 {
 			return errors.New("usage: stat <name>")
 		}
-		view, err := r.Svc.Stat(r.ctx(), args[0])
+		view, err := r.Svc.Stat(context.Background(), args[0])
 		if err != nil {
 			return err
 		}
@@ -457,8 +457,6 @@ func (r *REPL) ask(prompt, def string) (string, error) {
 	}
 	return line, nil
 }
-
-func (r *REPL) ctx() context.Context { return context.Background() }
 
 func (r *REPL) write(fn func() (string, error)) error {
 	text, err := fn()

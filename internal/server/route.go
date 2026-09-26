@@ -17,6 +17,7 @@ const (
 const (
 	routeREPL   = "repl"
 	routeBind   = "bind"
+	routePair   = "pair"
 	routeJoin   = "join"
 	routeBoot   = "boot"
 	routeSplice = "splice"
@@ -37,11 +38,12 @@ func classifyUser(user string) (userClass, string) {
 }
 
 // publicKeyDecision is the public-key half of the route table.
-// classPair is accepted only after the one-time password in the username is consumed.
+// classPair may sign. The one-time password is consumed only after that
+// signature has authenticated and the session exists.
 func publicKeyDecision(class userClass, bound, livePair, computer bool) (bool, string) {
 	switch class {
 	case classPair:
-		return true, routeREPL
+		return true, routePair
 	case classJoin:
 		return false, ""
 	case classREPL:

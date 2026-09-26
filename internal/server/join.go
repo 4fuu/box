@@ -19,18 +19,29 @@ const joinWait = 10 * time.Minute
 
 // joinWaiter is the parked SSH session. The queue lock is never held while
 // this session waits, and Grant does not run under that lock.
+//
+// grant is the only writer of the computer row. It reports success only after
+// the session has accepted the token. A cancel waits for that decision instead
+// of racing a non-blocking receive.
 type joinWaiter struct {
-	ch   chan joinMsg
-	done chan struct{}
-	once sync.Once
+	mu        sync.Mutex
+	started   bool
+	cancelled bool
+	token     string
+
+	ready chan struct{}
+	ack   chan error
+	once  sync.Once
 }
 
-type joinMsg struct {
-	token   string
-	errText string
+func newJoinWaiter() *joinWaiter {
+	return &joinWaiter{
+		ready: make(chan struct{}),
+		ack:   make(chan error, 1),
+	}
 }
 
-func (w *joinWaiter) cancel() { w.once.Do(func() { close(w.done) }) }
+func (w *joinWaiter) closeReady() { w.once.Do(func() { close(w.ready) }) }
 
 func newToken() (string, error) {
 	var b [32]byte
@@ -51,23 +62,42 @@ func (s *Server) grant(p approve.Pending) error {
 	if err != nil {
 		return err
 	}
+
+	w.mu.Lock()
+	w.started = true
+	if w.cancelled {
+		w.mu.Unlock()
+		w.closeReady()
+		return errors.New("join expired")
+	}
+	w.mu.Unlock()
+
 	if err := s.store.CreateComputer(p.Name, secret.Hash(raw), p.User); err != nil {
 		if errors.Is(err, store.ErrExists) {
 			err = fmt.Errorf("%s already exists", p.Name)
 		}
-		select {
-		case w.ch <- joinMsg{errText: "rejected"}:
-		case <-w.done:
-		}
+		w.closeReady()
 		return err
 	}
-	select {
-	case <-w.done:
+
+	w.mu.Lock()
+	if w.cancelled {
+		w.mu.Unlock()
 		_ = s.store.DeleteComputer(p.Name)
+		w.closeReady()
 		return errors.New("join expired")
-	case w.ch <- joinMsg{token: raw}:
-		return nil
 	}
+	w.token = raw
+	w.mu.Unlock()
+	w.closeReady()
+
+	// The session acks only after the SSH write. A failure deletes the row
+	// before Approve tells the operator the join succeeded.
+	if err := <-w.ack; err != nil {
+		_ = s.store.DeleteComputer(p.Name)
+		return err
+	}
+	return nil
 }
 
 func (h *sshServer) serveJoin(sess ssh.Session) {
@@ -81,7 +111,7 @@ func (h *sshServer) serveJoin(sess ssh.Session) {
 		writeJoinError(sess, "rejected")
 		return
 	}
-	w := &joinWaiter{ch: make(chan joinMsg, 1), done: make(chan struct{})}
+	w := newJoinWaiter()
 	s := h.s
 	s.mu.Lock()
 	if s.waiters == nil {
@@ -102,7 +132,6 @@ func (h *sshServer) serveJoin(sess ssh.Session) {
 			delete(s.waiters, name)
 		}
 		s.mu.Unlock()
-		w.cancel()
 		if submitted && s.svc.Queue != nil {
 			s.svc.Queue.Drop(name)
 		}
@@ -121,41 +150,68 @@ func (h *sshServer) serveJoin(sess ssh.Session) {
 	timer := time.NewTimer(joinWait)
 	defer timer.Stop()
 	select {
-	case msg := <-w.ch:
-		s.writeJoin(sess, msg)
+	case <-w.ready:
+		h.deliverJoin(sess, w)
 	case <-timer.C:
-		w.cancel()
-		select {
-		case msg := <-w.ch:
-			s.writeJoin(sess, msg)
-		default:
-			writeJoinError(sess, "expired")
-		}
+		h.abortJoin(sess, w, "expired")
 	case <-sess.Context().Done():
-		w.cancel()
-		select {
-		case msg := <-w.ch:
-			if msg.token != "" {
-				_ = s.store.DeleteComputer(name)
-			}
-		default:
-		}
+		h.abortJoin(sess, w, "")
 	}
 }
 
-func (s *Server) writeJoin(sess ssh.Session, msg joinMsg) {
-	if msg.errText != "" {
-		writeJoinError(sess, msg.errText)
+// deliverJoin writes the token. grant is blocked on ack until this returns.
+func (h *sshServer) deliverJoin(sess ssh.Session, w *joinWaiter) {
+	w.mu.Lock()
+	token := w.token
+	w.mu.Unlock()
+	if token == "" {
+		writeJoinError(sess, "rejected")
 		return
 	}
-	_ = json.NewEncoder(sess).Encode(map[string]any{
-		"token":       msg.token,
+	if err := h.s.writeJoinToken(sess, token); err != nil {
+		w.ack <- err
+		return
+	}
+	w.ack <- nil
+}
+
+// abortJoin tells grant the client will not take the token, and waits until
+// grant has either not created a row or deleted it. There is no default.
+func (h *sshServer) abortJoin(sess ssh.Session, w *joinWaiter, reason string) {
+	w.mu.Lock()
+	w.cancelled = true
+	started := w.started
+	w.mu.Unlock()
+	if started {
+		<-w.ready
+	}
+	w.mu.Lock()
+	token := w.token
+	w.mu.Unlock()
+	if token != "" {
+		if reason == "" {
+			reason = "cancelled"
+		}
+		w.ack <- errors.New("join " + reason)
+	}
+	if reason == "" {
+		return
+	}
+	writeJoinError(sess, reason)
+}
+
+func (s *Server) writeJoinToken(sess ssh.Session, token string) error {
+	if err := json.NewEncoder(sess).Encode(map[string]any{
+		"token":       token,
 		"quic":        s.quicEndpoint(),
 		"fingerprint": s.fingerprint,
 		"domain":      s.svc.Domain,
 		"http_port":   s.httpPort,
-	})
+	}); err != nil {
+		return err
+	}
 	_ = sess.Exit(0)
+	return nil
 }
 
 func writeJoinError(sess ssh.Session, kind string) {

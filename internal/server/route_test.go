@@ -39,7 +39,7 @@ func TestPublicKeyRoutes(t *testing.T) {
 		{"repl bound", classREPL, true, false, false, true, routeREPL},
 		{"repl live password", classREPL, false, true, false, true, routeBind},
 		{"repl unknown", classREPL, false, false, false, false, ""},
-		{"pair any key", classPair, false, false, false, true, routeREPL},
+		{"pair any key", classPair, false, false, false, true, routePair},
 		{"join key rejected", classJoin, true, true, false, false, ""},
 		{"computer bound splices", classOther, true, false, true, true, routeSplice},
 		{"computer unbound rejected", classOther, false, true, true, false, ""},

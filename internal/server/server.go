@@ -234,7 +234,7 @@ func (s *Server) listen(ctx context.Context, hostKey string, cert tls.Certificat
 		return err
 	}
 	s.httpLn = httpLn
-	s.httpPort = configuredPort(s.cfg.HTTPAddr, httpLn.Addr())
+	s.httpPort = configuredPort(s.cfg.HTTPAddr, httpLn.Addr().String())
 	s.httpSrv = &http.Server{Handler: s, ErrorLog: log.New(io.Discard, "", 0), ReadHeaderTimeout: 10 * time.Second}
 	go s.httpSrv.Serve(httpLn)
 
@@ -243,7 +243,7 @@ func (s *Server) listen(ctx context.Context, hostKey string, cert tls.Certificat
 		return err
 	}
 	s.quic = quicSrv
-	s.quicPort = configuredPort(s.cfg.QUICAddr, mustAddr(quicSrv.Addr()))
+	s.quicPort = configuredPort(s.cfg.QUICAddr, quicSrv.Addr())
 	go s.acceptTunnels(ctx)
 
 	if err := os.MkdirAll(filepath.Dir(s.cfg.SocketPath), 0o700); err != nil {
@@ -569,10 +569,10 @@ func hostname(host string) string {
 	return strings.ToLower(host)
 }
 
-func configuredPort(addr string, actual net.Addr) int {
+func configuredPort(addr, actual string) int {
 	p := splitPort(addr)
-	if p == 0 && actual != nil {
-		p = splitPort(actual.String())
+	if p == 0 {
+		p = splitPort(actual)
 	}
 	return p
 }
@@ -588,10 +588,3 @@ func splitPort(addr string) int {
 	}
 	return n
 }
-
-type stringAddr string
-
-func (a stringAddr) Network() string { return "udp" }
-func (a stringAddr) String() string  { return string(a) }
-
-func mustAddr(s string) net.Addr { return stringAddr(s) }

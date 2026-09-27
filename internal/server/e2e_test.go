@@ -10,6 +10,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -100,7 +103,7 @@ func e2eJoin(t *testing.T, srv *server.Server, signer gossh.Signer, name string)
 // slow stat handler, and accepts streams with the shell-capable fake
 // below. The host key line it registers is the one its sshd serves, so
 // splices pass the server's fingerprint check.
-func e2eAgent(t *testing.T, ctx context.Context, addr, fingerprint, token string) *tunnel.Session {
+func e2eAgent(t *testing.T, ctx context.Context, addr, fingerprint, token string, extraHosts ...gossh.Signer) *tunnel.Session {
 	t.Helper()
 	hostKey, hostLine := newKey(t)
 	sess, err := tunnel.Dial(ctx, addr, fingerprint)
@@ -119,13 +122,13 @@ func e2eAgent(t *testing.T, ctx context.Context, addr, fingerprint, token string
 		}
 		return nil, nil
 	})
-	go acceptAgentShell(ctx, sess, hostKey)
+	go acceptAgentShell(ctx, sess, hostKey, extraHosts...)
 	return sess
 }
 
 // acceptAgentShell is acceptAgent with a fake sshd that also answers a
 // shell request, so interactive splice sessions have a life to lose.
-func acceptAgentShell(ctx context.Context, sess *tunnel.Session, host gossh.Signer) {
+func acceptAgentShell(ctx context.Context, sess *tunnel.Session, host gossh.Signer, extraHosts ...gossh.Signer) {
 	for {
 		kind, _, conn, err := sess.Accept(ctx)
 		if err != nil {
@@ -135,14 +138,14 @@ func acceptAgentShell(ctx context.Context, sess *tunnel.Session, host gossh.Sign
 		case tunnel.KindPortal:
 			go httpPong(conn)
 		case tunnel.KindSSH:
-			go serveShellSSH(conn, host)
+			go serveShellSSH(conn, host, extraHosts...)
 		default:
 			conn.Close()
 		}
 	}
 }
 
-func serveShellSSH(conn net.Conn, host gossh.Signer) {
+func serveShellSSH(conn net.Conn, host gossh.Signer, extraHosts ...gossh.Signer) {
 	defer conn.Close()
 	cfg := &gossh.ServerConfig{
 		PublicKeyCallback: func(_ gossh.ConnMetadata, _ gossh.PublicKey) (*gossh.Permissions, error) {
@@ -150,6 +153,9 @@ func serveShellSSH(conn net.Conn, host gossh.Signer) {
 		},
 	}
 	cfg.AddHostKey(host)
+	for _, s := range extraHosts {
+		cfg.AddHostKey(s)
+	}
 	sc, chans, reqs, err := gossh.NewServerConn(conn, cfg)
 	if err != nil {
 		return
@@ -371,6 +377,34 @@ func TestTunnelLatency(t *testing.T) {
 	spliceOut, errOut, err := sshRun(t, srv.SSHAddr(), "home", signer, "echo")
 	if err != nil || spliceOut != "hi\n" {
 		t.Fatalf("splice through delay: %v %s %q", err, errOut, spliceOut)
+	}
+}
+
+// TestSpliceHostKeyAlgorithm pins the regression behind issue #1: a real
+// sshd serves several host keys, and x/crypto's default preference puts
+// ECDSA ahead of ed25519, so sshd presented its ECDSA key while the server
+// pinned the registered ed25519 key and every splice failed with "host key
+// mismatch". The fake sshd here serves both keys while the agent registers
+// only the ed25519 line; the splice must still pass.
+func TestSpliceHostKeyAlgorithm(t *testing.T) {
+	srv, _, signer := e2eBind(t)
+	token := e2eJoin(t, srv, signer, "home")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecSigner, err := gossh.NewSignerFromKey(ecKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := e2eAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token, ecSigner)
+	defer agent.Close()
+
+	if out, errOut, err := sshRun(t, srv.SSHAddr(), "home", signer, "echo"); err != nil || out != "hi\n" {
+		t.Fatalf("splice: %v %s %q", err, errOut, out)
 	}
 }
 

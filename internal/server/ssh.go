@@ -372,6 +372,20 @@ func (h *sshServer) clientFor(ctx ssh.Context, computer string) (*gossh.Client, 
 	return hold.client, hold.err
 }
 
+// hostKeyAlgos narrows the client's offer to the pinned key's family.
+// sshd presents the first host key algorithm the client lists that it has
+// a key for, so an unconstrained offer ends up with the machine's ECDSA
+// key while the pin names its ed25519 key, and every splice fails with
+// "host key mismatch". Offering only the pinned type makes sshd sign with
+// the key the operator registered.
+func hostKeyAlgos(want gossh.PublicKey) []string {
+	if want.Type() == gossh.KeyAlgoRSA {
+		// One RSA host key, strongest signature first.
+		return []string{gossh.KeyAlgoRSASHA512, gossh.KeyAlgoRSASHA256, gossh.KeyAlgoRSA}
+	}
+	return []string{want.Type()}
+}
+
 func (h *sshServer) dial(ctx context.Context, computer string) (*gossh.Client, error) {
 	if !h.s.svc.IsComputer(computer) {
 		return nil, fmt.Errorf("computer %s not found", computer)
@@ -408,8 +422,9 @@ func (h *sshServer) dial(ctx context.Context, computer string) (*gossh.Client, e
 	}
 	_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
 	cfg := &gossh.ClientConfig{
-		User: user,
-		Auth: []gossh.AuthMethod{gossh.PublicKeys(h.s.splice)},
+		User:              user,
+		Auth:              []gossh.AuthMethod{gossh.PublicKeys(h.s.splice)},
+		HostKeyAlgorithms: hostKeyAlgos(want),
 		HostKeyCallback: func(_ string, _ net.Addr, got gossh.PublicKey) error {
 			if got == nil || !keysEqual(want, got) {
 				return errors.New("host key mismatch")

@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -55,11 +56,8 @@ func TestRemoveAsksForTheName(t *testing.T) {
 		mode: modeRemove,
 	}
 	m.input = "nope"
-	next, cmd := m.submit()
+	next, _ := m.submit()
 	m = next.(*model)
-	if cmd != nil {
-		t.Fatal("mismatch ran a command")
-	}
 	if f.removed != "" {
 		t.Fatal("removed without the name")
 	}
@@ -72,7 +70,7 @@ func TestRemoveAsksForTheName(t *testing.T) {
 
 	m.mode = modeRemove
 	m.input = "home"
-	next, cmd = m.submit()
+	next, cmd := m.submit()
 	m = next.(*model)
 	if cmd == nil {
 		t.Fatal("match did not remove")
@@ -203,35 +201,6 @@ func TestTokenStaysVisible(t *testing.T) {
 	}
 }
 
-func TestThemeToggleStoresPerKey(t *testing.T) {
-	f := &fakeBackend{}
-	m := &model{b: f, theme: "dark"}
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	m = updated.(*model)
-	if m.theme != "light" {
-		t.Fatalf("theme %q, want light", m.theme)
-	}
-	if cmd == nil {
-		t.Fatal("toggle did not store")
-	}
-	_ = cmd()
-	if f.theme != "light" {
-		t.Fatalf("stored theme %q", f.theme)
-	}
-	// A snapshot carrying the stored theme is applied, not fought.
-	next, _ := m.Update(snapMsg{snap: control.Snapshot{Theme: "light"}})
-	m = next.(*model)
-	if m.theme != "light" {
-		t.Fatalf("snapshot theme ignored: %q", m.theme)
-	}
-	m.themeBusy = false
-	next, _ = m.Update(snapMsg{snap: control.Snapshot{Theme: "dark"}})
-	m = next.(*model)
-	if m.theme != "dark" {
-		t.Fatalf("stored theme not applied: %q", m.theme)
-	}
-}
-
 func TestPairSecretShownOnce(t *testing.T) {
 	const secret = "one-time-secret"
 	m := &model{
@@ -249,19 +218,74 @@ func TestPairSecretShownOnce(t *testing.T) {
 	}
 }
 
+func TestStatusNoticeExpires(t *testing.T) {
+	m := &model{}
+	updated, cmd := m.Update(snapMsg{err: errors.New("boom")})
+	m = updated.(*model)
+	if m.status != "boom" || cmd == nil {
+		t.Fatalf("status %q cmd %v", m.status, cmd)
+	}
+	// A stale expiry — armed for a notice already replaced — must not
+	// clear the bar.
+	updated, _ = m.Update(statusExpireMsg{seq: m.statusSeq - 1})
+	m = updated.(*model)
+	if m.status != "boom" {
+		t.Fatalf("stale expiry cleared status: %q", m.status)
+	}
+	msg := cmd()
+	if _, ok := msg.(statusExpireMsg); !ok {
+		t.Fatalf("cmd produced %T", msg)
+	}
+	updated, _ = m.Update(msg)
+	m = updated.(*model)
+	if m.status != "" {
+		t.Fatalf("status did not expire: %q", m.status)
+	}
+}
+
+func TestSnapshotDiffNotifiesOnlineChanges(t *testing.T) {
+	m := &model{}
+	first := control.Snapshot{Computers: []control.ComputerView{
+		{Name: "home", Online: true}, {Name: "work"},
+	}}
+	updated, _ := m.Update(snapMsg{snap: first})
+	m = updated.(*model)
+	if m.status != "" {
+		t.Fatalf("first snapshot notified: %q", m.status)
+	}
+	// home flips offline, work disappears, laptop joins.
+	next := control.Snapshot{Computers: []control.ComputerView{
+		{Name: "home"}, {Name: "laptop", Online: true},
+	}}
+	updated, cmd := m.Update(snapMsg{snap: next})
+	m = updated.(*model)
+	if m.status != "home offline · laptop joined · work removed" {
+		t.Fatalf("status %q", m.status)
+	}
+	if cmd == nil {
+		t.Fatal("notice did not arm an expiry")
+	}
+}
+
+func TestDiffNoticesOnline(t *testing.T) {
+	prev := []control.ComputerView{{Name: "home"}, {Name: "srv", Online: true}}
+	next := []control.ComputerView{{Name: "home", Online: true}, {Name: "srv", Online: true}}
+	if got := diffNotices(prev, next); got != "home online" {
+		t.Fatalf("got %q", got)
+	}
+	if got := diffNotices(next, next); got != "" {
+		t.Fatalf("no-change diff produced %q", got)
+	}
+}
+
 type fakeBackend struct {
 	removed    string
 	removedKey string
 	removedEnv string
-	theme      string
 }
 
 func (f *fakeBackend) Snapshot(context.Context) (control.Snapshot, error) {
 	return control.Snapshot{}, nil
-}
-func (f *fakeBackend) SetTheme(_ context.Context, theme string) error {
-	f.theme = theme
-	return nil
 }
 func (f *fakeBackend) Approve(context.Context, string) (string, error) { return "", nil }
 func (f *fakeBackend) Remove(_ context.Context, name string) error {

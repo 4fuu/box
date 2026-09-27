@@ -434,7 +434,6 @@ func (m *model) helpLines() []string {
 		{"1-6", "jump to a screen"},
 		{"j / k", "move"},
 		{"p", "pair a computer"},
-		{"t", "dark / light theme"},
 		{"?", "this help"},
 		{"q", "quit"},
 	}
@@ -512,7 +511,7 @@ func (m *model) viewTooSmall() string {
 	return b.String()
 }
 
-const hintBase = "1-6 screens · j/k move · p pair · t theme · ? help · q quit"
+const hintBase = "1-6 screens · j/k move · p pair · ? help · q quit"
 
 func (m *model) hint() string {
 	if m.mode != modeNormal && m.mode != modePair && m.mode != modeHelp {
@@ -730,6 +729,8 @@ func (m *model) statusStyle() lipgloss.Style {
 	switch {
 	case statusBad(m.status):
 		return m.styles.bad
+	case statusWarn(m.status):
+		return m.styles.warn
 	case statusGood(m.status):
 		return m.styles.on
 	default:
@@ -741,6 +742,8 @@ func (m *model) barStatusStyle() lipgloss.Style {
 	switch {
 	case statusBad(m.status):
 		return m.styles.barBad
+	case statusWarn(m.status):
+		return m.styles.barWarn
 	case statusGood(m.status):
 		return m.styles.barGood
 	default:
@@ -757,8 +760,14 @@ func statusBad(s string) bool {
 	return false
 }
 
+// statusWarn marks notices that are neither success nor failure: a
+// computer going offline.
+func statusWarn(s string) bool {
+	return strings.Contains(s, "offline")
+}
+
 func statusGood(s string) bool {
-	for _, w := range []string{"removed", "renamed", "added", "approved", "paired"} {
+	for _, w := range []string{"removed", "renamed", "added", "approved", "paired", "joined", "online"} {
 		if strings.Contains(s, w) {
 			return true
 		}
@@ -766,9 +775,9 @@ func statusGood(s string) bool {
 	return false
 }
 
-// rowLine pads and styles cells. The selected row gets Reverse on every
-// cell and gap: one style per segment, so an inner color cannot reset the
-// highlight of the rest of the line.
+// rowLine pads and styles cells. The selected row gets the active fill on
+// every cell and gap: one style per segment, so an inner color cannot
+// reset the highlight of the rest of the line.
 func (m *model) rowLine(cols []string, widths []int, sel bool, color colorize) string {
 	var b strings.Builder
 	for i, c := range cols {
@@ -789,7 +798,7 @@ func (m *model) rowLine(cols []string, widths []int, sel bool, color colorize) s
 		}
 		if sel {
 			if ok {
-				st = st.Reverse(true)
+				st = st.Background(m.styles.rowActive)
 			} else {
 				// A zero lipgloss.Style renders through the default
 				// renderer, which strips attributes without a tty.

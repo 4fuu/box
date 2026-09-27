@@ -45,7 +45,7 @@ The HTTP port serves portals, plus two hosts the server answers itself. `event.<
 
 There is no account. Trust is a public key accepted by the server.
 
-When the server is initialized it prints a one-time password and its expiry. While that password is live, the first client to connect with any key gets a password prompt inside the session; the client that types the password is bound: the server stores that client's public key and then refuses the password. Expiry also refuses it. The password is never written to the client.
+When the server is initialized it prints a one-time password and its expiry (five minutes). While that password is live, the first client to connect with any key gets a password prompt inside the session; the client that types the password is bound: the server stores that client's public key and then refuses the password. Expiry also refuses it. The password is never written to the client.
 
 To bind another client, either:
 
@@ -180,7 +180,7 @@ Do not log a token. The SQLite file is the copy the operator reads back.
 
 ## Control REPL and TUI
 
-The control plane is the SSH command itself, plus a REPL for a person. Interactive sessions are a full TUI built with bubbletea: tables for lists, forms for approval, color for state. Non-interactive sessions (`ssh box.example.com ls`) print plain text; `--json` is for scripts. Both share one service layer.
+The control plane is the SSH command itself, plus a REPL for a person. Interactive sessions are a full TUI built with bubbletea: tables for lists, forms for approval, color for state. The TUI is always dark. The status line shows a notice for five seconds — an action's result, or a computer joining, coming online, or going offline — then falls back to the key hints. Non-interactive sessions (`ssh box.example.com ls`) print plain text; `--json` is for scripts. Both share one service layer.
 
 | Command | Effect |
 | --- | --- |

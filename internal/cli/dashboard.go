@@ -57,10 +57,6 @@ func (d dashBackend) Snapshot(context.Context) (control.Snapshot, error) {
 	return snap, err
 }
 
-func (d dashBackend) SetTheme(_ context.Context, theme string) error {
-	return localCall(d.o, "theme_set", map[string]string{"theme": theme}, nil)
-}
-
 func (d dashBackend) Approve(_ context.Context, code string) (string, error) {
 	var resp struct {
 		Message string `json:"message"`

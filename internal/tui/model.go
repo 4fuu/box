@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +12,10 @@ import (
 )
 
 const refreshEvery = 2 * time.Second
+
+// statusTTL is how long a status notice stays on screen before the bar
+// falls back to the key hints.
+const statusTTL = 5 * time.Second
 
 type screen int
 
@@ -44,12 +47,14 @@ const (
 )
 
 type styles struct {
-	title, header, selected      lipgloss.Style
-	tabOn, tabOff                lipgloss.Style
-	on, off, warn, bad, dim      lipgloss.Style
-	secret                       lipgloss.Style
-	ptitle, border, cursor       lipgloss.Style
-	bar, barDim, barBad, barGood lipgloss.Style
+	title, header, selected lipgloss.Style
+	rowActive               lipgloss.Color
+	tabOn, tabOff           lipgloss.Style
+	on, off, warn, bad, dim lipgloss.Style
+	secret                  lipgloss.Style
+	ptitle, border, cursor  lipgloss.Style
+	bar, barDim, barWarn    lipgloss.Style
+	barBad, barGood         lipgloss.Style
 }
 
 type model struct {
@@ -59,15 +64,13 @@ type model struct {
 	allowShell bool
 	identity   string
 	status     string
-	width      int
-	height     int
-	// theme is "dark" or "light". styleOut and styleTerm rebuild styles
-	// when the theme flips. themeBusy is set while a toggle is being
-	// stored, so a snapshot cannot flip the styles back mid-flight.
-	theme     string
-	themeBusy bool
-	styleOut  io.Writer
-	styleTerm string
+	// statusSeq tags the pending status expiry so only the newest notice
+	// can clear the bar. loaded is set after the first snapshot, so its
+	// computers are not reported as new.
+	statusSeq int
+	loaded    bool
+	width     int
+	height    int
 
 	snap    control.Snapshot
 	screen  screen
@@ -102,10 +105,23 @@ type pairMsg struct {
 
 type tickMsg time.Time
 
-type themeMsg struct{ err error }
+// statusExpireMsg clears the status bar. seq is the statusSeq the timer
+// was armed for; a newer notice has since bumped it, so a stale timer is
+// dropped.
+type statusExpireMsg struct{ seq int }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.load(), tick())
+	cmds := []tea.Cmd{m.load(), tick()}
+	// The startup notice (a completed bind, a parked session) is a status
+	// like any other: dismiss it to the hints after statusTTL.
+	if m.status != "" {
+		m.statusSeq++
+		seq := m.statusSeq
+		cmds = append(cmds, tea.Tick(statusTTL, func(time.Time) tea.Msg {
+			return statusExpireMsg{seq: seq}
+		}))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -122,68 +138,90 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onKey(msg)
 	case snapMsg:
 		if msg.err != nil {
-			m.status = msg.err.Error()
-			return m, nil
+			return m, m.notify(msg.err.Error())
+		}
+		var cmd tea.Cmd
+		if note := diffNotices(m.snap.Computers, msg.snap.Computers); m.loaded && note != "" {
+			cmd = m.notify(note)
 		}
 		m.snap = msg.snap
-		if !m.themeBusy && msg.snap.Theme != "" && msg.snap.Theme != m.theme {
-			m.setTheme(msg.snap.Theme)
-		}
+		m.loaded = true
 		m.clamp()
-		return m, nil
+		return m, cmd
 	case doneMsg:
 		m.busy = false
 		if msg.err != nil {
-			m.status = msg.err.Error()
-			return m, nil
+			return m, m.notify(msg.err.Error())
 		}
 		if msg.text != "" {
-			m.status = msg.text
+			return m, tea.Batch(m.notify(msg.text), m.load())
 		}
 		return m, m.load()
 	case pairMsg:
 		m.busy = false
 		if msg.err != nil {
-			m.status = msg.err.Error()
-			return m, nil
+			return m, m.notify(msg.err.Error())
 		}
 		m.mode = modePair
 		m.secret = msg.pairing.Secret
 		m.exp = msg.pairing.Expires
-		m.status = ""
+		m.clearStatus()
 		return m, nil
 	case tickMsg:
 		if m.busy {
 			return m, tick()
 		}
 		return m, tea.Batch(m.load(), tick())
-	case themeMsg:
-		m.themeBusy = false
-		if msg.err != nil {
-			m.status = msg.err.Error()
+	case statusExpireMsg:
+		if msg.seq == m.statusSeq {
+			m.status = ""
 		}
 		return m, nil
 	}
 	return m, nil
 }
 
-// setTheme swaps the palette. It does not store the choice; storeTheme does.
-func (m *model) setTheme(theme string) {
-	if theme != control.ThemeLight {
-		theme = control.ThemeDark
-	}
-	m.theme = theme
-	m.styles = newStyles(m.styleOut, m.styleTerm, theme)
+// notify shows text in the status bar and arms its expiry. The caller
+// returns the command from Update so the notice clears after statusTTL.
+func (m *model) notify(text string) tea.Cmd {
+	m.status = text
+	m.statusSeq++
+	seq := m.statusSeq
+	return tea.Tick(statusTTL, func(time.Time) tea.Msg {
+		return statusExpireMsg{seq: seq}
+	})
 }
 
-func (m *model) storeTheme(theme string) tea.Cmd {
-	b, ctx := m.b, m.ctx
-	return func() tea.Msg {
-		if b == nil {
-			return themeMsg{}
-		}
-		return themeMsg{err: b.SetTheme(ctx, theme)}
+// clearStatus empties the bar now and voids any pending expiry.
+func (m *model) clearStatus() {
+	m.status = ""
+	m.statusSeq++
+}
+
+// diffNotices reports computer changes between snapshots for the status
+// bar: joins, online flips, and removals, joined with a middle dot.
+func diffNotices(prev, next []control.ComputerView) string {
+	was := make(map[string]bool, len(prev))
+	for _, c := range prev {
+		was[c.Name] = c.Online
 	}
+	var parts []string
+	for _, c := range next {
+		on, seen := was[c.Name]
+		switch {
+		case !seen:
+			parts = append(parts, c.Name+" joined")
+		case !on && c.Online:
+			parts = append(parts, c.Name+" online")
+		case on && !c.Online:
+			parts = append(parts, c.Name+" offline")
+		}
+		delete(was, c.Name)
+	}
+	for name := range was {
+		parts = append(parts, name+" removed")
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (m *model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -250,17 +288,7 @@ func (m *model) onNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "p":
 		m.busy = true
-		m.status = "pairing…"
-		return m, m.pair()
-	case "t":
-		next := control.ThemeLight
-		if m.theme == control.ThemeLight {
-			next = control.ThemeDark
-		}
-		m.setTheme(next)
-		m.themeBusy = true
-		m.status = "theme " + next
-		return m, m.storeTheme(next)
+		return m, tea.Batch(m.notify("pairing…"), m.pair())
 	case "enter":
 		if m.screen == screenComputers && m.allowShell {
 			name := m.computerName()
@@ -374,8 +402,7 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		m.input = ""
 		m.mode = modeNormal
 		if code == "" {
-			m.status = "type the approval code"
-			return m, nil
+			return m, m.notify("type the approval code")
 		}
 		m.busy = true
 		return m, m.approve(code)
@@ -385,8 +412,7 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		m.input = ""
 		m.mode = modeNormal
 		if typed != name || name == "" {
-			m.status = "name did not match"
-			return m, nil
+			return m, m.notify("name did not match")
 		}
 		m.busy = true
 		return m, m.remove(name)
@@ -396,8 +422,7 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		m.input = ""
 		m.mode = modeNormal
 		if next == "" || old == "" {
-			m.status = "usage: rename <name> <new>"
-			return m, nil
+			return m, m.notify("usage: rename <name> <new>")
 		}
 		m.busy = true
 		return m, m.rename(old, next)

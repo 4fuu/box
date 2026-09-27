@@ -18,7 +18,9 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const PairingTTL = 10 * time.Minute
+// PairingTTL is how long a one-time pairing password stays valid.
+// The computer's approval code lives longer; see the join queue.
+const PairingTTL = 5 * time.Minute
 
 // Service is the control plane.
 type Service struct {
@@ -213,39 +215,6 @@ func (s *Service) WhoAmI(pub ssh.PublicKey) (string, error) {
 	return fp + " " + k.Comment, nil
 }
 
-// ThemeDark and ThemeLight are the TUI color schemes.
-const (
-	ThemeDark  = "dark"
-	ThemeLight = "light"
-)
-
-// ThemeFor returns the TUI theme stored for who — a key fingerprint, or
-// "localhost" for the server's own socket. Unset or unknown means dark.
-func (s *Service) ThemeFor(who string) string {
-	if who == "" {
-		return ThemeDark
-	}
-	v, ok, err := s.Store.Meta("theme:" + who)
-	if err != nil || !ok {
-		return ThemeDark
-	}
-	if v == ThemeLight {
-		return ThemeLight
-	}
-	return ThemeDark
-}
-
-// SetThemeFor stores the TUI theme for who.
-func (s *Service) SetThemeFor(who, theme string) error {
-	if who == "" {
-		return errors.New("no key identity")
-	}
-	if theme != ThemeDark && theme != ThemeLight {
-		return errors.New("theme is dark or light")
-	}
-	return s.Store.SetMeta("theme:"+who, theme)
-}
-
 func (s *Service) SetEnv(name, value string) (string, error) {
 	if err := ident.Env(name); err != nil {
 		return "", err
@@ -371,9 +340,6 @@ type Snapshot struct {
 	Keys      []KeyView      `json:"keys"`
 	Env       []string       `json:"env"`
 	Tokens    []TokenView    `json:"tokens"`
-	// Theme is the caller's stored color scheme. The service does not know
-	// the caller; the backend in front of Snapshot fills it in.
-	Theme string `json:"theme,omitempty"`
 }
 
 // Snapshot gathers the lists the TUI shows. Env values stay out. Tokens stay in.

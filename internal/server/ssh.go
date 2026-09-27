@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/4fuu/box/internal/keys"
 	"github.com/4fuu/box/internal/repl"
 	"github.com/4fuu/box/internal/store"
 	"github.com/4fuu/box/internal/tui"
@@ -230,10 +229,9 @@ func (h *sshServer) serveTUI(sess ssh.Session, ptyReq ssh.Pty, winch <-chan ssh.
 	if sess.RemoteAddr() != nil {
 		from = sess.RemoteAddr().String()
 	}
-	id, who := "", ""
+	id := ""
 	if key := sess.PublicKey(); key != nil {
 		id, _ = h.s.svc.WhoAmI(key)
-		who = keys.Fingerprint(key)
 	}
 	var mu sync.Mutex
 	var onWin func(ssh.Window)
@@ -278,10 +276,10 @@ func (h *sshServer) serveTUI(sess ssh.Session, ptyReq ssh.Pty, winch <-chan ssh.
 		})
 		cfg := tui.Config{
 			Context: ctx, In: reader, Out: sess,
-			Backend:    tui.ServiceBackend{Svc: h.s.svc, From: from, Who: who},
+			Backend:    tui.ServiceBackend{Svc: h.s.svc, From: from},
 			AllowShell: true, Identity: id, Notice: notice,
 			Width: cur.Width, Height: cur.Height,
-			Resize: resize, Theme: h.s.svc.ThemeFor(who),
+			Resize: resize,
 		}
 		if pty {
 			cfg.Term = ptyReq.Term

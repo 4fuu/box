@@ -11,21 +11,10 @@ import (
 type ServiceBackend struct {
 	Svc  *control.Service
 	From string
-	// Who is the session key's fingerprint; the theme is stored under it.
-	Who string
 }
 
 func (b ServiceBackend) Snapshot(context.Context) (control.Snapshot, error) {
-	snap, err := b.Svc.Snapshot()
-	if err != nil {
-		return snap, err
-	}
-	snap.Theme = b.Svc.ThemeFor(b.Who)
-	return snap, nil
-}
-
-func (b ServiceBackend) SetTheme(_ context.Context, theme string) error {
-	return b.Svc.SetThemeFor(b.Who, theme)
+	return b.Svc.Snapshot()
 }
 
 func (b ServiceBackend) Approve(_ context.Context, code string) (string, error) {

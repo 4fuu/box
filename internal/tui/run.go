@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"unsafe"
 
-	"github.com/4fuu/box/internal/control"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
@@ -104,10 +103,6 @@ func newModel(cfg Config, ctx context.Context) *model {
 	if out == nil {
 		out = os.Stdout
 	}
-	theme := cfg.Theme
-	if theme != control.ThemeLight {
-		theme = control.ThemeDark
-	}
 	return &model{
 		b:          cfg.Backend,
 		ctx:        ctx,
@@ -116,56 +111,40 @@ func newModel(cfg Config, ctx context.Context) *model {
 		status:     cfg.Notice,
 		width:      cfg.Width,
 		height:     cfg.Height,
-		styles:     newStyles(out, cfg.Term, theme),
-		theme:      theme,
-		styleOut:   out,
-		styleTerm:  cfg.Term,
+		styles:     newStyles(out, cfg.Term),
 	}
 }
 
-// Semantic palette: one accent, one muted gray, and three signal colors,
-// per theme. Body text stays the terminal's default foreground, so a light
-// terminal with the dark theme (or the reverse) keeps readable text; only
-// the accents differ. Hex colors quantize to the terminal's 256 profile.
+// Semantic palette: one accent, one muted gray, and three signal colors.
+// The TUI is always dark; body text keeps the terminal's default
+// foreground so any dark terminal background stays readable. The bar and
+// tab fills come from uri-agent's surface colors. Hex colors quantize to
+// the terminal's 256 profile.
 type palette struct {
 	accent, success, warning, danger, muted lipgloss.Color
-	barBg, barFg, tabFg                     lipgloss.Color
+	text, rowActive, barBg, barFg, tabFg    lipgloss.Color
 }
 
-var palettes = map[string]palette{
-	"dark": {
-		accent:  lipgloss.Color("#D8B4FE"), // soft purple
-		success: lipgloss.Color("#7ED1A6"), // green
-		warning: lipgloss.Color("#F5C26B"), // amber
-		danger:  lipgloss.Color("#F28B82"), // red
-		muted:   lipgloss.Color("8"),
-		barBg:   lipgloss.Color("236"),
-		barFg:   lipgloss.Color("252"),
-		tabFg:   lipgloss.Color("#1A1B26"),
-	},
-	"light": {
-		accent:  lipgloss.Color("#8250DF"), // violet
-		success: lipgloss.Color("#1A7F37"), // green
-		warning: lipgloss.Color("#9A6700"), // amber
-		danger:  lipgloss.Color("#CF222E"), // red
-		muted:   lipgloss.Color("8"),
-		barBg:   lipgloss.Color("254"),
-		barFg:   lipgloss.Color("238"),
-		tabFg:   lipgloss.Color("#FFFFFF"),
-	},
+var dark = palette{
+	accent:    lipgloss.Color("#68D2C2"), // teal
+	success:   lipgloss.Color("#68D2C2"), // teal
+	warning:   lipgloss.Color("#EFAD68"), // amber
+	danger:    lipgloss.Color("#EF6C78"), // red
+	muted:     lipgloss.Color("#747C87"), // gray
+	text:      lipgloss.Color("#DADFE5"), // light text
+	rowActive: lipgloss.Color("#191E23"), // selected row fill
+	barBg:     lipgloss.Color("#15181C"), // surface fill
+	barFg:     lipgloss.Color("#DADFE5"),
+	tabFg:     lipgloss.Color("#15181C"),
 }
 
 // newStyles picks a color profile. An SSH session's writer is not a local
 // tty, so detection would turn color off; TERM from the client decides.
-// theme is "dark" or "light"; anything else is dark.
-func newStyles(w io.Writer, term, theme string) styles {
+func newStyles(w io.Writer, term string) styles {
 	if w == nil {
 		w = io.Discard
 	}
-	p, ok := palettes[theme]
-	if !ok {
-		p = palettes["dark"]
-	}
+	p := dark
 	r := lipgloss.NewRenderer(w)
 	switch term {
 	case "dumb":
@@ -175,23 +154,25 @@ func newStyles(w io.Writer, term, theme string) styles {
 		r.SetColorProfile(termenv.ANSI256)
 	}
 	return styles{
-		title:    r.NewStyle().Bold(true).Foreground(p.accent),
-		header:   r.NewStyle().Bold(true),
-		selected: r.NewStyle().Reverse(true),
-		tabOn:    r.NewStyle().Bold(true).Foreground(p.tabFg).Background(p.accent),
-		tabOff:   r.NewStyle().Foreground(p.muted),
-		on:       r.NewStyle().Foreground(p.success),
-		off:      r.NewStyle().Foreground(p.muted),
-		warn:     r.NewStyle().Foreground(p.warning),
-		bad:      r.NewStyle().Foreground(p.danger),
-		dim:      r.NewStyle().Faint(true),
-		secret:   r.NewStyle().Bold(true).Foreground(p.accent),
-		ptitle:   r.NewStyle().Bold(true).Foreground(p.accent),
-		border:   r.NewStyle().Foreground(p.accent),
-		cursor:   r.NewStyle().Bold(true).Foreground(p.accent),
-		bar:      r.NewStyle().Background(p.barBg).Foreground(p.barFg),
-		barDim:   r.NewStyle().Background(p.barBg).Foreground(p.muted),
-		barBad:   r.NewStyle().Background(p.barBg).Foreground(p.danger),
-		barGood:  r.NewStyle().Background(p.barBg).Foreground(p.success),
+		title:     r.NewStyle().Bold(true).Foreground(p.accent),
+		header:    r.NewStyle().Bold(true),
+		selected:  r.NewStyle().Bold(true).Foreground(p.text).Background(p.rowActive),
+		rowActive: p.rowActive,
+		tabOn:     r.NewStyle().Bold(true).Foreground(p.tabFg).Background(p.accent),
+		tabOff:    r.NewStyle().Foreground(p.muted),
+		on:        r.NewStyle().Foreground(p.success),
+		off:       r.NewStyle().Foreground(p.muted),
+		warn:      r.NewStyle().Foreground(p.warning),
+		bad:       r.NewStyle().Foreground(p.danger),
+		dim:       r.NewStyle().Faint(true),
+		secret:    r.NewStyle().Bold(true).Foreground(p.accent),
+		ptitle:    r.NewStyle().Bold(true).Foreground(p.accent),
+		border:    r.NewStyle().Foreground(p.accent),
+		cursor:    r.NewStyle().Bold(true).Foreground(p.accent),
+		bar:       r.NewStyle().Background(p.barBg).Foreground(p.barFg),
+		barDim:    r.NewStyle().Background(p.barBg).Foreground(p.muted),
+		barWarn:   r.NewStyle().Background(p.barBg).Foreground(p.warning),
+		barBad:    r.NewStyle().Background(p.barBg).Foreground(p.danger),
+		barGood:   r.NewStyle().Background(p.barBg).Foreground(p.success),
 	}
 }

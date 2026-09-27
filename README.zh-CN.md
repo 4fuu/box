@@ -72,7 +72,7 @@ box agent
 
 `ssh home@box.example.com` 到达的是那台计算机的 sshd。SSH 用户名是登记在服务器上的名字。进去之后的账号是这台机器上运行 `box join` 的账号，两个名字可以不同。
 
-`box join` 会写这个账号的 `~/.ssh/box_authorized_keys`。能写 sshd 配置时，它会把这个文件加进 `AuthorizedKeysFile`，并打开 `PermitUserEnvironment`，每一处修改都会打印出来。账号自己的 `authorized_keys` 不动。
+`box join` 会写这个账号的 `~/.ssh/box_authorized_keys`。能写 sshd 配置时，它会把这个文件加进 `AuthorizedKeysFile`，并添加 `AcceptEnv *`（让服务器上设置的会话环境变量能进入 shell），每一处修改都会打印出来。账号自己的 `authorized_keys` 不动。环境变量的值只保存在服务器上，不落盘到计算机。
 
 ### 声明主机名
 

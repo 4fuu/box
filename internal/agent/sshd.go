@@ -17,15 +17,17 @@ const (
 	sshdKeysLine      = "AuthorizedKeysFile .ssh/authorized_keys .ssh/box_authorized_keys"
 )
 
-// ConfigureSSHD makes sshd read the managed keys file and apply environment=
-// options. It prints every change. Join still succeeds when the file is not writable.
+// ConfigureSSHD makes sshd read the managed keys file and accept the env
+// requests the server sends with each splice session. It prints every
+// change. Join still succeeds when the file is not writable.
 func ConfigureSSHD(out io.Writer) {
 	ensureSSHD(out)
 }
 
-// ensureSSHD adds the managed keys file and PermitUserEnvironment when sshd_config
-// is writable. OpenSSH ignores environment= on a key unless that setting is on.
-// Otherwise it tells the operator the lines to add. Join still succeeds.
+// ensureSSHD adds the managed keys file and AcceptEnv when sshd_config is
+// writable. OpenSSH drops per-session env requests unless the name matches
+// AcceptEnv. Otherwise it tells the operator the lines to add. Join still
+// succeeds.
 func ensureSSHD(out io.Writer) {
 	if out == nil {
 		out = io.Discard
@@ -42,7 +44,7 @@ func ensureSSHD(out io.Writer) {
 				return
 			}
 		}
-		fmt.Fprintf(out, "sshd_config is not writable. Add these lines, then reload sshd:\n  %s\n  PermitUserEnvironment yes\n  sudo systemctl reload ssh\n", sshdKeysLine)
+		fmt.Fprintf(out, "sshd_config is not writable. Add these lines, then reload sshd:\n  %s\n  AcceptEnv *\n  sudo systemctl reload ssh\n", sshdKeysLine)
 		return
 	}
 	if warning != "" {
@@ -127,21 +129,23 @@ func prepareSSHD(content string) (string, sshdEdit) {
 		edit.changed = true
 	}
 	var envChanged bool
-	next, envChanged, edit.warning = setPermitUserEnvironment(next)
+	next, envChanged, edit.warning = ensureAcceptEnv(next)
 	if envChanged {
-		edit.notes = append(edit.notes, "PermitUserEnvironment yes")
+		edit.notes = append(edit.notes, "AcceptEnv *")
 		edit.changed = true
 	}
 	return next, edit
 }
 
-// setPermitUserEnvironment turns the option on when it is missing or no.
-// A pattern the operator already chose is left in place.
-func setPermitUserEnvironment(content string) (string, bool, string) {
+// ensureAcceptEnv adds "AcceptEnv *" so sshd accepts the env requests the
+// server sends with each splice session. AcceptEnv lines the operator
+// already set are left in place; box env names must match them. sshd
+// combines every AcceptEnv line, so a "*" anywhere satisfies box.
+func ensureAcceptEnv(content string) (string, bool, string) {
 	lines := strings.Split(content, "\n")
 	firstMatch := -1
-	target := -1
-	args := ""
+	first := -1
+	var args []string
 	for i, line := range lines {
 		key, a, ok := sshdKeyword(strings.TrimRight(line, "\r"))
 		if !ok {
@@ -153,27 +157,27 @@ func setPermitUserEnvironment(content string) (string, bool, string) {
 			}
 			continue
 		}
-		if firstMatch >= 0 || !strings.EqualFold(key, "PermitUserEnvironment") {
+		if firstMatch >= 0 || !strings.EqualFold(key, "AcceptEnv") {
 			continue
 		}
-		if target >= 0 {
-			continue
+		if first < 0 {
+			first = i
+			args = strings.Fields(a)
 		}
-		target = i
-		args = a
+		for _, field := range strings.Fields(a) {
+			if field == "*" {
+				return content, false, ""
+			}
+		}
 	}
-	if target >= 0 {
-		switch strings.ToLower(strings.TrimSpace(args)) {
-		case "yes", "*":
-			return content, false, ""
-		case "no", "":
-			lines[target] = "PermitUserEnvironment yes"
+	if first >= 0 {
+		if len(args) == 0 {
+			lines[first] = "AcceptEnv *"
 			return strings.Join(lines, "\n"), true, ""
-		default:
-			return content, false, "PermitUserEnvironment is already " + args + "; env names must match it"
 		}
+		return content, false, "AcceptEnv is already " + strings.Join(args, " ") + "; box env names must match it"
 	}
-	line := "PermitUserEnvironment yes"
+	line := "AcceptEnv *"
 	if firstMatch >= 0 {
 		var b strings.Builder
 		for i, l := range lines {

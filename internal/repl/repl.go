@@ -376,7 +376,7 @@ var helpHelp = []helpEntry{
 			{name: "pair", usage: "pair", short: "Print a one-time password that adds your ssh key"},
 			{name: "key ls", usage: "key ls", short: "List paired ssh keys"},
 			{name: "key rm", usage: "key rm <fingerprint>", short: "Revoke an ssh key"},
-			{name: "env set", usage: "env set <name> <value>", short: "Store a variable and push it to online computers"},
+			{name: "env set", usage: "env set <name> <value>", short: "Store a variable; new sessions on every computer receive it"},
 			{name: "env rm", usage: "env rm <name>", short: "Remove a variable; existing sessions keep the old value"},
 			{name: "env ls", usage: "env ls", short: "List variable names; values are never printed"},
 			{name: "whoami", usage: "whoami", short: "Show the key this session authenticated with"},

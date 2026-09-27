@@ -105,7 +105,8 @@ name registered on the server. The shell runs as the account that ran
 `box join` on that machine. The two names do not have to match.
 
 `box join` writes that account's `~/.ssh/box_authorized_keys` and, when it
-can, points sshd at that file and turns on `PermitUserEnvironment`. It prints
+can, points sshd at that file and adds `AcceptEnv *`, so per-session env
+variables set on the server reach their shells. It prints
 each change. The account's own `authorized_keys` is left alone.
 
 ### Claim a hostname

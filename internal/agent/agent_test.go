@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -69,7 +68,7 @@ func TestJoin(t *testing.T) {
 		"approved. tunnel up as home.box.example.com",
 		"sshd_config is not writable. Add these lines, then reload sshd:",
 		sshdKeysLine,
-		"PermitUserEnvironment yes",
+		"AcceptEnv *",
 	} {
 		if !strings.Contains(text, line) {
 			t.Fatalf("missing %q in %q", line, text)
@@ -233,19 +232,12 @@ func TestRun(t *testing.T) {
 		t.Fatalf("stat %+v", stat)
 	}
 
-	const secretValue = "s3cret value"
-	if err := conn.Call(callCtx, tunnel.OpEnv, tunnel.EnvRequest{Vars: map[string]string{
-		"ZZ":   secretValue,
-		"AA":   "one",
-		"A\"B": "nope",
-		"NL":   "no\npe",
-		"BS":   `a\b`,
-	}}, nil); err != nil {
-		t.Fatal(err)
-	}
+	// Env pushes no longer exist; keys land bare. Values never touch the disk.
 	if err := conn.Call(callCtx, tunnel.OpKeys, tunnel.KeysRequest{AuthorizedKeys: []string{
 		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake one",
 		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ two",
+		"   ",
+		"bad\nline",
 	}}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -254,10 +246,17 @@ func TestRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantKeys := "" +
-		`environment="AA=one",environment="ZZ=s3cret value" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake one` + "\n" +
-		`environment="AA=one",environment="ZZ=s3cret value" ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ two` + "\n"
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake one" + "\n" +
+		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ two" + "\n"
 	if string(keysRaw) != wantKeys {
 		t.Fatalf("keys:\n%s", keysRaw)
+	}
+	accessRaw, err := os.ReadFile(filepath.Join(dir, accessFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(accessRaw), "env") {
+		t.Fatalf("access.json mentions env: %s", accessRaw)
 	}
 	kfi, err := os.Stat(filepath.Join(dir, ".ssh", "box_authorized_keys"))
 	if err != nil {
@@ -361,15 +360,8 @@ func TestRun(t *testing.T) {
 	if saved.QUIC != srv.Addr() || saved.Fingerprint != fp || saved.Token != token {
 		t.Fatalf("%+v", saved)
 	}
-	if strings.Contains(string(mustRead(t, filepath.Join(dir, "computer.json"))), secretValue) {
-		t.Fatal("env value written into computer.json")
-	}
-	if strings.Contains(logs.String(), secretValue) {
-		t.Fatal("env value logged")
-	}
-	accessRaw := mustRead(t, filepath.Join(dir, accessFileName))
-	if !strings.Contains(accessRaw, secretValue) {
-		t.Fatal("env was not persisted")
+	if strings.Contains(logs.String(), token) {
+		t.Fatal("token logged")
 	}
 	afi, err := os.Stat(filepath.Join(dir, accessFileName))
 	if err != nil {
@@ -378,7 +370,6 @@ func TestRun(t *testing.T) {
 	if afi.Mode().Perm() != 0o600 {
 		t.Fatalf("access mode %o", afi.Mode().Perm())
 	}
-	walkNoSecret(t, dir, secretValue)
 
 	idMu.Lock()
 	if len(ids) < 1 {
@@ -552,31 +543,58 @@ func TestRunKeepsStateOnNetworkError(t *testing.T) {
 }
 
 func TestFormatKeyLine(t *testing.T) {
-	env := map[string]string{"ZZ": "two", "AA": "one", "A\"B": "x", "NL": "a\nb", "CR": "a\rb", "BS": `a\b`}
-	got := formatKeyLine("ssh-ed25519 AAAA comment", env)
-	want := `environment="AA=one",environment="ZZ=two" ssh-ed25519 AAAA comment`
-	if got != want {
-		t.Fatalf("got %s", got)
+	if formatKeyLine("ssh-ed25519 AAAA comment") != "ssh-ed25519 AAAA comment" {
+		t.Fatal("plain line changed")
 	}
-	if strings.Contains(got, `\`) || strings.Contains(got, "A\"B") {
-		t.Fatalf("escaped pair leaked: %s", got)
+	if formatKeyLine("  ssh-ed25519 AAAA  ") != "ssh-ed25519 AAAA" {
+		t.Fatal("not trimmed")
 	}
-	opt := formatKeyLine(`no-port-forwarding ssh-ed25519 AAAA`, map[string]string{"AA": "one"})
-	if opt != `environment="AA=one",no-port-forwarding ssh-ed25519 AAAA` {
-		t.Fatalf("options %s", opt)
-	}
-	if formatKeyLine("  \n", env) != "" {
+	if formatKeyLine("  \n") != "" {
 		t.Fatal("blank line")
 	}
-	if formatKeyLine("ssh-ed25519 AAAA", nil) != "ssh-ed25519 AAAA" {
-		t.Fatal("no env")
+	if formatKeyLine("bad\nline") != "" {
+		t.Fatal("multiline line")
+	}
+}
+
+// TestAccessPurgesLegacyEnv covers upgrade: an access.json written by an
+// older box carries env values on disk. The first boot after upgrade must
+// drop them and rewrite the managed keys file without environment= options.
+func TestAccessPurgesLegacyEnv(t *testing.T) {
+	dir := t.TempDir()
+	setHome(t, dir)
+	legacy := `{"authorized_keys": ["ssh-ed25519 AAAA one"], "env": {"GH_TOKEN": "legacy-secret"}}`
+	if err := os.WriteFile(filepath.Join(dir, accessFileName), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".ssh", "box_authorized_keys"),
+		[]byte("environment=\"GH_TOKEN=legacy-secret\" ssh-ed25519 AAAA one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &agent{dir: dir}
+	if err := a.loadAndRewrite(); err != nil {
+		t.Fatal(err)
+	}
+	access, err := os.ReadFile(filepath.Join(dir, accessFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(access), "legacy-secret") || strings.Contains(string(access), `"env"`) {
+		t.Fatalf("env survived: %s", access)
+	}
+	got := mustRead(t, filepath.Join(dir, ".ssh", "box_authorized_keys"))
+	if got != "ssh-ed25519 AAAA one\n" {
+		t.Fatalf("keys file kept options:\n%s", got)
 	}
 }
 
 func TestAccessKeepsBothSets(t *testing.T) {
 	dir := t.TempDir()
 	setHome(t, dir)
-	a := &agent{dir: dir, env: map[string]string{}}
+	a := &agent{dir: dir}
 	keysBody, err := json.Marshal(tunnel.KeysRequest{AuthorizedKeys: []string{"ssh-ed25519 AAAA one"}})
 	if err != nil {
 		t.Fatal(err)
@@ -588,17 +606,10 @@ func TestAccessKeepsBothSets(t *testing.T) {
 	if err := b.loadAndRewrite(); err != nil {
 		t.Fatal(err)
 	}
-	envBody, err := json.Marshal(tunnel.EnvRequest{Vars: map[string]string{"AA": "one"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.onControl(tunnel.OpEnv, envBody); err != nil {
-		t.Fatal(err)
-	}
 	got := mustRead(t, filepath.Join(dir, ".ssh", "box_authorized_keys"))
-	want := "environment=\"AA=one\" ssh-ed25519 AAAA one\n"
+	want := "ssh-ed25519 AAAA one\n"
 	if got != want {
-		t.Fatalf("after env push:\n%s", got)
+		t.Fatalf("after reload:\n%s", got)
 	}
 	c := &agent{dir: dir}
 	if err := c.loadAndRewrite(); err != nil {
@@ -612,7 +623,7 @@ func TestAccessKeepsBothSets(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = mustRead(t, filepath.Join(dir, ".ssh", "box_authorized_keys"))
-	want = "environment=\"AA=one\",restrict ssh-rsa BBB two\n"
+	want = "restrict ssh-rsa BBB two\n"
 	if got != want {
 		t.Fatalf("after keys push:\n%s", got)
 	}
@@ -631,7 +642,7 @@ func TestPushDoesNotCommitOnWriteFailure(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".ssh"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a := &agent{dir: dir, env: map[string]string{"KEEP": "yes"}}
+	a := &agent{dir: dir, keys: []string{"ssh-ed25519 KEEP"}}
 	body, err := json.Marshal(tunnel.KeysRequest{AuthorizedKeys: []string{"ssh-ed25519 AAAA"}})
 	if err != nil {
 		t.Fatal(err)
@@ -639,8 +650,8 @@ func TestPushDoesNotCommitOnWriteFailure(t *testing.T) {
 	if _, err := a.onControl(tunnel.OpKeys, body); err == nil {
 		t.Fatal("expected write failure")
 	}
-	if len(a.keys) != 0 || a.env["KEEP"] != "yes" {
-		t.Fatalf("memory changed keys=%v env=%v", a.keys, a.env)
+	if len(a.keys) != 1 || a.keys[0] != "ssh-ed25519 KEEP" {
+		t.Fatalf("memory changed keys=%v", a.keys)
 	}
 	if _, err := os.Stat(filepath.Join(dir, accessFileName)); !os.IsNotExist(err) {
 		t.Fatal("access.json written", err)
@@ -704,16 +715,24 @@ func TestSSHDConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(body), boxAuthorizedKeys) != 1 || strings.Count(string(body), "PermitUserEnvironment yes") != 1 {
+	if strings.Count(string(body), boxAuthorizedKeys) != 1 || strings.Count(string(body), "AcceptEnv *") != 1 {
 		t.Fatalf("file %s", body)
 	}
-	turned, changed, warn := setPermitUserEnvironment("PermitUserEnvironment no\n")
-	if !changed || warn != "" || !strings.Contains(turned, "PermitUserEnvironment yes") {
-		t.Fatalf("no: %q changed %v warn %q", turned, changed, warn)
+	turned, changed, warn := ensureAcceptEnv("AcceptEnv\n")
+	if !changed || warn != "" || !strings.Contains(turned, "AcceptEnv *") {
+		t.Fatalf("bare: %q changed %v warn %q", turned, changed, warn)
 	}
-	kept, changed, warn := setPermitUserEnvironment("PermitUserEnvironment LANG,TZ\n")
-	if changed || kept != "PermitUserEnvironment LANG,TZ\n" || warn == "" {
+	kept, changed, warn := ensureAcceptEnv("AcceptEnv LANG LC_*\n")
+	if changed || kept != "AcceptEnv LANG LC_*\n" || warn == "" {
 		t.Fatalf("pattern: %q changed %v warn %q", kept, changed, warn)
+	}
+	_, changed, warn = ensureAcceptEnv("AcceptEnv LANG\nAcceptEnv *\n")
+	if changed || warn != "" {
+		t.Fatalf("second line wildcard: changed %v warn %q", changed, warn)
+	}
+	inserted, changed, warn := ensureAcceptEnv("# c\nMatch User x\nAcceptEnv LANG\n")
+	if !changed || warn != "" || !strings.HasPrefix(inserted, "# c\nAcceptEnv *\nMatch") {
+		t.Fatalf("match insert: %q changed %v warn %q", inserted, changed, warn)
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -991,29 +1010,6 @@ func mustRead(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
-}
-
-func walkNoSecret(t *testing.T, dir, secretValue string) {
-	t.Helper()
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !d.Type().IsRegular() {
-			return nil
-		}
-		if strings.HasSuffix(path, "box_authorized_keys") || strings.HasSuffix(path, accessFileName) {
-			return nil
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		if strings.Contains(string(b), secretValue) {
-			t.Errorf("env value in %s", path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
 func mapsClone(in map[string]int) map[string]int {

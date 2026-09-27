@@ -88,7 +88,7 @@ Streams:
 
 | Stream | Opened by | Carries |
 | --- | --- | --- |
-| Control | computer, once per connection | newline-delimited JSON frames: hello, portal claim/check/release, key and env pushes, stat replies, event publish and fetch |
+| Control | computer, once per connection | newline-delimited JSON frames: hello, portal claim/check/release, key pushes, stat replies, event publish and fetch |
 | `ssh` | server, per client session | raw TCP splice. The agent connects it to the machine's own sshd |
 | `portal` | server, per HTTP request | raw TCP. The agent connects it to 127.0.0.1 and the claimed port |
 
@@ -126,7 +126,7 @@ The SSH username is the computer's registered name. The account inside the sessi
 
 The agent manages one file, `~/.ssh/box_authorized_keys`, and nothing else in the account. The server's bound client keys are written there and kept in sync over the control stream. The user's own `authorized_keys` is never touched, so logins that already use that file keep working. sshd ignores the managed file until `AuthorizedKeysFile` lists it. `box join` adds it when it can write sshd's config, prints each change, and reloads sshd when it can. When it cannot write the file, it prints the lines and the reload command.
 
-Environment variables set with `env set` are injected per key, using OpenSSH's `environment="NAME=value"` authorized-keys option. OpenSSH applies those options only when `PermitUserEnvironment` is on, so `box join` sets it to `yes` when the setting is missing or `no`, and prints that change. A pattern the operator already set is left as it is, and join says so. An online computer receives pushes as they happen; a new SSH session sees the current set. `env ls` prints names, never values.
+Environment variables set with `env set` are stored on the server only. When the server opens a splice session it sends the current set as per-session SSH env requests, so the values exist on the computer only inside that session's memory; the agent never writes them to disk. OpenSSH's sshd drops env requests whose names do not match its `AcceptEnv` setting, so `box join` adds `AcceptEnv *` when no global `AcceptEnv` line exists, and prints that change. `AcceptEnv` lines the operator already set are left as they are, and join says so. Because a splice session can only arrive through a live tunnel, there is no offline window to trade away. `env ls` prints names, never values.
 
 The agent also writes the box skill to `~/.agents/skills/box/SKILL.md` so an agent on the computer knows how to claim portals. The skill contains no credentials.
 
@@ -193,7 +193,7 @@ The control plane is the SSH command itself, plus a REPL for a person. Interacti
 | `approve <code>` | Approve a pending join |
 | `pair` | Print a one-time password for another client |
 | `key ls` / `key rm` | List or remove bound client keys |
-| `env set <name> <value>` | Store a variable and push it to online computers |
+| `env set <name> <value>` | Store a variable. New splice sessions receive it |
 | `env rm <name>` | Remove it. Existing sessions keep the old value |
 | `env ls` | List names only |
 | `token add [--for 12h] [comment]` | Create an access token. No expiry unless `--for` is set |

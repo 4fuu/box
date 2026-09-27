@@ -145,6 +145,9 @@ func acceptAgentShell(ctx context.Context, sess *tunnel.Session, host gossh.Sign
 	}
 }
 
+// serveShellSSH pretends to be the computer's sshd. It records env requests
+// per session and answers "showenv <name>" with the recorded value, so a
+// test can prove the server injected an env variable into the session.
 func serveShellSSH(conn net.Conn, host gossh.Signer, extraHosts ...gossh.Signer) {
 	defer conn.Close()
 	cfg := &gossh.ServerConfig{
@@ -173,13 +176,26 @@ func serveShellSSH(conn net.Conn, host gossh.Signer, extraHosts ...gossh.Signer)
 		}
 		go func() {
 			defer ch.Close()
+			env := map[string]string{}
 			for req := range reqs {
 				switch req.Type {
 				case "pty-req":
 					req.Reply(true, nil)
-				case "exec":
+				case "env":
+					var e struct{ Name, Value string }
+					if err := gossh.Unmarshal(req.Payload, &e); err == nil && e.Name != "" {
+						env[e.Name] = e.Value
+					}
 					req.Reply(true, nil)
-					_, _ = io.WriteString(ch, "hi\n")
+				case "exec":
+					var payload struct{ Command string }
+					_ = gossh.Unmarshal(req.Payload, &payload)
+					req.Reply(true, nil)
+					if name, ok := strings.CutPrefix(payload.Command, "showenv "); ok {
+						_, _ = io.WriteString(ch, env[name]+"\n")
+					} else {
+						_, _ = io.WriteString(ch, "hi\n")
+					}
 					_, _ = ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
 					return
 				case "shell":
@@ -405,6 +421,49 @@ func TestSpliceHostKeyAlgorithm(t *testing.T) {
 
 	if out, errOut, err := sshRun(t, srv.SSHAddr(), "home", signer, "echo"); err != nil || out != "hi\n" {
 		t.Fatalf("splice: %v %s %q", err, errOut, out)
+	}
+}
+
+// TestSpliceSessionEnv pins issue #2's server side: env set on the server
+// reaches the splice session through per-session env requests, and nothing
+// about the value is pushed to the computer over the control stream.
+func TestSpliceSessionEnv(t *testing.T) {
+	srv, _, signer := e2eBind(t)
+	token := e2eJoin(t, srv, signer, "home")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	agent := e2eAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
+	defer agent.Close()
+
+	var opsMu sync.Mutex
+	ops := map[string]bool{}
+	agent.Handle(func(op string, _ json.RawMessage) (any, error) {
+		if op == tunnel.OpStat {
+			return tunnel.StatResponse{CPU: 0.5, Memory: 12, Disk: 34, Uptime: 56}, nil
+		}
+		opsMu.Lock()
+		ops[op] = true
+		opsMu.Unlock()
+		return nil, nil
+	})
+
+	if _, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "env set E2E_TOKEN tok-42"); err != nil {
+		t.Fatalf("env set: %v %s", err, errOut)
+	}
+	out, errOut, err := sshRun(t, srv.SSHAddr(), "home", signer, "showenv E2E_TOKEN")
+	if err != nil || out != "tok-42\n" {
+		t.Fatalf("showenv: %v %s %q", err, errOut, out)
+	}
+	out, _, err = sshRun(t, srv.SSHAddr(), "home", signer, "showenv NEVER_SET")
+	if err != nil || out != "\n" {
+		t.Fatalf("unset var leaked something: %v %q", err, out)
+	}
+	opsMu.Lock()
+	envPushed := ops["env"]
+	opsMu.Unlock()
+	if envPushed {
+		t.Fatal("server pushed env over the control stream")
 	}
 }
 

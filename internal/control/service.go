@@ -153,6 +153,7 @@ func (s *Service) AuthorizedLines() ([]string, error) {
 	return out, nil
 }
 
+// PushKeys sends the bound client keys to every online computer.
 func (s *Service) PushKeys(ctx context.Context) {
 	lines, err := s.AuthorizedLines()
 	if err != nil || s.Live == nil {
@@ -164,21 +165,8 @@ func (s *Service) PushKeys(ctx context.Context) {
 	}
 }
 
-func (s *Service) PushEnv(ctx context.Context) {
-	if s.Live == nil {
-		return
-	}
-	vars, err := s.Store.EnvAll()
-	if err != nil {
-		return
-	}
-	req := tunnel.EnvRequest{Vars: vars}
-	for _, c := range s.Live.All() {
-		_ = call(ctx, c, tunnel.OpEnv, req, nil)
-	}
-}
-
-// PushAll sends keys and env to one computer that just said hello.
+// PushAll sends keys to one computer that just said hello. Env needs no
+// push: the server injects the current set into every splice session.
 func (s *Service) PushAll(ctx context.Context, c *tunnel.Conn) {
 	if c == nil {
 		return
@@ -187,11 +175,6 @@ func (s *Service) PushAll(ctx context.Context, c *tunnel.Conn) {
 	if err == nil {
 		_ = call(ctx, c, tunnel.OpKeys, tunnel.KeysRequest{AuthorizedKeys: lines}, nil)
 	}
-	vars, err := s.Store.EnvAll()
-	if err != nil {
-		return
-	}
-	_ = call(ctx, c, tunnel.OpEnv, tunnel.EnvRequest{Vars: vars}, nil)
 }
 
 func call(ctx context.Context, c *tunnel.Conn, op string, req, resp any) error {
@@ -222,8 +205,7 @@ func (s *Service) SetEnv(name, value string) (string, error) {
 	if err := s.Store.SetEnv(name, value); err != nil {
 		return "", err
 	}
-	s.PushEnv(context.Background())
-	return name + " set. existing sessions keep the old value", nil
+	return name + " set. new sessions receive it", nil
 }
 
 func (s *Service) EnvNames() ([]string, error) { return s.Store.EnvNames() }
@@ -235,7 +217,6 @@ func (s *Service) DeleteEnv(name string) error {
 		}
 		return err
 	}
-	s.PushEnv(context.Background())
 	return nil
 }
 

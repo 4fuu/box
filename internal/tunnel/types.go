@@ -17,7 +17,6 @@ const (
 	OpPortalRm    = "portal_rm"
 	OpPortalLs    = "portal_ls"
 	OpKeys        = "keys"
-	OpEnv         = "env"
 	OpStat        = "stat"
 	OpEventPub    = "event_pub"
 	OpEventGet    = "event_get"
@@ -120,12 +119,6 @@ type PortalList struct {
 // KeysRequest replaces the computer's authorized keys.
 type KeysRequest struct {
 	AuthorizedKeys []string `json:"authorized_keys"`
-}
-
-// EnvRequest replaces the computer's environment.
-// Values must not be logged.
-type EnvRequest struct {
-	Vars map[string]string `json:"vars"`
 }
 
 // StatRequest asks the computer for its live load. The body is empty.

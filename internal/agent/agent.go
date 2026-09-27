@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net"
+	"os"
 	"os/user"
 	"strings"
 	"sync"
@@ -45,7 +46,6 @@ type agent struct {
 	mu   sync.Mutex
 	comp computer
 	keys []string
-	env  map[string]string
 	sess *tunnel.Session
 	ln   net.Listener
 }
@@ -101,10 +101,13 @@ func Run(ctx context.Context, stateDir string) error {
 	if err != nil {
 		return err
 	}
-	a := &agent{dir: stateDir, ctx: ctx, comp: comp, env: map[string]string{}}
+	a := &agent{dir: stateDir, ctx: ctx, comp: comp}
 	if err := a.loadAndRewrite(); err != nil {
 		return err
 	}
+	// Idempotent: adds AcceptEnv when sshd's config still lacks it, prints
+	// the lines to add when the file is not writable, silent when done.
+	ensureSSHD(os.Stdout)
 	_ = installSkill(stateDir)
 	if err := a.listen(); err != nil {
 		return err

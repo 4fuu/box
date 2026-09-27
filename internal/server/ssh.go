@@ -530,6 +530,15 @@ func (h *sshServer) bridgeIO(sess ssh.Session, computer string, closeSession boo
 			}()
 		}
 	}
+	// Env values live on the server only. Each splice session carries the
+	// current set; the computer stores nothing. sshd drops names outside
+	// AcceptEnv, the same way the OpenSSH client drops rejected SendEnv
+	// variables, so a failed Setenv is ignored here too.
+	if vars, verr := h.s.store.EnvAll(); verr == nil {
+		for name, value := range vars {
+			_ = bs.Setenv(name, value)
+		}
+	}
 	bs.Stdin = stdin
 	stdout, err := bs.StdoutPipe()
 	if err != nil {

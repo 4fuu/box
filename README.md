@@ -96,8 +96,13 @@ box agent
 `approve <code>` from a bound client. The login user is whoever ran
 `box join`, unless `--user` names another account on that machine.
 
-`ssh home@box.example.com` is that computer's sshd. The SSH username selects
-the computer, not the login user.
+`ssh home@box.example.com` is that computer's sshd. The SSH username is the
+name registered on the server. The shell runs as the account that ran
+`box join` on that machine. The two names do not have to match.
+
+`box join` writes that account's `~/.ssh/box_authorized_keys` and, when it
+can, points sshd at that file and turns on `PermitUserEnvironment`. It prints
+each change. The account's own `authorized_keys` is left alone.
 
 ### Claim a hostname
 

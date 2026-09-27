@@ -594,6 +594,15 @@ write_units() {
     fi
 }
 
+configure_sshd() {
+    if [ "$role" != computer ] || [ "$dry" = 1 ] || [ "$(id -u)" -ne 0 ]; then
+        return 0
+    fi
+    # Root can write sshd_config. join itself runs as the operator and only prints
+    # the lines when it cannot. One editor lives in box.
+    "$prefix/bin/box" join --prepare-sshd || true
+}
+
 join_computer() {
     if [ "$role" != computer ]; then
         return 0
@@ -680,6 +689,7 @@ main() {
     tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/box-install.XXXXXX")
     resolve_version
     install_box "$arch"
+    configure_sshd
     join_computer
     write_units
     say installed "$version" "$prefix"

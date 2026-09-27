@@ -119,9 +119,11 @@ The splice is end-to-end: the client's handshake finishes at the computer's sshd
 
 The agent runs as a regular user. It never needs root. The login user is the user who ran `box join`, unless `--user <name>` names an existing account on that machine.
 
-The agent manages one file, `~/.ssh/box_authorized_keys`, and nothing else in the account. The server's bound client keys are written there and kept in sync over the control stream. The user's own `authorized_keys` is never touched. sshd must list the managed file as an additional `AuthorizedKeysFile`; `box join` adds it when it can and otherwise prints the one line for the operator.
+The SSH username is the computer's registered name. The account inside the session is the account that ran `box join`. Those names do not have to match. `ssh home@box.example.com` opens a shell as that account on the machine registered as `home`.
 
-Environment variables set with `env set` are injected per key, using OpenSSH's `environment="NAME=value"` authorized-keys option. No sshd configuration change, no `PermitUserEnvironment`. An online computer receives pushes as they happen; a new SSH session sees the current set. `env ls` prints names, never values.
+The agent manages one file, `~/.ssh/box_authorized_keys`, and nothing else in the account. The server's bound client keys are written there and kept in sync over the control stream. The user's own `authorized_keys` is never touched, so logins that already use that file keep working. sshd ignores the managed file until `AuthorizedKeysFile` lists it. `box join` adds it when it can write sshd's config, prints each change, and reloads sshd when it can. When it cannot write the file, it prints the lines and the reload command.
+
+Environment variables set with `env set` are injected per key, using OpenSSH's `environment="NAME=value"` authorized-keys option. OpenSSH applies those options only when `PermitUserEnvironment` is on, so `box join` sets it to `yes` when the setting is missing or `no`, and prints that change. A pattern the operator already set is left as it is, and join says so. An online computer receives pushes as they happen; a new SSH session sees the current set. `env ls` prints names, never values.
 
 The agent also writes the box skill to `~/.agents/skills/box/SKILL.md` so an agent on the computer knows how to claim portals. The skill contains no credentials.
 

@@ -25,7 +25,7 @@ One executable. The subcommand selects the role. There is no `boxd`, no `box-nod
 | `box join <host>`, then `box agent` | computer | approval, then the QUIC tunnel and `~/.box/agent.sock` |
 | `box domain`, `box portal …` | computer | guest CLI. Talks only to the agent socket |
 
-The server listens on three ports: SSH, HTTP, and QUIC. Computers dial out. The SSH username is the computer name. An empty username, or `box`, opens the control REPL. `web` is spliced to the computer named `web`, and the session ends at that machine's sshd.
+The server listens on three ports: SSH, HTTP, and QUIC. Computers dial out. The SSH username is the computer's registered name. The session account is whoever ran `box join` on that machine; the two names do not have to match. An empty username, or `box`, opens the control REPL. `web` is spliced to the computer named `web`, and the session ends at that machine's sshd. `box join` updates sshd when the config is writable, prints each change, and reloads sshd when it can.
 
 A portal is a label the computer claims, joined to the domain configured at server start. Portals are HTTP only. The computer reads the domain with `box domain`. It does not invent one. The process listens on `127.0.0.1`.
 

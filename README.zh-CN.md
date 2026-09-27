@@ -70,7 +70,9 @@ box agent
 
 `box join` 会打印批准码。在服务器 TUI 里输入，或从已绑定的客户端运行 `approve <code>`。登录用户是运行 `box join` 的用户，除非 `--user` 指定了这台机器上的另一个账户。
 
-`ssh home@box.example.com` 到达的是那台计算机的 sshd。SSH 用户名选择的是计算机，不是登录用户。
+`ssh home@box.example.com` 到达的是那台计算机的 sshd。SSH 用户名是登记在服务器上的名字。进去之后的账号是这台机器上运行 `box join` 的账号，两个名字可以不同。
+
+`box join` 会写这个账号的 `~/.ssh/box_authorized_keys`。能写 sshd 配置时，它会把这个文件加进 `AuthorizedKeysFile`，并打开 `PermitUserEnvironment`，每一处修改都会打印出来。账号自己的 `authorized_keys` 不动。
 
 ### 声明主机名
 

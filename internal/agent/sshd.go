@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -16,34 +17,68 @@ const (
 	sshdKeysLine      = "AuthorizedKeysFile .ssh/authorized_keys .ssh/box_authorized_keys"
 )
 
-// ensureSSHD adds the managed keys file when sshd_config is writable.
-// Otherwise it tells the operator the one line to add. Join still succeeds.
+// ConfigureSSHD makes sshd read the managed keys file and apply environment=
+// options. It prints every change. Join still succeeds when the file is not writable.
+func ConfigureSSHD(out io.Writer) {
+	ensureSSHD(out)
+}
+
+// ensureSSHD adds the managed keys file and PermitUserEnvironment when sshd_config
+// is writable. OpenSSH ignores environment= on a key unless that setting is on.
+// Otherwise it tells the operator the lines to add. Join still succeeds.
 func ensureSSHD(out io.Writer) {
 	if out == nil {
 		out = io.Discard
 	}
-	if err := updateSSHD(sshdConfigPath); err != nil {
-		fmt.Fprintf(out, "add to sshd_config: %s\n", sshdKeysLine)
+	notes, warning, err := updateSSHD(sshdConfigPath)
+	if err != nil {
+		if body, rerr := os.ReadFile(sshdConfigPath); rerr == nil {
+			_, edit := prepareSSHD(string(body))
+			if !edit.changed && edit.warning == "" {
+				return
+			}
+			if !edit.changed && edit.warning != "" {
+				fmt.Fprintln(out, edit.warning)
+				return
+			}
+		}
+		fmt.Fprintf(out, "sshd_config is not writable. Add these lines, then reload sshd:\n  %s\n  PermitUserEnvironment yes\n  sudo systemctl reload ssh\n", sshdKeysLine)
+		return
 	}
+	if warning != "" {
+		fmt.Fprintln(out, warning)
+	}
+	if len(notes) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "updated %s:\n", sshdConfigPath)
+	for _, note := range notes {
+		fmt.Fprintf(out, "  %s\n", note)
+	}
+	if reloadSSHD() {
+		fmt.Fprintln(out, "reloaded sshd")
+		return
+	}
+	fmt.Fprintln(out, "reload sshd: sudo systemctl reload ssh")
 }
 
-func updateSSHD(path string) error {
+func updateSSHD(path string) ([]string, string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
-	next, changed := addBoxAuthorizedKeys(string(body))
-	if !changed {
-		return nil
+	next, edit := prepareSSHD(string(body))
+	if !edit.changed {
+		return nil, edit.warning, nil
 	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".sshd-config-*")
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	tmpName := tmp.Name()
 	ok := false
@@ -54,28 +89,119 @@ func updateSSHD(path string) error {
 	}()
 	if _, err := tmp.WriteString(next); err != nil {
 		_ = tmp.Close()
-		return err
+		return nil, "", err
 	}
 	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
 		_ = tmp.Close()
-		return err
+		return nil, "", err
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return err
+		return nil, "", err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return nil, "", err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return err
+		return nil, "", err
 	}
 	ok = true
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
 	}
-	return nil
+	return edit.notes, edit.warning, nil
+}
+
+type sshdEdit struct {
+	notes   []string
+	warning string
+	changed bool
+}
+
+func prepareSSHD(content string) (string, sshdEdit) {
+	next, keysChanged := addBoxAuthorizedKeys(content)
+	var edit sshdEdit
+	if keysChanged {
+		edit.notes = append(edit.notes, "AuthorizedKeysFile includes "+boxAuthorizedKeys)
+		edit.changed = true
+	}
+	var envChanged bool
+	next, envChanged, edit.warning = setPermitUserEnvironment(next)
+	if envChanged {
+		edit.notes = append(edit.notes, "PermitUserEnvironment yes")
+		edit.changed = true
+	}
+	return next, edit
+}
+
+// setPermitUserEnvironment turns the option on when it is missing or no.
+// A pattern the operator already chose is left in place.
+func setPermitUserEnvironment(content string) (string, bool, string) {
+	lines := strings.Split(content, "\n")
+	firstMatch := -1
+	target := -1
+	args := ""
+	for i, line := range lines {
+		key, a, ok := sshdKeyword(strings.TrimRight(line, "\r"))
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(key, "Match") {
+			if firstMatch < 0 {
+				firstMatch = i
+			}
+			continue
+		}
+		if firstMatch >= 0 || !strings.EqualFold(key, "PermitUserEnvironment") {
+			continue
+		}
+		if target >= 0 {
+			continue
+		}
+		target = i
+		args = a
+	}
+	if target >= 0 {
+		switch strings.ToLower(strings.TrimSpace(args)) {
+		case "yes", "*":
+			return content, false, ""
+		case "no", "":
+			lines[target] = "PermitUserEnvironment yes"
+			return strings.Join(lines, "\n"), true, ""
+		default:
+			return content, false, "PermitUserEnvironment is already " + args + "; env names must match it"
+		}
+	}
+	line := "PermitUserEnvironment yes"
+	if firstMatch >= 0 {
+		var b strings.Builder
+		for i, l := range lines {
+			if i == firstMatch {
+				b.WriteString(line)
+				b.WriteByte('\n')
+			}
+			b.WriteString(l)
+			if i != len(lines)-1 {
+				b.WriteByte('\n')
+			}
+		}
+		return b.String(), true, ""
+	}
+	base := content
+	if base != "" && !strings.HasSuffix(base, "\n") {
+		base += "\n"
+	}
+	return base + line + "\n", true, ""
+}
+
+func reloadSSHD() bool {
+	for _, name := range []string{"ssh", "sshd"} {
+		if exec.Command("systemctl", "reload", name).Run() == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // addBoxAuthorizedKeys returns the file contents and whether they changed.

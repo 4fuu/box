@@ -67,7 +67,9 @@ func TestJoin(t *testing.T) {
 		`enter this code at the server to approve "home"`,
 		"waiting\u2026",
 		"approved. tunnel up as home.box.example.com",
-		"add to sshd_config: " + sshdKeysLine,
+		"sshd_config is not writable. Add these lines, then reload sshd:",
+		sshdKeysLine,
+		"PermitUserEnvironment yes",
 	} {
 		if !strings.Contains(text, line) {
 			t.Fatalf("missing %q in %q", line, text)
@@ -689,18 +691,31 @@ func TestSSHDConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte("#AuthorizedKeysFile .ssh/authorized_keys\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateSSHD(path); err != nil {
+	notes, _, err := updateSSHD(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := updateSSHD(path); err != nil {
-		t.Fatal(err)
+	if len(notes) != 2 {
+		t.Fatalf("notes %v", notes)
+	}
+	notes, warning, err := updateSSHD(path)
+	if err != nil || warning != "" || len(notes) != 0 {
+		t.Fatalf("second update notes %v warning %q err %v", notes, warning, err)
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(body), boxAuthorizedKeys) != 1 {
+	if strings.Count(string(body), boxAuthorizedKeys) != 1 || strings.Count(string(body), "PermitUserEnvironment yes") != 1 {
 		t.Fatalf("file %s", body)
+	}
+	turned, changed, warn := setPermitUserEnvironment("PermitUserEnvironment no\n")
+	if !changed || warn != "" || !strings.Contains(turned, "PermitUserEnvironment yes") {
+		t.Fatalf("no: %q changed %v warn %q", turned, changed, warn)
+	}
+	kept, changed, warn := setPermitUserEnvironment("PermitUserEnvironment LANG,TZ\n")
+	if changed || kept != "PermitUserEnvironment LANG,TZ\n" || warn == "" {
+		t.Fatalf("pattern: %q changed %v warn %q", kept, changed, warn)
 	}
 	fi, err := os.Stat(path)
 	if err != nil {

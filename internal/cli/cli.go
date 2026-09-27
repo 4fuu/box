@@ -160,6 +160,10 @@ func serve(o Options) error {
 }
 
 func join(o Options) error {
+	if len(o.Args) > 1 && o.Args[1] == "--prepare-sshd" {
+		agent.ConfigureSSHD(o.Stdout)
+		return nil
+	}
 	host, name, userName, ok := parseJoinArgs(o.Args[1:])
 	if !ok {
 		fmt.Fprint(o.Stderr, hostUsage)

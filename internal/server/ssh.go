@@ -524,8 +524,13 @@ func (h *sshServer) bridgeIO(sess ssh.Session, computer string, closeSession boo
 	if err != nil {
 		return err
 	}
-	go io.Copy(sess, stdout)
-	go io.Copy(sess.Stderr(), stderr)
+	// Wait() returns as soon as the exit status lands; the copy
+	// goroutines may still hold output. Exiting the client session first
+	// would drop it, so drain both pipes before exiting below.
+	var copied sync.WaitGroup
+	copied.Add(2)
+	go func() { defer copied.Done(); _, _ = io.Copy(sess, stdout) }()
+	go func() { defer copied.Done(); _, _ = io.Copy(sess.Stderr(), stderr) }()
 	raw := ""
 	if computer == sess.User() {
 		raw = sess.RawCommand()
@@ -543,6 +548,7 @@ func (h *sshServer) bridgeIO(sess ssh.Session, computer string, closeSession boo
 		return err
 	}
 	err = bs.Wait()
+	copied.Wait()
 	code := exitCode(err)
 	if closeSession {
 		_ = sess.Exit(code)

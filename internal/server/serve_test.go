@@ -188,7 +188,6 @@ func TestComputersTunnel(t *testing.T) {
 		QUIC        string `json:"quic"`
 		Fingerprint string `json:"fingerprint"`
 		Domain      string `json:"domain"`
-		HTTPPort    int    `json:"http_port"`
 		Error       string `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(got.out), &reply); err != nil {
@@ -199,9 +198,6 @@ func TestComputersTunnel(t *testing.T) {
 	}
 	if reply.QUIC != "box.example.com:"+portOf(srv.QUICAddr()) {
 		t.Fatalf("quic %q", reply.QUIC)
-	}
-	if reply.HTTPPort != atoiPort(srv.HTTPAddr()) {
-		t.Fatalf("http port %d vs %s", reply.HTTPPort, srv.HTTPAddr())
 	}
 	walkNoSecret(t, dir, reply.Token)
 	walkNoSecret(t, dir, code)
@@ -254,7 +250,7 @@ func TestComputersTunnel(t *testing.T) {
 	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: 3000}, &add); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(add.URL, "web.box.example.com:") || add.Port != 3000 {
+	if add.URL != "http://web.box.example.com" || add.Port != 3000 {
 		t.Fatalf("portal %+v", add)
 	}
 	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web.other", Port: 1}, nil); err == nil {
@@ -754,12 +750,6 @@ func portOf(addr string) string {
 		return ""
 	}
 	return p
-}
-
-func atoiPort(addr string) int {
-	var n int
-	fmt.Sscanf(portOf(addr), "%d", &n)
-	return n
 }
 
 func localCall(t *testing.T, sock, op string, req, resp any) error {

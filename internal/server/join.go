@@ -206,7 +206,6 @@ func (s *Server) writeJoinToken(sess ssh.Session, token string) error {
 		"quic":        s.quicEndpoint(),
 		"fingerprint": s.fingerprint,
 		"domain":      s.svc.Domain,
-		"http_port":   s.httpPort,
 	}); err != nil {
 		return err
 	}

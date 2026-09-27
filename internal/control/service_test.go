@@ -23,7 +23,6 @@ func newSvc(t *testing.T) *Service {
 	return &Service{
 		Store: st, Domain: "box.example.com", Queue: approve.New(), Live: NewLive(),
 		SplicePublic: "ssh-ed25519 AAAASPLICE box-splice",
-		HTTPPort:     func() int { return 80 },
 	}
 }
 
@@ -105,12 +104,11 @@ func TestPortalHoldRenameRemove(t *testing.T) {
 	if res.URL != "http://web.box.example.com" || res.Host != "web.box.example.com" || res.Port != 3000 {
 		t.Fatalf("%+v", res)
 	}
-	svc.HTTPPort = func() int { return 8080 }
 	res, err = svc.AddPortal("home", "api", 4000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.URL != "http://api.box.example.com:8080" {
+	if res.URL != "http://api.box.example.com" {
 		t.Fatal(res.URL)
 	}
 	if err := svc.Store.CreateComputer("other", secret.Hash("tok2"), "bob"); err != nil {

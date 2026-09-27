@@ -17,7 +17,6 @@ type computer struct {
 	QUIC        string `json:"quic"`
 	Fingerprint string `json:"fingerprint"`
 	Domain      string `json:"domain"`
-	HTTPPort    int    `json:"http_port"`
 	User        string `json:"user"`
 	SSH         string `json:"ssh,omitempty"`
 }

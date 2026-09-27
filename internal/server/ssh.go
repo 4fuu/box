@@ -198,7 +198,6 @@ func (h *sshServer) serveBootstrap(sess ssh.Session) {
 		"quic":        h.s.quicEndpoint(),
 		"fingerprint": h.s.fingerprint,
 		"domain":      h.s.svc.Domain,
-		"http_port":   h.s.httpPort,
 	})
 	_ = sess.Exit(0)
 }

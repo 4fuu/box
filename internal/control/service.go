@@ -29,7 +29,6 @@ type Service struct {
 	// Grant finishes an approved join. The server parks the SSH session and
 	// sends the token there. Approve does not hold the queue lock across Grant.
 	Grant      func(approve.Pending) error
-	HTTPPort   func() int
 	PairingTTL time.Duration
 }
 
@@ -38,17 +37,6 @@ func (s *Service) ttl() time.Duration {
 		return PairingTTL
 	}
 	return s.PairingTTL
-}
-
-func (s *Service) httpPort() int {
-	if s.HTTPPort == nil {
-		return 80
-	}
-	p := s.HTTPPort()
-	if p <= 0 {
-		return 80
-	}
-	return p
 }
 
 type Pairing struct {
@@ -571,12 +559,10 @@ func (s *Service) ListPortals(computer string) (tunnel.PortalList, error) {
 	return out, nil
 }
 
+// portalURL prints no port: what reaches a portal is decided by the
+// operator's edge in front of this server, not by the port box bound.
 func (s *Service) portalURL(host string) string {
-	p := s.httpPort()
-	if p == 80 {
-		return "http://" + host
-	}
-	return fmt.Sprintf("http://%s:%d", host, p)
+	return "http://" + host
 }
 
 func (s *Service) needComputer(name string) (store.Computer, error) {

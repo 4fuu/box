@@ -31,8 +31,7 @@ type Identity struct {
 
 // HelloResult is the server's reply to a successful hello.
 type HelloResult struct {
-	Domain   string `json:"domain"`
-	HTTPPort int    `json:"http_port"`
+	Domain string `json:"domain"`
 }
 
 // HelloBody is the first control frame, sent by the computer.

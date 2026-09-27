@@ -45,7 +45,6 @@ func TestJoin(t *testing.T) {
 			"quic":        quic,
 			"fingerprint": fp,
 			"domain":      "box.example.com",
-			"http_port":   8080,
 		})
 		if err != nil {
 			return "", err
@@ -102,7 +101,7 @@ func TestJoin(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Name != "home" || got.Token != token || got.QUIC != quic || got.Fingerprint != fp ||
-		got.Domain != "box.example.com" || got.HTTPPort != 8080 || got.User != u.Username || got.SSH != addr {
+		got.Domain != "box.example.com" || got.User != u.Username || got.SSH != addr {
 		t.Fatalf("%+v", got)
 	}
 	fi, err := os.Stat(filepath.Join(dir, "computer.json"))
@@ -173,7 +172,7 @@ func TestRun(t *testing.T) {
 		if id.Token != token {
 			return tunnel.HelloResult{}, errors.New("rejected")
 		}
-		return tunnel.HelloResult{Domain: "box.example.com", HTTPPort: 8080}, nil
+		return tunnel.HelloResult{Domain: "box.example.com"}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +187,6 @@ func TestRun(t *testing.T) {
 			"quic":        srv.Addr(),
 			"fingerprint": fp,
 			"domain":      "box.example.com",
-			"http_port":   8080,
 		})
 		if err != nil {
 			return "", err
@@ -197,7 +195,7 @@ func TestRun(t *testing.T) {
 	})
 	if err := writeComputer(dir, computer{
 		Name: "home", Token: token, QUIC: "127.0.0.1:1", Fingerprint: "stale",
-		Domain: "old.example", HTTPPort: 1, User: "alice", SSH: sshAddr,
+		Domain: "old.example", User: "alice", SSH: sshAddr,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +357,7 @@ func TestRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.QUIC != srv.Addr() || saved.Fingerprint != fp || saved.HTTPPort != 8080 || saved.Token != token {
+	if saved.QUIC != srv.Addr() || saved.Fingerprint != fp || saved.Token != token {
 		t.Fatalf("%+v", saved)
 	}
 	if strings.Contains(string(mustRead(t, filepath.Join(dir, "computer.json"))), secretValue) {
@@ -446,7 +444,7 @@ func TestRunAuthRejected(t *testing.T) {
 	})
 	if err := writeComputer(dir, computer{
 		Name: "home", Token: "tok", QUIC: "127.0.0.1:9", Fingerprint: "aa",
-		Domain: "box.example.com", HTTPPort: 80, User: "alice", SSH: addr,
+		Domain: "box.example.com", User: "alice", SSH: addr,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +494,6 @@ func TestRunHelloRejected(t *testing.T) {
 			"quic":        srv.Addr(),
 			"fingerprint": fp,
 			"domain":      "box.example.com",
-			"http_port":   80,
 		})
 		if err != nil {
 			return "", err

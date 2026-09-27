@@ -144,7 +144,7 @@ A portal is a hostname routed to one TCP port on one computer. The computer clai
 
 The parent domain is set when the server starts. `box domain` prints it. `check` and `add` take a label, never a full hostname; the server joins the label to the domain. A label cannot contain a dot, so a computer cannot claim a name outside that domain. `add` claims atomically or refuses and names the holder. A computer can hold several labels; each points at one port. A portal hostname is globally unique and is not derived from the computer's name.
 
-The claim travels the control stream. The server is the only place that knows every claim. Once accepted, an HTTP request arriving at the server's HTTP port with that `Host` opens a `portal` stream to the computer, and the agent connects it to `127.0.0.1:<port>` — so the process only needs to listen on loopback. The route exists before anything listens; the operator sees a connection error until it does. When the printed URL's port is not 80, it is included in the URL.
+The claim travels the control stream. The server is the only place that knows every claim. Once accepted, an HTTP request arriving at the server's HTTP port with that `Host` opens a `portal` stream to the computer, and the agent connects it to `127.0.0.1:<port>` — so the process only needs to listen on loopback. The route exists before anything listens; the operator sees a connection error until it does. The printed URL carries no port; the edge in front of the server decides the reachable one.
 
 Removing a computer drops its portals. The claim record lives on the server; the route lives only while the tunnel lives.
 

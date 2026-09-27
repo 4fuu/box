@@ -220,9 +220,6 @@ func (a *agent) noteHello(res tunnel.HelloResult) error {
 		if res.Domain != "" {
 			c.Domain = res.Domain
 		}
-		if res.HTTPPort != 0 {
-			c.HTTPPort = res.HTTPPort
-		}
 	})
 }
 
@@ -298,13 +295,6 @@ func applyPresent(c *computer, probe map[string]json.RawMessage, join bool) erro
 			return err
 		}
 		c.Domain = s
-	}
-	if raw, ok := probe["http_port"]; ok {
-		var n int
-		if err := json.Unmarshal(raw, &n); err != nil {
-			return err
-		}
-		c.HTTPPort = n
 	}
 	if join && (c.QUIC == "" || c.Fingerprint == "") {
 		return errors.New("incomplete join reply")

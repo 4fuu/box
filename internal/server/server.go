@@ -142,7 +142,6 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		waiters:     map[string]*joinWaiter{},
 	}
 	svc.Grant = s.grant
-	svc.HTTPPort = func() int { return s.httpPort }
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	if err := s.listen(ctx, hostKey, cert); err != nil {
@@ -306,7 +305,7 @@ func (s *Server) onHello(id tunnel.Identity) (tunnel.HelloResult, error) {
 			return tunnel.HelloResult{}, errors.New("unauthorized")
 		}
 	}
-	return tunnel.HelloResult{Domain: s.svc.Domain, HTTPPort: s.httpPort}, nil
+	return tunnel.HelloResult{Domain: s.svc.Domain}, nil
 }
 
 func (s *Server) attach(c *tunnel.Conn) {

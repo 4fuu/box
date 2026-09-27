@@ -34,7 +34,7 @@ func newTestServer(t *testing.T, token string) (*Server, string) {
 		if id.Token != token {
 			return HelloResult{}, errors.New("rejected token")
 		}
-		return HelloResult{Domain: "box.example.com", HTTPPort: 80}, nil
+		return HelloResult{Domain: "box.example.com"}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func helloOK(t *testing.T, s *Session, id Identity) HelloResult {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Domain != "box.example.com" || res.HTTPPort != 80 {
+	if res.Domain != "box.example.com" {
 		t.Fatalf("hello result %+v", res)
 	}
 	return res
@@ -436,7 +436,7 @@ func TestCloseDuringHello(t *testing.T) {
 	srv, err := Listen("127.0.0.1:0", cert, func(Identity) (HelloResult, error) {
 		close(started)
 		<-release
-		return HelloResult{Domain: "box.example.com", HTTPPort: 80}, nil
+		return HelloResult{Domain: "box.example.com"}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -625,11 +625,11 @@ func TestBodyShape(t *testing.T) {
 	if string(raw) != want {
 		t.Fatalf("hello body %s", raw)
 	}
-	raw, err = json.Marshal(HelloResult{Domain: "box.example.com", HTTPPort: 80})
+	raw, err = json.Marshal(HelloResult{Domain: "box.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(raw) != `{"domain":"box.example.com","http_port":80}` {
+	if string(raw) != `{"domain":"box.example.com"}` {
 		t.Fatalf("hello result %s", raw)
 	}
 	raw, err = json.Marshal(StatResponse{CPU: 1, Memory: 2, Disk: 3, Uptime: 4})

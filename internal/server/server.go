@@ -581,7 +581,20 @@ func (s *Server) local(op string, body json.RawMessage) (any, error) {
 		return s.svc.Status()
 	case "snapshot":
 		// Tokens are included so the TUI can copy them. Do not log this value.
-		return s.svc.Snapshot()
+		snap, err := s.svc.Snapshot()
+		if err != nil {
+			return nil, err
+		}
+		snap.Theme = s.svc.ThemeFor("localhost")
+		return snap, nil
+	case "theme_set":
+		var req struct {
+			Theme string `json:"theme"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		return nil, s.svc.SetThemeFor("localhost", req.Theme)
 	case "token_add":
 		var req struct {
 			Comment string `json:"comment"`

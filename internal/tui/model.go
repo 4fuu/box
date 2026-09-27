@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -39,12 +40,16 @@ const (
 	modeTokenAdd
 	modeTokenRm
 	modePair
+	modeHelp
 )
 
 type styles struct {
-	title, header, selected, tab lipgloss.Style
+	title, header, selected      lipgloss.Style
+	tabOn, tabOff                lipgloss.Style
 	on, off, warn, bad, dim      lipgloss.Style
 	secret                       lipgloss.Style
+	ptitle, border, cursor       lipgloss.Style
+	bar, barDim, barBad, barGood lipgloss.Style
 }
 
 type model struct {
@@ -56,6 +61,13 @@ type model struct {
 	status     string
 	width      int
 	height     int
+	// theme is "dark" or "light". styleOut and styleTerm rebuild styles
+	// when the theme flips. themeBusy is set while a toggle is being
+	// stored, so a snapshot cannot flip the styles back mid-flight.
+	theme     string
+	themeBusy bool
+	styleOut  io.Writer
+	styleTerm string
 
 	snap    control.Snapshot
 	screen  screen
@@ -90,6 +102,8 @@ type pairMsg struct {
 
 type tickMsg time.Time
 
+type themeMsg struct{ err error }
+
 func (m *model) Init() tea.Cmd {
 	return tea.Batch(m.load(), tick())
 }
@@ -112,6 +126,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.snap = msg.snap
+		if !m.themeBusy && msg.snap.Theme != "" && msg.snap.Theme != m.theme {
+			m.setTheme(msg.snap.Theme)
+		}
 		m.clamp()
 		return m, nil
 	case doneMsg:
@@ -140,8 +157,33 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tick()
 		}
 		return m, tea.Batch(m.load(), tick())
+	case themeMsg:
+		m.themeBusy = false
+		if msg.err != nil {
+			m.status = msg.err.Error()
+		}
+		return m, nil
 	}
 	return m, nil
+}
+
+// setTheme swaps the palette. It does not store the choice; storeTheme does.
+func (m *model) setTheme(theme string) {
+	if theme != control.ThemeLight {
+		theme = control.ThemeDark
+	}
+	m.theme = theme
+	m.styles = newStyles(m.styleOut, m.styleTerm, theme)
+}
+
+func (m *model) storeTheme(theme string) tea.Cmd {
+	b, ctx := m.b, m.ctx
+	return func() tea.Msg {
+		if b == nil {
+			return themeMsg{}
+		}
+		return themeMsg{err: b.SetTheme(ctx, theme)}
+	}
 }
 
 func (m *model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -157,6 +199,9 @@ func (m *model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modePair:
 		m.secret = ""
 		m.exp = time.Time{}
+		m.mode = modeNormal
+		return m, nil
+	case modeHelp:
 		m.mode = modeNormal
 		return m, nil
 	case modeApprove, modeRemove, modeRename, modeEnvName, modeEnvValue, modeTokenAdd:
@@ -190,6 +235,9 @@ func (m *model) onNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = screen(n)
 		m.cursor = 0
 		return m, nil
+	case "?":
+		m.mode = modeHelp
+		return m, nil
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -204,6 +252,15 @@ func (m *model) onNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.busy = true
 		m.status = "pairing…"
 		return m, m.pair()
+	case "t":
+		next := control.ThemeLight
+		if m.theme == control.ThemeLight {
+			next = control.ThemeDark
+		}
+		m.setTheme(next)
+		m.themeBusy = true
+		m.status = "theme " + next
+		return m, m.storeTheme(next)
 	case "enter":
 		if m.screen == screenComputers && m.allowShell {
 			name := m.computerName()

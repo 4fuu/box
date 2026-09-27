@@ -23,6 +23,9 @@ type Backend interface {
 	DeleteEnv(ctx context.Context, name string) error
 	AddToken(ctx context.Context, comment string) (control.TokenView, error)
 	RemoveToken(ctx context.Context, id int64) error
+	// SetTheme stores the color scheme for this session's identity:
+	// a bound key's fingerprint over SSH, "localhost" on the server socket.
+	SetTheme(ctx context.Context, theme string) error
 }
 
 // Size is a terminal window.
@@ -48,4 +51,7 @@ type Config struct {
 	Width      int
 	Height     int
 	Resize     <-chan Size
+	// Theme is the stored color scheme ("dark" or "light"), if the caller
+	// already knows it. The first snapshot refreshes it either way.
+	Theme string
 }

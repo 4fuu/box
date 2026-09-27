@@ -203,6 +203,35 @@ func TestTokenStaysVisible(t *testing.T) {
 	}
 }
 
+func TestThemeToggleStoresPerKey(t *testing.T) {
+	f := &fakeBackend{}
+	m := &model{b: f, theme: "dark"}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	m = updated.(*model)
+	if m.theme != "light" {
+		t.Fatalf("theme %q, want light", m.theme)
+	}
+	if cmd == nil {
+		t.Fatal("toggle did not store")
+	}
+	_ = cmd()
+	if f.theme != "light" {
+		t.Fatalf("stored theme %q", f.theme)
+	}
+	// A snapshot carrying the stored theme is applied, not fought.
+	next, _ := m.Update(snapMsg{snap: control.Snapshot{Theme: "light"}})
+	m = next.(*model)
+	if m.theme != "light" {
+		t.Fatalf("snapshot theme ignored: %q", m.theme)
+	}
+	m.themeBusy = false
+	next, _ = m.Update(snapMsg{snap: control.Snapshot{Theme: "dark"}})
+	m = next.(*model)
+	if m.theme != "dark" {
+		t.Fatalf("stored theme not applied: %q", m.theme)
+	}
+}
+
 func TestPairSecretShownOnce(t *testing.T) {
 	const secret = "one-time-secret"
 	m := &model{
@@ -224,10 +253,15 @@ type fakeBackend struct {
 	removed    string
 	removedKey string
 	removedEnv string
+	theme      string
 }
 
 func (f *fakeBackend) Snapshot(context.Context) (control.Snapshot, error) {
 	return control.Snapshot{}, nil
+}
+func (f *fakeBackend) SetTheme(_ context.Context, theme string) error {
+	f.theme = theme
+	return nil
 }
 func (f *fakeBackend) Approve(context.Context, string) (string, error) { return "", nil }
 func (f *fakeBackend) Remove(_ context.Context, name string) error {

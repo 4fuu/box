@@ -94,13 +94,17 @@ func TestUnknownHost421(t *testing.T) {
 	}
 }
 
-func TestJoinRejectsBadPasswordAndReservedName(t *testing.T) {
+func TestJoinRejectsBadCredentialAndReservedName(t *testing.T) {
 	dir := t.TempDir()
 	srv, greet := start(t, dir, "box.example.com", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
-	if _, _, err := sshPasswordRun(t, srv.SSHAddr(), "join+home", "not-a-hash", "x"); err == nil {
-		t.Fatal("non-hex join password was accepted")
+	out, _, err := sshCredentialRun(t, srv.SSHAddr(), "join+home", "not-a-hash", "x")
+	if err != nil {
+		t.Fatal(err)
 	}
-	out, _, err := sshPasswordRun(t, srv.SSHAddr(), "join+box", secret.Hash("abcdef"), "x")
+	if !strings.Contains(out, `"error":"rejected"`) {
+		t.Fatalf("non-hex join hash was accepted: %s", out)
+	}
+	out, _, err = sshCredentialRun(t, srv.SSHAddr(), "join+box", secret.Hash("abcdef"), "x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,8 +153,25 @@ func TestComputersTunnel(t *testing.T) {
 	if _, errOut, err := sshRun(t, srv.SSHAddr(), "pair+"+pass, signer, "whoami"); err != nil {
 		t.Fatalf("pair: %v %s", err, errOut)
 	}
-	if _, _, err := sshPasswordRun(t, srv.SSHAddr(), "home", "not-a-token", "x"); err == nil {
-		t.Fatal("unknown computer accepted a password")
+	stranger, _, err := keys.GenerateSigner("stranger")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A bound key with any username that is not a registered computer
+	// opens the console.
+	if _, errOut, err := sshRun(t, srv.SSHAddr(), "4fu", signer, "whoami"); err != nil {
+		t.Fatalf("bound key, unconfigured username: %v %s", err, errOut)
+	}
+	// Outside the pairing flows an unbound key is rejected at auth, with
+	// no password prompt offered.
+	if _, _, err := sshRun(t, srv.SSHAddr(), "home", stranger, "x"); err == nil {
+		t.Fatal("unknown computer accepted an unbound key")
+	}
+	if _, _, err := sshRun(t, srv.SSHAddr(), "4fu", stranger, "x"); err == nil {
+		t.Fatal("unbound key reached the console")
+	}
+	if _, _, err := sshRun(t, srv.SSHAddr(), "box", stranger, "x"); err == nil {
+		t.Fatal("unbound key opened the repl")
 	}
 
 	code, err := secret.ApprovalCode()
@@ -163,7 +184,7 @@ func TestComputersTunnel(t *testing.T) {
 	}
 	joinCh := make(chan joined, 1)
 	go func() {
-		out, _, err := sshPasswordRun(t, srv.SSHAddr(), "join+home", secret.Hash(code), "x")
+		out, _, err := sshCredentialRun(t, srv.SSHAddr(), "join+home", secret.Hash(code), "x")
 		joinCh <- joined{out, err}
 	}()
 	waitPending(t, srv.SSHAddr(), signer, "home")
@@ -202,15 +223,19 @@ func TestComputersTunnel(t *testing.T) {
 	walkNoSecret(t, dir, reply.Token)
 	walkNoSecret(t, dir, code)
 
-	bootOut, _, err := sshPasswordRun(t, srv.SSHAddr(), "home", reply.Token, "boot")
+	bootOut, _, err := sshCredentialRun(t, srv.SSHAddr(), "boot+home", reply.Token, "boot")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(bootOut, reply.Token) || !strings.Contains(bootOut, `"quic"`) || strings.Contains(bootOut, `"token"`) {
 		t.Fatalf("bootstrap %s", bootOut)
 	}
-	if _, _, err := sshPasswordRun(t, srv.SSHAddr(), "home", "not-the-token", "boot"); err == nil {
-		t.Fatal("bad token opened a session")
+	out, _, err := sshCredentialRun(t, srv.SSHAddr(), "boot+home", "not-the-token", "boot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `"error":"rejected"`) {
+		t.Fatalf("bad token bootstrapped: %s", out)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -359,8 +384,12 @@ func TestComputersTunnel(t *testing.T) {
 	if _, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "rm home home"); err != nil {
 		t.Fatalf("rm: %v %s", err, errOut)
 	}
-	if _, _, err := sshPasswordRun(t, srv.SSHAddr(), "home", reply.Token, "boot"); err == nil {
-		t.Fatal("revoked token still authenticated")
+	out, _, err = sshCredentialRun(t, srv.SSHAddr(), "boot+home", reply.Token, "boot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `"error":"rejected"`) {
+		t.Fatalf("revoked token still bootstrapped: %s", out)
 	}
 	if err := localCall(t, filepath.Join(dir, "box.sock"), "bind", map[string]string{"key": "x"}, nil); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("socket bind: %v", err)
@@ -382,9 +411,13 @@ func TestCancelledJoinLeavesNoComputer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	machine, _, err := keys.GenerateSigner("machine")
+	if err != nil {
+		t.Fatal(err)
+	}
 	client, err := ssh.Dial("tcp", srv.SSHAddr(), &ssh.ClientConfig{
 		User:            "join+parked",
-		Auth:            []ssh.AuthMethod{ssh.Password(secret.Hash(code))},
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(machine)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         5 * time.Second,
 	})
@@ -395,6 +428,7 @@ func TestCancelledJoinLeavesNoComputer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sess.Stdin = strings.NewReader(secret.Hash(code) + "\n")
 	done := make(chan error, 1)
 	go func() { done <- sess.Run("x") }()
 	waitPending(t, srv.SSHAddr(), signer, "parked")
@@ -599,12 +633,17 @@ func acceptAgent(ctx context.Context, sess *tunnel.Session, host ssh.Signer, aut
 }
 
 // tokenMustNotSplice fails if a computer token can open SFTP or forwarding.
-// Those channels are a bound-key splice; the token is only the bootstrap.
+// The token only buys the bootstrap reply; those channels are a bound-key
+// splice.
 func tokenMustNotSplice(t *testing.T, addr, token string) error {
 	t.Helper()
+	signer, _, err := keys.GenerateSigner("machine")
+	if err != nil {
+		return err
+	}
 	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
-		User:            "home",
-		Auth:            []ssh.AuthMethod{ssh.Password(token)},
+		User:            "boot+home",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         5 * time.Second,
 	})
@@ -616,10 +655,24 @@ func tokenMustNotSplice(t *testing.T, addr, token string) error {
 	if err != nil {
 		return err
 	}
+	var out bytes.Buffer
+	sess.Stdout = &out
+	sess.Stdin = strings.NewReader(token + "\n")
+	if err := sess.Run("boot"); err != nil {
+		return err
+	}
+	if !strings.Contains(out.String(), `"quic"`) {
+		return fmt.Errorf("bootstrap reply %q", out.String())
+	}
 	// wish accepts the subsystem request before the handler runs. Wait for
 	// that handler to finish, then the caller checks that no ssh stream opened.
-	if err := sess.RequestSubsystem("sftp"); err == nil {
-		_ = sess.Wait()
+	sess2, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer sess2.Close()
+	if err := sess2.RequestSubsystem("sftp"); err == nil {
+		_ = sess2.Wait()
 	}
 	if _, err := client.Dial("tcp", "127.0.0.1:9"); err == nil {
 		return errors.New("token opened direct-tcpip")
@@ -811,11 +864,18 @@ func sshRun(t *testing.T, addr, user string, signer ssh.Signer, cmd string) (str
 	return stdout.String(), stderr.String(), err
 }
 
-func sshPasswordRun(t *testing.T, addr, user, password, cmd string) (string, string, error) {
+// sshCredentialRun authenticates with a fresh machine key — machine keys are
+// never bound on the server — and sends the credential as the first line of
+// the session, the way the agent does.
+func sshCredentialRun(t *testing.T, addr, user, credential, cmd string) (string, string, error) {
 	t.Helper()
+	signer, _, err := keys.GenerateSigner("machine")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &ssh.ClientConfig{
 		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.Password(password)},
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         5 * time.Second,
 	}
@@ -832,6 +892,7 @@ func sshPasswordRun(t *testing.T, addr, user, password, cmd string) (string, str
 	var stdout, stderr bytes.Buffer
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
+	sess.Stdin = strings.NewReader(credential + "\n")
 	err = sess.Run(cmd)
 	return stdout.String(), stderr.String(), err
 }

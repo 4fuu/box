@@ -2,8 +2,11 @@ package server
 
 import "strings"
 
-// SSH routing is decided from the username and the auth method together.
-// Password auth never opens the REPL: a password alone must not bind a key.
+// SSH auth is public-key only. The server never offers password auth, so a
+// client the server does not know fails with "Permission denied (publickey)"
+// and OpenSSH never falls back to a password prompt. Credentials that
+// machines present — the join approval-code hash and the computer token —
+// travel as the first line of the SSH session instead.
 
 type userClass int
 
@@ -11,6 +14,7 @@ const (
 	classREPL userClass = iota
 	classPair
 	classJoin
+	classBoot
 	classOther
 )
 
@@ -34,10 +38,16 @@ func classifyUser(user string) (userClass, string) {
 	if rest, ok := strings.CutPrefix(user, "join+"); ok {
 		return classJoin, rest
 	}
+	if rest, ok := strings.CutPrefix(user, "boot+"); ok {
+		return classBoot, rest
+	}
 	return classOther, user
 }
 
-// publicKeyDecision is the public-key half of the route table.
+// publicKeyDecision is the whole route table: auth accepts a key or the
+// connection dies there. Outside the pairing flows, an unbound key is
+// always rejected. A bound key reaches every computer, and with any
+// username that is not a registered computer it opens the console.
 // classPair may sign. The one-time password is consumed only after that
 // signature has authenticated and the session exists.
 func publicKeyDecision(class userClass, bound, livePair, computer bool) (bool, string) {
@@ -45,7 +55,15 @@ func publicKeyDecision(class userClass, bound, livePair, computer bool) (bool, s
 	case classPair:
 		return true, routePair
 	case classJoin:
-		return false, ""
+		if bound {
+			return false, ""
+		}
+		return true, routeJoin
+	case classBoot:
+		if bound {
+			return false, ""
+		}
+		return true, routeBoot
 	case classREPL:
 		if bound {
 			return true, routeREPL
@@ -55,32 +73,21 @@ func publicKeyDecision(class userClass, bound, livePair, computer bool) (bool, s
 		}
 		return false, ""
 	default:
-		if bound && computer {
-			return true, routeSplice
+		if computer {
+			if bound {
+				return true, routeSplice
+			}
+			return false, ""
+		}
+		if bound {
+			return true, routeREPL
 		}
 		return false, ""
 	}
 }
 
-// passwordDecision is the password half of the route table.
-// hexOK is a 64-character lowercase hash. tokenOK is the computer's token.
-func passwordDecision(class userClass, hexOK, tokenOK bool) (bool, string) {
-	switch class {
-	case classJoin:
-		if hexOK {
-			return true, routeJoin
-		}
-		return false, ""
-	case classOther:
-		if tokenOK {
-			return true, routeBoot
-		}
-		return false, ""
-	default:
-		return false, ""
-	}
-}
-
+// isHex64 is a 64-character lowercase hex string: a sha256 of an
+// approval code.
 func isHex64(s string) bool {
 	if len(s) != 64 {
 		return false

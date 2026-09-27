@@ -106,7 +106,7 @@ func (h *sshServer) serveJoin(sess ssh.Session) {
 		writeJoinError(sess, "rejected")
 		return
 	}
-	hash, _ := sess.Context().Value(hashKey).(string)
+	hash := readSessionLine(sess, 30*time.Second)
 	if !isHex64(hash) {
 		writeJoinError(sess, "rejected")
 		return

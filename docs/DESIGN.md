@@ -45,7 +45,7 @@ The HTTP port serves portals, plus two hosts the server answers itself. `event.<
 
 There is no account. Trust is a public key accepted by the server.
 
-When the server is initialized it prints a one-time password and its expiry. The first SSH connection that presents the password is bound: the server stores that client's public key and then refuses the password. Expiry also refuses it. The password is never written to the client.
+When the server is initialized it prints a one-time password and its expiry. While that password is live, the first client to connect with any key gets a password prompt inside the session; the client that types the password is bound: the server stores that client's public key and then refuses the password. Expiry also refuses it. The password is never written to the client.
 
 To bind another client, either:
 
@@ -68,7 +68,7 @@ waiting…
 approved. tunnel up as home.box.example.com
 ```
 
-1. The computer generates a 6-character code (mixed-case letters and digits) and prints it. It opens an SSH connection to the server — just the domain, default port 22, or `domain:port` — with the username `join+<name>`. No key and no password is required to park this session. The computer sends a hash of the code, not the code, and waits.
+1. The computer generates a 6-character code (mixed-case letters and digits) and prints it. It opens an SSH connection to the server — just the domain, default port 22, or `domain:port` — authenticating as `join+<name>` with a freshly generated key pair. Machine keys are never bound on the server; the key only opens the session. The computer then sends a hash of the code, not the code, as the first line of the session, and waits.
 2. The server adds a pending join: name, remote address, code hash, expiry 10 minutes. It appears in the server TUI and in the REPL `pending` list.
 3. A person approves it: enter the code in the TUI, or run `approve <code>` from a bound client. Five wrong attempts discard the pending join. Attempts are rate-limited per remote address.
 4. On approval the server generates a computer token and replies over the waiting SSH session: the token, the QUIC endpoint, and the server's QUIC certificate fingerprint. The computer stores them in `~/.box/computer.json`, mode 0600.
@@ -100,16 +100,19 @@ Reconnect always repeats the full bootstrap: SSH handshake first, which returns 
 
 ## SSH entry
 
-The server speaks SSH with [charmbracelet/wish](https://github.com/charmbracelet/wish). SSH has no `Host` header, so the username and the auth method together are the route.
+The server speaks SSH with [charmbracelet/wish](https://github.com/charmbracelet/wish). SSH has no `Host` header, so the username and the key are the route. Auth is public-key only: the server never offers password auth, so an unknown key fails with `Permission denied (publickey)` and no password prompt ever appears. The one-time pairing password is typed at a prompt inside an already-keyed session, and the credentials machines present — the join hash and the computer token — ride the first line of the session.
 
 | Username | Auth | Result |
 | --- | --- | --- |
 | empty, or `box` | bound key | control REPL |
-| empty, or `box` | unknown key + live password prompt | bind this key |
+| empty, or `box` | unknown key, only while a live pairing password exists | bind this key at an in-session prompt |
 | `pair+<password>` | any key | bind this key, non-interactively |
-| `join+<name>` | none | park a pending computer join |
-| a computer's name | that computer's token | tunnel bootstrap for the agent |
+| `join+<name>` | any unbound key; approval-code hash as the first session line | park a pending computer join |
+| `boot+<name>` | any unbound key; computer token as the first session line | tunnel bootstrap for the agent |
 | a computer's name | bound client key | splice to that computer's sshd |
+| any other name | bound client key | control REPL |
+
+Outside the pairing flows (`pair+`, `join+`, `boot+`, and the live-pairing prompt), an unbound key is rejected at auth. A bound key reaches every computer and opens the console under any username that is not a registered computer.
 
 A computer name cannot be `box`, `pair`, or `join`, and cannot contain `+` or `.`. Names are globally unique, so the username alone is enough.
 

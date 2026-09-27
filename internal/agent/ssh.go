@@ -7,22 +7,29 @@ import (
 	"errors"
 	"io"
 	"net"
-	"strings"
 	"time"
 
+	"github.com/4fuu/box/internal/keys"
 	"golang.org/x/crypto/ssh"
 )
 
-func sshExchange(ctx context.Context, addr, user, password string) ([]byte, error) {
-	client, err := dialSSH(ctx, addr, user, password)
+// sshExchange opens a machine session as user with a fresh key pair —
+// machine keys are never bound on the server — sends the one credential
+// line, and returns the server's first reply line.
+func sshExchange(ctx context.Context, addr, user, credential string) ([]byte, error) {
+	client, err := dialSSH(ctx, addr, user)
 	if err != nil {
 		return nil, err
 	}
 	defer client.Close()
-	return readSSHLine(ctx, client)
+	return readSSHLine(ctx, client, credential)
 }
 
-func dialSSH(ctx context.Context, addr, user, password string) (*ssh.Client, error) {
+func dialSSH(ctx context.Context, addr, user string) (*ssh.Client, error) {
+	signer, _, err := keys.GenerateSigner("box-machine")
+	if err != nil {
+		return nil, err
+	}
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -34,7 +41,7 @@ func dialSSH(ctx context.Context, addr, user, password string) (*ssh.Client, err
 	stop := context.AfterFunc(hctx, func() { _ = conn.Close() })
 	cfg := &ssh.ClientConfig{
 		User: user,
-		Auth: []ssh.AuthMethod{ssh.Password(password)},
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		// The operator typed this host. The QUIC pin arrives on this
 		// session, so there is no host key to check yet.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
@@ -55,12 +62,19 @@ func dialSSH(ctx context.Context, addr, user, password string) (*ssh.Client, err
 	return ssh.NewClient(c, chans, reqs), nil
 }
 
-func readSSHLine(ctx context.Context, client *ssh.Client) ([]byte, error) {
+// readSSHLine sends the credential line and reads the server's first reply.
+// The write runs in its own goroutine: the server may exit the session
+// before reading, and a failed write must not mask the reply.
+func readSSHLine(ctx context.Context, client *ssh.Client, credential string) ([]byte, error) {
 	sess, err := client.NewSession()
 	if err != nil {
 		return nil, err
 	}
 	defer sess.Close()
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
 	stdout, err := sess.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -69,6 +83,10 @@ func readSSHLine(ctx context.Context, client *ssh.Client) ([]byte, error) {
 	if err := sess.Shell(); err != nil {
 		return nil, err
 	}
+	go func() {
+		_, _ = io.WriteString(stdin, credential+"\n")
+		_ = stdin.Close()
+	}()
 	type result struct {
 		line []byte
 		err  error
@@ -94,8 +112,4 @@ func readSSHLine(ctx context.Context, client *ssh.Client) ([]byte, error) {
 		}
 		return line, nil
 	}
-}
-
-func authFailed(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "unable to authenticate")
 }

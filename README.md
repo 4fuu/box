@@ -33,7 +33,8 @@ deployment, not a hosted service.
 - **The client is stock OpenSSH.** There is no account and no client to
   install. The first SSH connection that presents the one-time password from
   server init is bound. Later clients get a password from a bound client, or
-  from `box pair` on the server.
+  from `box pair` on the server. At any other time an unknown key is refused
+  with no password prompt.
 - **One binary.** `box serve` is the server. `box join`, then `box agent`, is
   the computer. On the computer, `box domain`, `box portal`, and `box event`
   talk to the agent. There is no Podman, no frp, and no node.

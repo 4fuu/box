@@ -50,8 +50,8 @@ type agent struct {
 	ln   net.Listener
 }
 
-// Join prints a one-time approval code, sends its hash over SSH as the
-// password for join+<name>, and stores the server's reply in stateDir.
+// Join prints a one-time approval code, sends its hash as the first line
+// of a join+<name> SSH session, and stores the server's reply in stateDir.
 func Join(ctx context.Context, serverAddr, name, userName, stateDir string, out io.Writer) error {
 	if out == nil {
 		out = io.Discard
@@ -201,13 +201,10 @@ func (a *agent) bootstrap(ctx context.Context) error {
 	}
 	bctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	line, err := sshExchange(bctx, addr, comp.Name, comp.Token)
+	line, err := sshExchange(bctx, addr, "boot+"+comp.Name, comp.Token)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
-		}
-		if authFailed(err) {
-			return fmt.Errorf("authentication failed: %w", ErrRejected)
 		}
 		return err
 	}

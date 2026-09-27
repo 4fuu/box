@@ -26,7 +26,6 @@ type ctxKey struct{ name string }
 
 var (
 	routeKey   = &ctxKey{"route"}
-	hashKey    = &ctxKey{"join-hash"}
 	backendKey = &ctxKey{"backend"}
 )
 
@@ -43,7 +42,6 @@ func newSSH(s *Server, hostKey string) (*sshServer, error) {
 		wish.WithAddress(s.cfg.SSHAddr),
 		wish.WithHostKeyPath(hostKey),
 		wish.WithPublicKeyAuth(h.publicKey),
-		wish.WithPasswordAuth(h.password),
 	)
 	if err != nil {
 		return nil, err
@@ -75,27 +73,15 @@ func (h *sshServer) close() {
 func (h *sshServer) publicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 	user := ctx.User()
 	class, _ := classifyUser(user)
-	// pair+ is decided here only so the client can sign. golang.org/x/crypto/ssh
-	// calls this for the unsigned publickey query, before the signature exists.
-	if class == classPair {
-		if key == nil {
-			return false
-		}
-		accept, route := publicKeyDecision(class, false, false, false)
-		if !accept {
-			return false
-		}
-		ctx.SetValue(routeKey, route)
-		return true
+	if key == nil {
+		return false
 	}
 	bound := false
-	if key != nil {
-		ok, err := h.s.svc.HasKey(key)
-		if err != nil {
-			return false
-		}
-		bound = ok
+	ok, err := h.s.svc.HasKey(key)
+	if err != nil {
+		return false
 	}
+	bound = ok
 	live := false
 	if class == classREPL && !bound {
 		ok, err := h.s.store.HasLivePairing()
@@ -110,28 +96,6 @@ func (h *sshServer) publicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 		return false
 	}
 	ctx.SetValue(routeKey, route)
-	return true
-}
-
-func (h *sshServer) password(ctx ssh.Context, password string) bool {
-	user := ctx.User()
-	class, _ := classifyUser(user)
-	tokenOK := false
-	if class == classOther {
-		ok, err := h.s.store.TokenMatches(user, password)
-		if err != nil || !ok {
-			return false
-		}
-		tokenOK = true
-	}
-	accept, route := passwordDecision(class, isHex64(password), tokenOK)
-	if !accept {
-		return false
-	}
-	ctx.SetValue(routeKey, route)
-	if route == routeJoin {
-		ctx.SetValue(hashKey, password)
-	}
 	return true
 }
 
@@ -190,9 +154,39 @@ func (h *sshServer) finishPair(sess ssh.Session) bool {
 	return true
 }
 
+// readSessionLine reads the single credential line a machine sends at the
+// start of a join or boot session. An empty string means no line arrived
+// within wait, or the line was unusable; the caller rejects the session.
+func readSessionLine(sess ssh.Session, wait time.Duration) string {
+	type result struct{ line string }
+	ch := make(chan result, 1)
+	go func() {
+		br := bufio.NewReader(io.LimitReader(sess, 1<<20))
+		line, _ := br.ReadString('\n')
+		ch <- result{strings.TrimSpace(line)}
+	}()
+	select {
+	case r := <-ch:
+		return r.line
+	case <-time.After(wait):
+		return ""
+	}
+}
+
+// serveBootstrap answers a computer's reconnect. The agent authenticated
+// with a fresh key as boot+<name>; the computer token follows as the first
+// line of the session. A missing computer or a wrong token is a revocation:
+// the reply tells the agent to wipe its state.
 func (h *sshServer) serveBootstrap(sess ssh.Session) {
-	if _, err := h.s.store.Computer(sess.User()); err != nil {
-		_ = sess.Exit(1)
+	_, name := classifyUser(sess.User())
+	token := readSessionLine(sess, 30*time.Second)
+	ok := false
+	if name != "" && token != "" {
+		match, err := h.s.store.TokenMatches(name, token)
+		ok = err == nil && match
+	}
+	if !ok {
+		writeJoinError(sess, "rejected")
 		return
 	}
 	_ = json.NewEncoder(sess).Encode(map[string]any{

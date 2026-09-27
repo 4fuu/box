@@ -12,9 +12,11 @@ func TestClassifyUser(t *testing.T) {
 		{"box", classREPL, ""},
 		{"pair+abcd-efgh-ijkl-mnop-qrst", classPair, "abcd-efgh-ijkl-mnop-qrst"},
 		{"join+home", classJoin, "home"},
+		{"boot+home", classBoot, "home"},
 		{"home", classOther, "home"},
 		{"pair", classOther, "pair"},
 		{"join", classOther, "join"},
+		{"boot", classOther, "boot"},
 		{"pairing", classOther, "pairing"},
 		{"joinhome", classOther, "joinhome"},
 	}
@@ -40,11 +42,15 @@ func TestPublicKeyRoutes(t *testing.T) {
 		{"repl live password", classREPL, false, true, false, true, routeBind},
 		{"repl unknown", classREPL, false, false, false, false, ""},
 		{"pair any key", classPair, false, false, false, true, routePair},
-		{"join key rejected", classJoin, true, true, false, false, ""},
+		{"join fresh key", classJoin, false, false, false, true, routeJoin},
+		{"join bound key rejected", classJoin, true, false, false, false, ""},
+		{"boot fresh key", classBoot, false, false, false, true, routeBoot},
+		{"boot bound key rejected", classBoot, true, false, false, false, ""},
 		{"computer bound splices", classOther, true, false, true, true, routeSplice},
 		{"computer unbound rejected", classOther, false, true, true, false, ""},
-		{"unknown name bound rejected", classOther, true, true, false, false, ""},
-		{"pair name is not repl", classOther, true, true, false, false, ""},
+		{"other name bound opens repl", classOther, true, true, false, true, routeREPL},
+		{"other name unbound rejected", classOther, false, true, false, false, ""},
+		{"pair name is not repl", classOther, true, true, false, true, routeREPL},
 	}
 	for _, r := range rows {
 		ok, route := publicKeyDecision(r.class, r.bound, r.live, r.box)
@@ -54,7 +60,7 @@ func TestPublicKeyRoutes(t *testing.T) {
 	}
 }
 
-func TestPasswordRoutes(t *testing.T) {
+func TestIsHex64(t *testing.T) {
 	hash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	if !isHex64(hash) {
 		t.Fatal("hash")
@@ -62,26 +68,6 @@ func TestPasswordRoutes(t *testing.T) {
 	for _, bad := range []string{"", "abc", hash[:63], hash + "a", "ABCDEF" + hash[6:], hash[:62] + "GG"} {
 		if isHex64(bad) {
 			t.Fatalf("accepted %q", bad)
-		}
-	}
-	rows := []struct {
-		name       string
-		class      userClass
-		hex, token bool
-		accept     bool
-		route      string
-	}{
-		{"join hash", classJoin, true, false, true, routeJoin},
-		{"join not hash", classJoin, false, true, false, ""},
-		{"bootstrap token", classOther, false, true, true, routeBoot},
-		{"bootstrap bad token", classOther, true, false, false, ""},
-		{"repl password rejected", classREPL, true, true, false, ""},
-		{"pair password rejected", classPair, true, true, false, ""},
-	}
-	for _, r := range rows {
-		ok, route := passwordDecision(r.class, r.hex, r.token)
-		if ok != r.accept || route != r.route {
-			t.Fatalf("%s: got %v %q, want %v %q", r.name, ok, route, r.accept, r.route)
 		}
 	}
 }

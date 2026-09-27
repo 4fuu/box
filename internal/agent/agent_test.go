@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -82,7 +83,7 @@ func TestJoin(t *testing.T) {
 		t.Fatalf("user %q", userName)
 	}
 	if pass != secret.Hash(code) || pass == code {
-		t.Fatal("ssh password was not the code hash")
+		t.Fatal("session credential was not the code hash")
 	}
 
 	raw, err := os.ReadFile(filepath.Join(dir, "computer.json"))
@@ -179,8 +180,8 @@ func TestRun(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Close() })
 
-	sshAddr := startSSH(t, func(user, pass string) (string, error) {
-		if user != "home" || pass != token {
+	sshAddr := startSSH(t, func(user, credential string) (string, error) {
+		if user != "boot+home" || credential != token {
 			return "", errors.New("denied")
 		}
 		raw, err := json.Marshal(map[string]any{
@@ -436,11 +437,11 @@ func TestRun(t *testing.T) {
 	}
 }
 
-func TestRunAuthRejected(t *testing.T) {
+func TestRunTokenRejected(t *testing.T) {
 	dir := t.TempDir()
 	setHome(t, dir)
-	addr := startSSH(t, func(user, password string) (string, error) {
-		return "", errors.New("denied")
+	addr := startSSH(t, func(user, credential string) (string, error) {
+		return `{"error":"rejected"}`, nil
 	})
 	if err := writeComputer(dir, computer{
 		Name: "home", Token: "tok", QUIC: "127.0.0.1:9", Fingerprint: "aa",
@@ -486,8 +487,8 @@ func TestRunHelloRejected(t *testing.T) {
 			_ = c.Close()
 		}
 	}()
-	addr := startSSH(t, func(user, pass string) (string, error) {
-		if user != "home" || pass != "tok" {
+	addr := startSSH(t, func(user, credential string) (string, error) {
+		if user != "boot+home" || credential != "tok" {
 			return "", errors.New("denied")
 		}
 		raw, err := json.Marshal(map[string]any{
@@ -794,7 +795,10 @@ func approvalCode(t *testing.T, out string) string {
 	return ""
 }
 
-func startSSH(t *testing.T, onAuth func(user, password string) (string, error)) string {
+// startSSH is a stand-in for the server's SSH endpoint. It accepts any key —
+// the agent dials with a fresh key pair — and answers the credential line the
+// agent sends as the first line of the session with onAuth's reply.
+func startSSH(t *testing.T, onAuth func(user, credential string) (string, error)) string {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -804,18 +808,9 @@ func startSSH(t *testing.T, onAuth func(user, password string) (string, error)) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mu sync.Mutex
-	replies := map[string]string{}
 	cfg := &ssh.ServerConfig{
-		PasswordCallback: func(meta ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
-			reply, err := onAuth(meta.User(), string(pass))
-			if err != nil {
-				return nil, err
-			}
-			mu.Lock()
-			replies[meta.RemoteAddr().String()] = reply
-			mu.Unlock()
-			return nil, nil
+		PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+			return &ssh.Permissions{}, nil
 		},
 	}
 	cfg.AddHostKey(signer)
@@ -830,13 +825,13 @@ func startSSH(t *testing.T, onAuth func(user, password string) (string, error)) 
 			if err != nil {
 				return
 			}
-			go serveSSH(conn, cfg, &mu, replies)
+			go serveSSH(conn, cfg, onAuth)
 		}
 	}()
 	return ln.Addr().String()
 }
 
-func serveSSH(conn net.Conn, cfg *ssh.ServerConfig, mu *sync.Mutex, replies map[string]string) {
+func serveSSH(conn net.Conn, cfg *ssh.ServerConfig, onAuth func(user, credential string) (string, error)) {
 	defer conn.Close()
 	sc, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
@@ -855,15 +850,31 @@ func serveSSH(conn net.Conn, cfg *ssh.ServerConfig, mu *sync.Mutex, replies map[
 		}
 		go func() {
 			defer channel.Close()
-			mu.Lock()
-			reply := replies[sc.RemoteAddr().String()]
-			mu.Unlock()
 			for req := range requests {
 				if req.Type != "shell" && req.Type != "exec" {
 					_ = req.Reply(false, nil)
 					continue
 				}
 				_ = req.Reply(true, nil)
+				credCh := make(chan string, 1)
+				go func() {
+					line, err := bufio.NewReader(channel).ReadString('\n')
+					if err != nil {
+						credCh <- ""
+						return
+					}
+					credCh <- strings.TrimSpace(line)
+				}()
+				var credential string
+				select {
+				case credential = <-credCh:
+				case <-time.After(5 * time.Second):
+					return
+				}
+				reply, err := onAuth(sc.User(), credential)
+				if err != nil {
+					return
+				}
 				_, _ = io.WriteString(channel, reply+"\n")
 				_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 				return

@@ -488,6 +488,14 @@ func (h *sshServer) bridgeIO(sess ssh.Session, computer string, closeSession boo
 		return err
 	}
 	if fresh {
+		// A pager or sleep ignores stdin EOF, so Wait never returns when the
+		// control session is already gone. Close on that cancel, and again
+		// when bridgeIO returns. A second Close is an error, not a panic.
+		// The splice route does not use this path; clientFor still owns that cache.
+		go func() {
+			<-sess.Context().Done()
+			client.Close()
+		}()
 		defer client.Close()
 	}
 	bs, err := client.NewSession()

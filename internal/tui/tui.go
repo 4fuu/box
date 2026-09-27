@@ -21,6 +21,8 @@ type Backend interface {
 	Pair(context.Context) (control.Pairing, error)
 	SetEnv(ctx context.Context, name, value string) (string, error)
 	DeleteEnv(ctx context.Context, name string) error
+	AddToken(ctx context.Context, comment string) (control.TokenView, error)
+	RemoveToken(ctx context.Context, id int64) error
 }
 
 // Size is a terminal window.

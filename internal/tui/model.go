@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ const (
 	screenPortals
 	screenKeys
 	screenEnv
+	screenTokens
 	screenCount
 )
 
@@ -34,6 +36,8 @@ const (
 	modeEnvValue
 	modeKeyRm
 	modeEnvRm
+	modeTokenAdd
+	modeTokenRm
 	modePair
 )
 
@@ -155,9 +159,9 @@ func (m *model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.exp = time.Time{}
 		m.mode = modeNormal
 		return m, nil
-	case modeApprove, modeRemove, modeRename, modeEnvName, modeEnvValue:
+	case modeApprove, modeRemove, modeRename, modeEnvName, modeEnvValue, modeTokenAdd:
 		return m.onInput(k)
-	case modeKeyRm, modeEnvRm:
+	case modeKeyRm, modeEnvRm, modeTokenRm:
 		return m.onConfirm(k)
 	default:
 		return m.onNormal(k)
@@ -178,8 +182,12 @@ func (m *model) onNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = (m.screen + screenCount - 1) % screenCount
 		m.cursor = 0
 		return m, nil
-	case "1", "2", "3", "4", "5":
-		m.screen = screen(k.String()[0] - '1')
+	case "1", "2", "3", "4", "5", "6":
+		n := int(k.String()[0] - '1')
+		if n >= int(screenCount) {
+			return m, nil
+		}
+		m.screen = screen(n)
 		m.cursor = 0
 		return m, nil
 	case "up", "k":
@@ -222,6 +230,10 @@ func (m *model) onNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input = ""
 			m.envName = ""
 			return m, nil
+		case screenTokens:
+			m.mode = modeTokenAdd
+			m.input = ""
+			return m, nil
 		}
 	case "r":
 		if m.screen == screenComputers && m.computerName() != "" {
@@ -252,6 +264,15 @@ func (m *model) onNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.target = name
 			m.mode = modeEnvRm
+			return m, nil
+		}
+		if m.screen == screenTokens {
+			tok, ok := m.tokenAtCursor()
+			if !ok {
+				return m, nil
+			}
+			m.target = strconv.FormatInt(tok.ID, 10)
+			m.mode = modeTokenRm
 			return m, nil
 		}
 	}
@@ -344,6 +365,12 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		}
 		m.busy = true
 		return m, m.setEnv(name, value)
+	case modeTokenAdd:
+		comment := strings.TrimSpace(m.input)
+		m.input = ""
+		m.mode = modeNormal
+		m.busy = true
+		return m, m.addToken(comment)
 	default:
 		return m, nil
 	}
@@ -369,6 +396,16 @@ func (m *model) confirmYes() (tea.Model, tea.Cmd) {
 		}
 		m.busy = true
 		return m, m.deleteEnv(name)
+	case modeTokenRm:
+		raw := m.target
+		m.target = ""
+		m.mode = modeNormal
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return m, nil
+		}
+		m.busy = true
+		return m, m.removeToken(id)
 	default:
 		m.mode = modeNormal
 		m.target = ""
@@ -441,6 +478,26 @@ func (m *model) setEnv(name, value string) tea.Cmd {
 	}
 }
 
+func (m *model) addToken(comment string) tea.Cmd {
+	b, ctx := m.b, m.ctx
+	return func() tea.Msg {
+		if _, err := b.AddToken(ctx, comment); err != nil {
+			return doneMsg{err: err}
+		}
+		return doneMsg{text: "added token"}
+	}
+}
+
+func (m *model) removeToken(id int64) tea.Cmd {
+	b, ctx := m.b, m.ctx
+	return func() tea.Msg {
+		if err := b.RemoveToken(ctx, id); err != nil {
+			return doneMsg{err: err}
+		}
+		return doneMsg{text: "removed token"}
+	}
+}
+
 func (m *model) deleteEnv(name string) tea.Cmd {
 	b, ctx := m.b, m.ctx
 	return func() tea.Msg {
@@ -476,6 +533,8 @@ func (m *model) count() int {
 		return len(m.snap.Keys)
 	case screenEnv:
 		return len(m.snap.Env)
+	case screenTokens:
+		return len(m.snap.Tokens)
 	default:
 		return 0
 	}
@@ -520,6 +579,14 @@ func (m *model) keyFingerprint() string {
 		return ""
 	}
 	return m.snap.Keys[i].Fingerprint
+}
+
+func (m *model) tokenAtCursor() (control.TokenView, bool) {
+	i := m.idx()
+	if m.screen != screenTokens || i < 0 {
+		return control.TokenView{}, false
+	}
+	return m.snap.Tokens[i], true
 }
 
 func (m *model) envAtCursor() string {

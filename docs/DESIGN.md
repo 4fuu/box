@@ -34,12 +34,12 @@ The server listens on three ports. All three are configurable at first start and
 | Port | Transport | Flag | Default | Use |
 | --- | --- | --- | --- | --- |
 | SSH | TCP | `--ssh-addr` | `:22` | Client entry, computer bootstrap, REPL |
-| HTTP | TCP | `--http-addr` | `:80` | Portals only. Plain HTTP for the operator's edge |
+| HTTP | TCP | `--http-addr` | `:80` | Portals, the event API, and the sign-in page. Plain HTTP |
 | QUIC | UDP | `--quic-addr` | `:7443` | Computer tunnels |
 
 The operator's firewall must allow all three. Computers never configure a port: they connect to the SSH port, which is the one address a person types, and learn the QUIC endpoint during the handshake.
 
-The HTTP port serves portals and nothing else. There is no HTTP API. An unknown `Host` gets 421. TLS, if any, is terminated by an edge the operator runs in front of this port. This project does not issue certificates.
+The HTTP port serves portals, plus two hosts the server answers itself. `event.<domain>` is the event API. `auth.<domain>` is the sign-in page for private portals. Labels `event` and `auth` cannot be claimed as portals. Any other unknown `Host` gets 421. TLS, if any, is terminated by an edge the operator runs in front of this port. This project does not issue certificates. A private portal's token is an access check, not encryption of the HTTP bytes.
 
 ## Binding clients
 
@@ -88,7 +88,7 @@ Streams:
 
 | Stream | Opened by | Carries |
 | --- | --- | --- |
-| Control | computer, once per connection | newline-delimited JSON frames: hello, portal claim/check/release, key and env pushes, stat replies |
+| Control | computer, once per connection | newline-delimited JSON frames: hello, portal claim/check/release, key and env pushes, stat replies, event publish and fetch |
 | `ssh` | server, per client session | raw TCP splice. The agent connects it to the machine's own sshd |
 | `portal` | server, per HTTP request | raw TCP. The agent connects it to 127.0.0.1 and the claimed port |
 
@@ -136,17 +136,44 @@ box portal check web
 free
 box portal add web 3000
 http://web.box.example.com
+box portal add lock 3000 private
+box event pub door open
+box event get --since 0
 ```
 
 ## Portals
 
 A portal is a hostname routed to one TCP port on one computer. The computer claims it; the control REPL does not.
 
-The parent domain is set when the server starts. `box domain` prints it. `check` and `add` take a label, never a full hostname; the server joins the label to the domain. A label cannot contain a dot, so a computer cannot claim a name outside that domain. `add` claims atomically or refuses and names the holder. A computer can hold several labels; each points at one port. A portal hostname is globally unique and is not derived from the computer's name.
+The parent domain is set when the server starts. `box domain` prints it. `check` and `add` take a label, never a full hostname; the server joins the label to the domain. A label cannot contain a dot, so a computer cannot claim a name outside that domain. `event` and `auth` are reserved. `add` claims atomically or refuses and names the holder. A computer can hold several labels; each points at one port. A portal hostname is globally unique and is not derived from the computer's name.
+
+`box portal add <label> <port>` is public. `box portal add <label> <port> private` requires an access token. The same computer can claim the label again to change that. Existing rows stay public.
 
 The claim travels the control stream. The server is the only place that knows every claim. Once accepted, an HTTP request arriving at the server's HTTP port with that `Host` opens a `portal` stream to the computer, and the agent connects it to `127.0.0.1:<port>` — so the process only needs to listen on loopback. The route exists before anything listens; the operator sees a connection error until it does. The printed URL carries no port; the edge in front of the server decides the reachable one.
 
+A private portal checks the token before it opens the stream. A browser navigation (`Accept` contains `text/html`) with no token is redirected to `http://auth.<domain>/`. The page is served by box. Submitting a valid token sets an HttpOnly cookie on the parent domain, so the browser sends it to every portal host while the token is valid. Other clients send `X-Box-Token` or `Authorization: Bearer` and get 401 when it is missing or wrong. The server strips that cookie, and a bearer token that is one of its access tokens, before forwarding the request. One token opens every private portal. Public portals do not ask.
+
 Removing a computer drops its portals. The claim record lives on the server; the route lives only while the tunnel lives.
+
+## Events
+
+Events are a small in-memory log on the server. The log holds 256 lines. When it is full, the oldest line is dropped. Nothing is written to disk. A line has an id, a topic, a short body, a from label, and a time. The body is at most 4096 bytes and is a single line. Ids only increase. `get` and the HTTP poll return lines with a greater id.
+
+Three doors write and read the same log:
+
+| Door | Who | How |
+| --- | --- | --- |
+| `http://event.<domain>/api/events` | a device that can speak HTTP | `POST` a JSON object `{"topic","body","from"}`. `GET /api/events?since=<id>&topic=<name>` polls. `from` defaults to `http`. Both require an access token |
+| `event pub` / `event get` | a bound SSH client, or `box event` on the server | the control REPL and the localhost socket. `from` is `ssh` or `server` |
+| `box event pub` / `box event get` | a program on a computer | the agent socket, then the control stream. `from` is the computer's name |
+
+`event.<domain>` answers only `/api/events`. It does not redirect to the sign-in page. A device stores the last id it saw and polls. A computer does not speak this HTTP API; it uses `box event`.
+
+## Access tokens
+
+The server creates access tokens. A computer cannot. `token add [comment]` prints the token. It does not expire. `token add --for 12h [comment]` sets a lifetime; `30d` and Go durations such as `720h` are accepted. The row keeps the token, a comment, and the expiry when one was set. `token ls` prints the token again. The TUI tokens screen shows every token and leaves it on screen, so the operator can copy it whenever they want. `token rm <id>` revokes it. A revoked or expired token stops opening private portals and the event API. The cookie the browser already holds fails the next check.
+
+Do not log a token. The SQLite file is the copy the operator reads back.
 
 ## Control REPL and TUI
 
@@ -166,9 +193,15 @@ The control plane is the SSH command itself, plus a REPL for a person. Interacti
 | `env set <name> <value>` | Store a variable and push it to online computers |
 | `env rm <name>` | Remove it. Existing sessions keep the old value |
 | `env ls` | List names only |
+| `token add [--for 12h] [comment]` | Create an access token. No expiry unless `--for` is set |
+| `token ls` / `token rm <id>` | List tokens, including the secret, or revoke one |
+| `event pub <topic> <text>` | Append one event. `from` is `ssh` |
+| `event get [--since n] [--topic name]` | Print events newer than an id |
 | `whoami` | Which key this session used |
 
-On the server machine, `box` with no arguments opens the server TUI over the localhost socket: computers and their live state, the pending-join queue with an approval form, portals, keys, and env names. It can approve, remove computers, and remove keys. It cannot bind a client key for itself — that stays on the SSH password path, so a person on the console cannot skip the key check by accident.
+On the server machine, `box` with no arguments opens the server TUI over the localhost socket: computers and their live state, the pending-join queue with an approval form, portals, keys, env names, and access tokens. The tokens screen shows each token in full and keeps showing it. It can add and remove tokens. It can approve, remove computers, and remove keys. It cannot bind a client key for itself — that stays on the SSH password path, so a person on the console cannot skip the key check by accident.
+
+`box token` and `box event` on the server use the same localhost socket. On a computer, `box event` uses the agent socket. `box token` is refused there: only the server creates tokens.
 
 ## Processes
 
@@ -188,11 +221,12 @@ The server keeps one SQLite file in its data directory (default `/var/lib/box`, 
 - `keys`: public key, comment, bound at
 - `pairings`: hash of a one-time password, expiry, used at, failed attempts
 - `computers`: name, token hash, login user, sshd host public key, joined at
-- `portals`: hostname, computer, port, claimed at
+- `portals`: hostname, computer, port, private, claimed at. `private` defaults to false
+- `tokens`: access token, comment, expiry, created at. The token value is stored so it can be copied again
 - `env`: name, value. The value is not returned by list commands
 - `meta`: domain, the three listen addresses, server keys, schema version
 
-Pending joins live in memory only. The SQLite file is the secret store; it is not world-readable. Computer names and portal hostnames are globally unique.
+Pending joins live in memory only. Events live in memory only. The SQLite file is the secret store; it is not world-readable. Computer names and portal hostnames are globally unique.
 
 The agent keeps `~/.box/computer.json`: token, QUIC endpoint, server fingerprint, name, login user. The server does not store per-computer files.
 
@@ -212,7 +246,7 @@ No container runtime, no image, no frp download, no cgroup check.
 - a web coding agent
 - per-computer key scoping; every bound key reaches every computer
 - a TCP fallback for the tunnel. Networks that block UDP cannot run a computer
-- TLS and public access control on the HTTP port
+- TLS on the HTTP port. Private portals check a token; they do not encrypt the connection
 - moving a computer's identity between machines
 - resource limits on a computer; it is a whole machine
 - CDN

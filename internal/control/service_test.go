@@ -94,17 +94,17 @@ func TestPortalHoldRenameRemove(t *testing.T) {
 	if err := svc.Store.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddPortal("home", "web.other", 80); err == nil {
+	if _, err := svc.AddPortal("home", "web.other", 80, false); err == nil {
 		t.Fatal("dot label")
 	}
-	res, err := svc.AddPortal("home", "web", 3000)
+	res, err := svc.AddPortal("home", "web", 3000, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.URL != "http://web.box.example.com" || res.Host != "web.box.example.com" || res.Port != 3000 {
 		t.Fatalf("%+v", res)
 	}
-	res, err = svc.AddPortal("home", "api", 4000)
+	res, err = svc.AddPortal("home", "api", 4000, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestPortalHoldRenameRemove(t *testing.T) {
 	if err := svc.Store.CreateComputer("other", secret.Hash("tok2"), "bob"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddPortal("other", "web", 1); err == nil || !strings.Contains(err.Error(), "held by home") {
+	if _, err := svc.AddPortal("other", "web", 1, false); err == nil || !strings.Contains(err.Error(), "held by home") {
 		t.Fatal(err)
 	}
 	check, err := svc.CheckPortal("web")
@@ -240,7 +240,7 @@ func TestSnapshotOmitsSecrets(t *testing.T) {
 	if err := svc.Store.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddPortal("home", "web", 3000); err != nil {
+	if _, err := svc.AddPortal("home", "web", 3000, false); err != nil {
 		t.Fatal(err)
 	}
 	code := "a3Kf9Q"

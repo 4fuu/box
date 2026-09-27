@@ -19,10 +19,11 @@ survives, and a site on a machine gets a hostname. This is a private
 deployment, not a hosted service.
 
 > [!WARNING]
-> This is not a multi-tenant host. The HTTP port serves portals only, in
-> plain HTTP. TLS, if any, is terminated by an edge you run in front of it.
-> This project does not issue certificates. Networks that block UDP cannot
-> run a computer.
+> This is not a multi-tenant host. The HTTP port serves portals, the event
+> API, and a sign-in page, in plain HTTP. TLS, if any, is terminated by an
+> edge you run in front of it. This project does not issue certificates. A
+> private portal checks a token; it does not encrypt the connection.
+> Networks that block UDP cannot run a computer.
 
 ## Why box
 
@@ -34,11 +35,13 @@ deployment, not a hosted service.
   server init is bound. Later clients get a password from a bound client, or
   from `box pair` on the server.
 - **One binary.** `box serve` is the server. `box join`, then `box agent`, is
-  the computer. On the computer, `box domain` and `box portal` talk to the
-  agent. There is no Podman, no frp, and no node.
+  the computer. On the computer, `box domain`, `box portal`, and `box event`
+  talk to the agent. There is no Podman, no frp, and no node.
 - **A hostname for one port.** `box portal add web 3000` claims `web` under
   the domain set when the server starts. The server routes that `Host` to
-  `127.0.0.1:3000` on that computer. An unknown `Host` gets 421.
+  `127.0.0.1:3000` on that computer. Add `private` when the portal should
+  require a token. An unknown `Host` gets 421. `event.<domain>` and
+  `auth.<domain>` belong to the server.
 - **Your machines.** A computer joins with a short, single-use approval code.
   It dials out, so it can sit behind NAT.
 
@@ -116,11 +119,51 @@ box portal add web 3000
 
 `box domain` prints the parent domain, for example `box.example.com`. `web`
 becomes `web.box.example.com` and routes to port 3000 on `127.0.0.1`. A label
-cannot contain a dot. `check` does not claim. `add` refuses when the label is
-taken. When the URL's port is not 80, the port is included.
+cannot contain a dot. `event` and `auth` are reserved. `check` does not claim.
+`add` refuses when the label is taken. The printed URL has no port.
+
+```bash
+box portal add lock 3000 private
+```
+
+`private` requires an access token. A browser is sent to `auth.<domain>`,
+which asks for the token and stores it in a cookie for the parent domain.
+Other clients send `X-Box-Token` or `Authorization: Bearer`. Public portals
+stay open. One token opens every private portal for as long as that token is valid.
+
+On the server:
+
+```bash
+box token add door
+box token ls
+box token rm 1
+```
+
+`token add` prints the token. `token ls` and the TUI print it again, so it
+can be copied later. A token does not expire unless `--for` is set
+(`box token add --for 12h door`).
+
+Events are one in-memory log. Devices that are not computers use HTTP.
+Computers use `box event`. A bound SSH client uses `event pub` and `event get`.
+
+```bash
+box event pub door open
+box event get --since 0
+```
+
+```bash
+curl -H "X-Box-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"topic":"door","body":"open","from":"sensor-1"}' \
+  http://event.box.example.com/api/events
+curl -H "X-Box-Token: $TOKEN" \
+  'http://event.box.example.com/api/events?since=0&topic=door'
+```
+
+The log keeps 256 lines and drops the oldest. It is not saved.
 
 `env set NAME <value>` stores a variable and pushes it to online computers.
-`env ls` prints names, never values.
+`env ls` prints names, never values. Access tokens are not env values:
+`token ls` prints them.
 
 ## Documentation
 

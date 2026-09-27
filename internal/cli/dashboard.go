@@ -96,3 +96,13 @@ func (d dashBackend) SetEnv(_ context.Context, name, value string) (string, erro
 func (d dashBackend) DeleteEnv(_ context.Context, name string) error {
 	return localCall(d.o, "env_rm", map[string]string{"name": name}, nil)
 }
+
+func (d dashBackend) AddToken(_ context.Context, comment string) (control.TokenView, error) {
+	var view control.TokenView
+	err := localCall(d.o, "token_add", map[string]string{"comment": comment}, &view)
+	return view, err
+}
+
+func (d dashBackend) RemoveToken(_ context.Context, id int64) error {
+	return localCall(d.o, "token_rm", map[string]int64{"id": id}, nil)
+}

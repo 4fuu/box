@@ -1,5 +1,7 @@
 package rpc
 
+import "time"
+
 // CreateBody is the server's request to make a computer.
 // Env is injected into the container. Do not log this struct.
 type CreateBody struct {
@@ -53,8 +55,9 @@ type StatBody struct {
 }
 
 type PortalBody struct {
-	Label string `json:"label"`
-	Port  int    `json:"port,omitempty"`
+	Label   string `json:"label"`
+	Port    int    `json:"port,omitempty"`
+	Private bool   `json:"private,omitempty"`
 }
 
 type PortalResult struct {
@@ -70,8 +73,31 @@ type PortalList struct {
 }
 
 type PortalItem struct {
-	Label string `json:"label"`
-	Port  int    `json:"port"`
+	Label   string `json:"label"`
+	Port    int    `json:"port"`
+	Private bool   `json:"private,omitempty"`
+}
+
+type EventPublish struct {
+	Topic string `json:"topic"`
+	Body  string `json:"body"`
+}
+
+type EventQuery struct {
+	Since int64  `json:"since"`
+	Topic string `json:"topic,omitempty"`
+}
+
+type EventItem struct {
+	ID    int64     `json:"id"`
+	Topic string    `json:"topic"`
+	Body  string    `json:"body"`
+	From  string    `json:"from"`
+	Time  time.Time `json:"time"`
+}
+
+type EventList struct {
+	Events []EventItem `json:"events"`
 }
 
 type DomainBody struct {
@@ -94,6 +120,8 @@ const (
 	OpPortalAdd   = "portal_add"
 	OpPortalLs    = "portal_ls"
 	OpPortalRm    = "portal_rm"
+	OpEventPub    = "event_pub"
+	OpEventGet    = "event_get"
 )
 
 // ErrNoCapacity is the text a node returns when a computer does not fit.

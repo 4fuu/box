@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -202,22 +203,22 @@ func TestComputerTokenAndPortals(t *testing.T) {
 	if c.LoginUser != "alice" || c.HostKey != "ssh-ed25519 BBBB" {
 		t.Fatalf("info %+v", c)
 	}
-	if err := s.ClaimPortal("web.example.com", "home", 3000); err != nil {
+	if err := s.ClaimPortal("web.example.com", "home", 3000, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CreateComputer("other", secret.Hash("tok2"), "bob"); err != nil {
 		t.Fatal(err)
 	}
-	err = s.ClaimPortal("web.example.com", "other", 9)
+	err = s.ClaimPortal("web.example.com", "other", 9, false)
 	var held *HeldError
 	if !errors.As(err, &held) || held.Holder != "home" {
 		t.Fatalf("held %v", err)
 	}
-	if err := s.ClaimPortal("web.example.com", "home", 4000); err != nil {
+	if err := s.ClaimPortal("web.example.com", "home", 4000, true); err != nil {
 		t.Fatal(err)
 	}
 	p, err := s.PortalByHost("web.example.com")
-	if err != nil || p.Port != 4000 || p.Computer != "home" {
+	if err != nil || p.Port != 4000 || p.Computer != "home" || !p.Private {
 		t.Fatalf("%+v %v", p, err)
 	}
 	if err := s.RenameComputer("home", "house"); err != nil {
@@ -283,5 +284,82 @@ func TestMetaRoundTrip(t *testing.T) {
 	v, ok, err := s.Meta("ssh_addr")
 	if err != nil || !ok || v != "127.0.0.1:22" {
 		t.Fatalf("%q %v %v", v, ok, err)
+	}
+}
+
+func TestAccessTokenRoundTrip(t *testing.T) {
+	s := open(t)
+	s.SetNow(func() time.Time { return time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC) })
+	raw, err := secret.AccessToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.AddToken(raw, "door", s.now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.ListTokens()
+	if err != nil || len(list) != 1 || list[0].Token != raw || list[0].Comment != "door" || list[0].ID != got.ID {
+		t.Fatalf("%+v %v", list, err)
+	}
+	if _, ok, err := s.ValidToken(raw); err != nil || !ok {
+		t.Fatalf("valid %v %v", ok, err)
+	}
+	if _, ok, err := s.ValidToken("nope"); err != nil || ok {
+		t.Fatalf("miss %v %v", ok, err)
+	}
+	s.SetNow(func() time.Time { return time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC) })
+	if _, ok, err := s.ValidToken(raw); err != nil || ok {
+		t.Fatal("expired token still matched")
+	}
+	if err := s.DeleteToken(got.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ListTokens(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteToken(got.ID); err != ErrNotFound {
+		t.Fatal(err)
+	}
+	open, err := s.AddToken(raw+"x", "keep", time.Time{})
+	if err != nil || !open.Expiry.IsZero() {
+		t.Fatal(err)
+	}
+	s.SetNow(func() time.Time { return time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC) })
+	if _, ok, err := s.ValidToken(raw + "x"); err != nil || !ok {
+		t.Fatal("token with no expiry was refused")
+	}
+}
+
+func TestOldPortalRowGainsPrivateColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "box.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE portals (
+		hostname TEXT PRIMARY KEY,
+		computer TEXT NOT NULL,
+		port INTEGER NOT NULL,
+		claimed_at TEXT NOT NULL
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO portals(hostname, computer, port, claimed_at) VALUES('web.example.com', 'home', 9, '2020-01-01T00:00:00Z')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p, err := s.PortalByHost("web.example.com")
+	if err != nil || p.Private || p.Port != 9 {
+		t.Fatalf("%+v %v", p, err)
 	}
 }

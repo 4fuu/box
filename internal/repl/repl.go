@@ -13,6 +13,8 @@ import (
 	"unicode"
 
 	"github.com/4fuu/box/internal/control"
+	"strconv"
+
 	"golang.org/x/crypto/ssh"
 )
 
@@ -66,7 +68,7 @@ func (c crlfWriter) Write(p []byte) (int, error) {
 
 // Exec runs one already-split command. The error is not written; the caller prints it.
 func (r *REPL) Exec(argv []string) error {
-	pos, _, asJSON, err := parseArgv(argv)
+	pos, flags, asJSON, err := parseArgv(argv)
 	if err != nil {
 		return err
 	}
@@ -74,7 +76,7 @@ func (r *REPL) Exec(argv []string) error {
 		return errors.New("unknown command")
 	}
 	name, args := pos[0], pos[1:]
-	if name == "key" || name == "env" {
+	if name == "key" || name == "env" || name == "token" || name == "event" {
 		if len(args) == 0 {
 			return fmt.Errorf("%q needs a subcommand — run help %s", name, name)
 		}
@@ -169,6 +171,57 @@ func (r *REPL) Exec(argv []string) error {
 			return err
 		}
 		return r.print(control.FormatEnv(names, asJSON))
+	case "token add":
+		ttl, err := control.ParseTTL(flags["for"])
+		if err != nil {
+			return err
+		}
+		view, err := r.Svc.AddToken(strings.Join(args, " "), ttl)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(r.Out, control.FormatToken(view))
+		return err
+	case "token ls":
+		return r.write(func() (string, error) {
+			list, err := r.Svc.Tokens()
+			if err != nil {
+				return "", err
+			}
+			return control.FormatTokens(list, asJSON)
+		})
+	case "token rm":
+		if len(args) != 1 {
+			return errors.New("usage: token rm <id>")
+		}
+		id, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil || id < 1 {
+			return errors.New("usage: token rm <id>")
+		}
+		return r.Svc.RemoveToken(id)
+	case "event pub":
+		if len(args) < 2 {
+			return errors.New("usage: event pub <topic> <text>")
+		}
+		item, err := r.Svc.PublishEvent("ssh", args[0], strings.Join(args[1:], " "))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(r.Out, item.ID)
+		return nil
+	case "event get":
+		if len(args) != 0 {
+			return errors.New("usage: event get [--since n] [--topic name]")
+		}
+		since, err := parseSince(flags["since"])
+		if err != nil {
+			return err
+		}
+		list, err := r.Svc.ReadEvents(since, flags["topic"])
+		if err != nil {
+			return err
+		}
+		return r.print(control.FormatEvents(list, asJSON))
 	case "whoami":
 		line, err := r.Svc.WhoAmI(r.Pub)
 		if err != nil {
@@ -219,7 +272,7 @@ func (r *REPL) print(text string, err error) error {
 
 func parseArgv(argv []string) (pos []string, flags map[string]string, asJSON bool, err error) {
 	flags = map[string]string{}
-	known := map[string]bool{}
+	known := map[string]bool{"since": true, "topic": true, "for": true}
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
 		if a == "--" {
@@ -327,6 +380,16 @@ var helpHelp = []helpEntry{
 			{name: "env rm", usage: "env rm <name>", short: "Remove a variable; existing sessions keep the old value"},
 			{name: "env ls", usage: "env ls", short: "List variable names; values are never printed"},
 			{name: "whoami", usage: "whoami", short: "Show the key this session authenticated with"},
+			{name: "token add", usage: "token add [--for 12h] [comment]", short: "Create an access token. It does not expire unless --for is set"},
+			{name: "token ls", usage: "token ls", short: "List access tokens, including the secret"},
+			{name: "token rm", usage: "token rm <id>", short: "Revoke an access token"},
+		},
+	},
+	{
+		name: "Events",
+		subs: []helpEntry{
+			{name: "event pub", usage: "event pub <topic> <text>", short: "Publish one event"},
+			{name: "event get", usage: "event get [--since n] [--topic name]", short: "Print events newer than an id"},
 		},
 	},
 	{
@@ -363,7 +426,8 @@ func (r *REPL) printHelpOverview() {
 	fmt.Fprintf(r.Out, "Common commands:\n\n")
 	rows := []struct{ group, cmds string }{
 		{"Computers", "ls  ssh  rm  rename  stat  pending  approve"},
-		{"Keys & secrets", "pair  key†  env†  whoami"},
+		{"Keys & secrets", "pair  key†  env†  token†  whoami"},
+		{"Events", "event†"},
 		{"Session", "clear  exit"},
 		{"Help", "help"},
 	}
@@ -372,6 +436,17 @@ func (r *REPL) printHelpOverview() {
 	}
 	fmt.Fprintf(r.Out, "\n† marks a command with subcommands.\n")
 	fmt.Fprintf(r.Out, "Run help all for a list of all commands, help <command> for more detail.\n")
+}
+
+func parseSince(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 {
+		return 0, errors.New("invalid since")
+	}
+	return n, nil
 }
 
 func helpLine(w io.Writer, usage, short string) {

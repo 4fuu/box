@@ -13,14 +13,14 @@ box 把你自己的机器放在同一个 SSH 入口后面。计算机是一整�
 参照是 [exe.dev](https://exe.dev)：机器有名字，状态会留下，机器上的网站有主机名。这是私人部署，不是托管服务。
 
 > [!WARNING]
-> 这不是多租户主机。HTTP 端口只提供门户，而且是明文 HTTP。如果需要 TLS，由你放在这个端口前面的边缘来终结。本项目不签发证书。拦截 UDP 的网络无法运行计算机。
+> 这不是多租户主机。HTTP 端口提供门户、事件接口和登录页，而且是明文 HTTP。如果需要 TLS，由你放在这个端口前面的边缘来终结。本项目不签发证书。私有门户检查令牌，并不加密这条连接。拦截 UDP 的网络无法运行计算机。
 
 ## 为什么用 box
 
 - **它就是那台机器。** `scp`、rsync、SFTP、VS Code Remote-SSH 和 `ssh -L` 能用，是因为它们到达的是普通 sshd。连接断开不会停掉计算机上的进程。
 - **客户端是系统里的 OpenSSH。** 没有账号，也不需要另装客户端。服务器初始化时打印的一次性密码，由第一个出示它的 SSH 连接绑定。之后的客户端向已绑定的客户端要密码，或在服务器本机运行 `box pair`。
-- **一个二进制。** 服务器运行 `box serve`。计算机先 `box join`，再 `box agent`。在计算机上，`box domain` 和 `box portal` 跟代理说话。没有 Podman，没有 frp，也没有节点。
-- **一个端口对应一个主机名。** `box portal add web 3000` 在服务器启动时配置的域名下声明 `web`。服务器按这个 `Host` 把请求转到该计算机的 `127.0.0.1:3000`。未知的 `Host` 得到 421。
+- **一个二进制。** 服务器运行 `box serve`。计算机先 `box join`，再 `box agent`。在计算机上，`box domain`、`box portal` 和 `box event` 跟代理说话。没有 Podman，没有 frp，也没有节点。
+- **一个端口对应一个主机名。** `box portal add web 3000` 在服务器启动时配置的域名下声明 `web`。服务器按这个 `Host` 把请求转到该计算机的 `127.0.0.1:3000`。加上 `private` 后，访问必须带令牌。未知的 `Host` 得到 421。`event.<域名>` 和 `auth.<域名>` 属于服务器。
 - **机器是你的。** 计算机用一个短的、一次性的批准码加入。它主动向外连接，所以可以放在 NAT 后面。
 
 ## 快速开始
@@ -84,9 +84,42 @@ box portal check web
 box portal add web 3000
 ```
 
-`box domain` 打印父域名，例如 `box.example.com`。`web` 变成 `web.box.example.com`，并转到该机器 `127.0.0.1` 的 3000 端口。标签不能包含点。`check` 不声明。标签已被占用时，`add` 会拒绝。URL 的端口不是 80 时，URL 里会带上端口。
+`box domain` 打印父域名，例如 `box.example.com`。`web` 变成 `web.box.example.com`，并转到该机器 `127.0.0.1` 的 3000 端口。标签不能包含点。`event` 和 `auth` 是保留标签。`check` 不声明。标签已被占用时，`add` 会拒绝。打印出来的 URL 不带端口。
 
-`env set NAME <value>` 保存变量并推送到在线的计算机。`env ls` 只打印名字，不打印值。
+```bash
+box portal add lock 3000 private
+```
+
+`private` 表示访问必须带令牌。浏览器会被转到 `auth.<域名>`，输入令牌后，服务器把令牌放进父域名的 Cookie。其他客户端发送 `X-Box-Token` 或 `Authorization: Bearer`。公开的门户不检查。一把令牌在有效期内打开所有私有门户。
+
+在服务器上：
+
+```bash
+box token add door
+box token ls
+box token rm 1
+```
+
+`token add` 打印令牌。`token ls` 和 TUI 会再次打印它，所以可以反复复制。默认没有有效期，需要时再用 `--for`（`box token add --for 12h door`）。
+
+事件是服务器内存里的一份日志。不是计算机的设备走 HTTP。计算机用 `box event`。已绑定的 SSH 客户端用 `event pub` 和 `event get`。
+
+```bash
+box event pub door open
+box event get --since 0
+```
+
+```bash
+curl -H "X-Box-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"topic":"door","body":"open","from":"sensor-1"}' \
+  http://event.box.example.com/api/events
+curl -H "X-Box-Token: $TOKEN" \
+  'http://event.box.example.com/api/events?since=0&topic=door'
+```
+
+日志保留 256 条，满了丢掉最旧的。不写入磁盘。
+
+`env set NAME <value>` 保存变量并推送到在线的计算机。`env ls` 只打印名字，不打印值。访问令牌不是环境变量：`token ls` 会打印令牌。
 
 ## 文档
 

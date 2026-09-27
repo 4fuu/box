@@ -1,6 +1,7 @@
 // Package store is the server's SQLite file.
-// Env values and computer tokens live here. List methods do not return env values.
-// There is no migration: a new database only.
+// Env values, computer tokens, and access tokens live here. List methods do not
+// return env values. Access tokens are stored so the operator can copy them again.
+// Do not log them. A new column is added in place; rows are not rewritten.
 package store
 
 import (
@@ -63,12 +64,22 @@ type Computer struct {
 	JoinedAt  time.Time
 }
 
-// Portal is one claimed hostname.
+// Portal is one claimed hostname. Private requires an access token.
 type Portal struct {
 	Hostname  string
 	Computer  string
 	Port      int
+	Private   bool
 	ClaimedAt time.Time
+}
+
+// Token is a server-issued access token. Token is the secret. Do not log it.
+type Token struct {
+	ID      int64
+	Token   string
+	Comment string
+	Expiry  time.Time
+	Created time.Time
 }
 
 func Open(path string) (*Store, error) {
@@ -103,6 +114,9 @@ func (s *Store) SetNow(fn func() time.Time) {
 
 func (s *Store) now() time.Time { return s.nowfn().UTC() }
 
+// Now is the store clock.
+func (s *Store) Now() time.Time { return s.now() }
+
 func (s *Store) tighten() error {
 	if err := os.Chmod(filepath.Dir(s.path), 0o700); err != nil {
 		return err
@@ -119,8 +133,15 @@ func (s *Store) tighten() error {
 }
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Databases created before private portals have no such column.
+	_, err := s.db.Exec(`ALTER TABLE portals ADD COLUMN private INTEGER NOT NULL DEFAULT 0`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 const schema = `
@@ -153,7 +174,15 @@ CREATE TABLE IF NOT EXISTS portals (
   hostname TEXT PRIMARY KEY,
   computer TEXT NOT NULL,
   port INTEGER NOT NULL,
+  private INTEGER NOT NULL DEFAULT 0,
   claimed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tokens (
+  id INTEGER PRIMARY KEY,
+  token TEXT NOT NULL UNIQUE,
+  comment TEXT NOT NULL DEFAULT '',
+  expiry TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS env (
   name TEXT PRIMARY KEY,
@@ -499,9 +528,9 @@ func (s *Store) DeleteComputer(name string) error {
 	return tx.Commit()
 }
 
-// ClaimPortal claims hostname for computer. The same computer may update the port.
-// A different holder returns HeldError.
-func (s *Store) ClaimPortal(hostname, computer string, port int) error {
+// ClaimPortal claims hostname for computer. The same computer may update the port
+// and whether the portal is private. A different holder returns HeldError.
+func (s *Store) ClaimPortal(hostname, computer string, port int, private bool) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -513,8 +542,8 @@ func (s *Store) ClaimPortal(hostname, computer string, port int) error {
 		if holder != computer {
 			return &HeldError{Hostname: hostname, Holder: holder}
 		}
-		_, err = tx.Exec(`UPDATE portals SET port = ?, claimed_at = ? WHERE hostname = ?`,
-			port, s.now().Format(time.RFC3339Nano), hostname)
+		_, err = tx.Exec(`UPDATE portals SET port = ?, private = ?, claimed_at = ? WHERE hostname = ?`,
+			port, boolInt(private), s.now().Format(time.RFC3339Nano), hostname)
 		if err != nil {
 			return err
 		}
@@ -523,8 +552,8 @@ func (s *Store) ClaimPortal(hostname, computer string, port int) error {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO portals(hostname, computer, port, claimed_at) VALUES(?, ?, ?, ?)`,
-		hostname, computer, port, s.now().Format(time.RFC3339Nano))
+	_, err = tx.Exec(`INSERT INTO portals(hostname, computer, port, private, claimed_at) VALUES(?, ?, ?, ?, ?)`,
+		hostname, computer, port, boolInt(private), s.now().Format(time.RFC3339Nano))
 	if err != nil {
 		if isUnique(err) {
 			return &HeldError{Hostname: hostname, Holder: "unknown"}
@@ -537,8 +566,10 @@ func (s *Store) ClaimPortal(hostname, computer string, port int) error {
 func (s *Store) PortalByHost(host string) (Portal, error) {
 	var p Portal
 	var at string
-	err := s.db.QueryRow(`SELECT hostname, computer, port, claimed_at FROM portals WHERE hostname = ?`, host).
-		Scan(&p.Hostname, &p.Computer, &p.Port, &at)
+	var priv int
+	err := s.db.QueryRow(`SELECT hostname, computer, port, private, claimed_at FROM portals WHERE hostname = ?`, host).
+		Scan(&p.Hostname, &p.Computer, &p.Port, &priv, &at)
+	p.Private = priv != 0
 	if errors.Is(err, sql.ErrNoRows) {
 		return Portal{}, ErrNotFound
 	}
@@ -579,7 +610,7 @@ func (s *Store) PortalsByComputer(name string) ([]Portal, error) {
 
 // ListPortals returns every claim, ordered by hostname.
 func (s *Store) ListPortals() ([]Portal, error) {
-	rows, err := s.db.Query(`SELECT hostname, computer, port, claimed_at FROM portals ORDER BY hostname`)
+	rows, err := s.db.Query(`SELECT hostname, computer, port, private, claimed_at FROM portals ORDER BY hostname`)
 	if err != nil {
 		return nil, err
 	}
@@ -588,9 +619,11 @@ func (s *Store) ListPortals() ([]Portal, error) {
 	for rows.Next() {
 		var p Portal
 		var at string
-		if err := rows.Scan(&p.Hostname, &p.Computer, &p.Port, &at); err != nil {
+		var priv int
+		if err := rows.Scan(&p.Hostname, &p.Computer, &p.Port, &priv, &at); err != nil {
 			return nil, err
 		}
+		p.Private = priv != 0
 		p.ClaimedAt, err = time.Parse(time.RFC3339Nano, at)
 		if err != nil {
 			return nil, err
@@ -603,6 +636,103 @@ func (s *Store) ListPortals() ([]Portal, error) {
 // ReleasePortal drops a claim the computer holds. Another computer's claim is left alone.
 func (s *Store) ReleasePortal(hostname, computer string) error {
 	res, err := s.db.Exec(`DELETE FROM portals WHERE hostname = ? AND computer = ?`, hostname, computer)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+// AddToken stores a raw access token. The caller prints it. Do not log it.
+// A zero expiry means the token lasts until it is removed.
+func (s *Store) AddToken(token, comment string, expiry time.Time) (Token, error) {
+	if token == "" || (!expiry.IsZero() && !expiry.After(s.now())) {
+		return Token{}, errors.New("invalid token")
+	}
+	now := s.now()
+	exp := ""
+	if !expiry.IsZero() {
+		expiry = expiry.UTC()
+		exp = expiry.Format(time.RFC3339Nano)
+	}
+	res, err := s.db.Exec(`INSERT INTO tokens(token, comment, expiry, created_at) VALUES(?, ?, ?, ?)`,
+		token, comment, exp, now.Format(time.RFC3339Nano))
+	if err != nil {
+		return Token{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Token{}, err
+	}
+	return Token{ID: id, Token: token, Comment: comment, Expiry: expiry, Created: now}, nil
+}
+
+// ListTokens returns every access token, including expired ones, oldest first.
+// The token value is included so the operator can copy it. Do not log the result.
+func (s *Store) ListTokens() ([]Token, error) {
+	rows, err := s.db.Query(`SELECT id, token, comment, expiry, created_at FROM tokens ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Token{}
+	for rows.Next() {
+		var t Token
+		var exp, created string
+		if err := rows.Scan(&t.ID, &t.Token, &t.Comment, &exp, &created); err != nil {
+			return nil, err
+		}
+		if exp != "" {
+			t.Expiry, err = time.Parse(time.RFC3339Nano, exp)
+			if err != nil {
+				return nil, err
+			}
+		}
+		t.Created, err = time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ValidToken reports a stored token that matches raw and has not expired.
+// raw is not logged. A miss is false, nil.
+func (s *Store) ValidToken(raw string) (Token, bool, error) {
+	if raw == "" || len(raw) > 128 {
+		return Token{}, false, nil
+	}
+	list, err := s.ListTokens()
+	if err != nil {
+		return Token{}, false, err
+	}
+	rawb := []byte(raw)
+	var found Token
+	ok := false
+	now := s.now()
+	for _, t := range list {
+		if subtle.ConstantTimeCompare([]byte(t.Token), rawb) == 1 && (t.Expiry.IsZero() || now.Before(t.Expiry)) {
+			found = t
+			ok = true
+		}
+	}
+	return found, ok, nil
+}
+
+// DeleteToken removes one access token by id.
+func (s *Store) DeleteToken(id int64) error {
+	res, err := s.db.Exec(`DELETE FROM tokens WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}

@@ -21,6 +21,7 @@ import (
 
 	"github.com/4fuu/box/internal/approve"
 	"github.com/4fuu/box/internal/control"
+	"github.com/4fuu/box/internal/event"
 	"github.com/4fuu/box/internal/ident"
 	"github.com/4fuu/box/internal/keys"
 	"github.com/4fuu/box/internal/paths"
@@ -128,6 +129,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		SplicePublic: strings.TrimSpace(spliceLine),
 		Queue:        approve.New(),
 		Live:         control.NewLive(),
+		Events:       event.New(),
 	}
 	if err := printFirstPassword(svc, st, cfg.Stdout); err != nil {
 		st.Close()
@@ -345,7 +347,7 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, errors.New("bad request")
 			}
-			return s.svc.AddPortal(name, req.Label, req.Port)
+			return s.svc.AddPortal(name, req.Label, req.Port, req.Private)
 		case tunnel.OpPortalRm:
 			var req tunnel.PortalRmRequest
 			if err := json.Unmarshal(body, &req); err != nil {
@@ -354,6 +356,30 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 			return nil, s.svc.RemovePortal(name, req.Label)
 		case tunnel.OpPortalLs:
 			return s.svc.ListPortals(name)
+		case tunnel.OpEventPub:
+			var req tunnel.EventPublish
+			if err := json.Unmarshal(body, &req); err != nil {
+				return nil, errors.New("bad request")
+			}
+			item, err := s.svc.PublishEvent(name, req.Topic, req.Body)
+			if err != nil {
+				return nil, err
+			}
+			return control.WireEvent(item), nil
+		case tunnel.OpEventGet:
+			var req tunnel.EventQuery
+			if err := json.Unmarshal(body, &req); err != nil {
+				return nil, errors.New("bad request")
+			}
+			list, err := s.svc.ReadEvents(req.Since, req.Topic)
+			if err != nil {
+				return nil, err
+			}
+			out := tunnel.EventList{Events: make([]tunnel.EventItem, 0, len(list))}
+			for _, item := range list {
+				out.Events = append(out.Events, control.WireEvent(item))
+			}
+			return out, nil
 		default:
 			return nil, errors.New("unsupported")
 		}
@@ -425,19 +451,14 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	host := hostname(r.Host)
-	p, err := s.store.PortalByHost(host)
-	if err != nil {
-		w.WriteHeader(http.StatusMisdirectedRequest)
-		_, _ = io.WriteString(w, "unknown host\n")
-		return
-	}
+func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Portal) {
 	conn := s.svc.Live.Get(p.Computer)
 	if conn == nil {
 		http.Error(w, "computer offline\n", http.StatusBadGateway)
 		return
 	}
+	host := p.Hostname
+	s.stripGate(r)
 	rp := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
@@ -559,8 +580,57 @@ func (s *Server) local(op string, body json.RawMessage) (any, error) {
 	case "status":
 		return s.svc.Status()
 	case "snapshot":
-		// One read of the lists the dashboard draws. No env values, no codes.
+		// Tokens are included so the TUI can copy them. Do not log this value.
 		return s.svc.Snapshot()
+	case "token_add":
+		var req struct {
+			Comment string `json:"comment"`
+			For     string `json:"for"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil && len(body) != 0 && string(body) != "null" {
+			return nil, err
+		}
+		ttl, err := control.ParseTTL(req.For)
+		if err != nil {
+			return nil, err
+		}
+		return s.svc.AddToken(req.Comment, ttl)
+	case "token_ls":
+		return s.svc.Tokens()
+	case "token_rm":
+		var req struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		return nil, s.svc.RemoveToken(req.ID)
+	case "event_pub":
+		var req struct {
+			Topic string `json:"topic"`
+			Body  string `json:"body"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, err
+		}
+		return s.svc.PublishEvent("server", req.Topic, req.Body)
+	case "event_get":
+		var req struct {
+			Since int64  `json:"since"`
+			Topic string `json:"topic"`
+		}
+		if len(body) != 0 && string(body) != "null" {
+			if err := json.Unmarshal(body, &req); err != nil {
+				return nil, err
+			}
+		}
+		list, err := s.svc.ReadEvents(req.Since, req.Topic)
+		if err != nil {
+			return nil, err
+		}
+		return struct {
+			Events []event.Item `json:"events"`
+		}{Events: list}, nil
 	default:
 		return nil, errors.New("unknown command")
 	}

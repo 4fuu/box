@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/4fuu/box/internal/approve"
+	"github.com/4fuu/box/internal/event"
 	"github.com/4fuu/box/internal/ident"
 	"github.com/4fuu/box/internal/keys"
 	"github.com/4fuu/box/internal/secret"
@@ -26,6 +27,8 @@ type Service struct {
 	SplicePublic string
 	Queue        *approve.Queue
 	Live         *Live
+	// Events is the in-memory log. Nil means publishing is unavailable.
+	Events *event.Bus
 	// Grant finishes an approved join. The server parks the SSH session and
 	// sends the token there. Approve does not hold the queue lock across Grant.
 	Grant      func(approve.Pending) error
@@ -311,10 +314,22 @@ type PortalView struct {
 	Host     string `json:"host"`
 	Computer string `json:"computer"`
 	Port     int    `json:"port"`
+	Private  bool   `json:"private"`
+}
+
+// TokenView is one access token. Token is the secret, included so the TUI can
+// copy it again. Do not log a TokenView or a Snapshot.
+type TokenView struct {
+	ID      int64     `json:"id"`
+	Token   string    `json:"token"`
+	Comment string    `json:"comment"`
+	Expires time.Time `json:"expires,omitempty"`
+	Created time.Time `json:"created"`
 }
 
 // Snapshot is the dashboard's view of the server.
 // Env is names only. Pending joins do not include approval codes.
+// Tokens are included so the TUI can copy them. Do not log a snapshot.
 type Snapshot struct {
 	Domain    string         `json:"domain"`
 	Computers []ComputerView `json:"computers"`
@@ -322,9 +337,10 @@ type Snapshot struct {
 	Portals   []PortalView   `json:"portals"`
 	Keys      []KeyView      `json:"keys"`
 	Env       []string       `json:"env"`
+	Tokens    []TokenView    `json:"tokens"`
 }
 
-// Snapshot gathers the lists the TUI shows. One call, no secret values.
+// Snapshot gathers the lists the TUI shows. Env values stay out. Tokens stay in.
 func (s *Service) Snapshot() (Snapshot, error) {
 	snap := Snapshot{Domain: s.Domain}
 	comps, err := s.ListComputers()
@@ -345,7 +361,7 @@ func (s *Service) Snapshot() (Snapshot, error) {
 	for _, p := range ports {
 		snap.Portals = append(snap.Portals, PortalView{
 			Label: portalLabel(p.Hostname, s.Domain), Host: p.Hostname,
-			Computer: p.Computer, Port: p.Port,
+			Computer: p.Computer, Port: p.Port, Private: p.Private,
 		})
 	}
 	keys, err := s.Keys()
@@ -367,6 +383,11 @@ func (s *Service) Snapshot() (Snapshot, error) {
 	if snap.Keys == nil {
 		snap.Keys = []KeyView{}
 	}
+	tokens, err := s.Tokens()
+	if err != nil {
+		return snap, err
+	}
+	snap.Tokens = tokens
 	return snap, nil
 }
 
@@ -505,7 +526,7 @@ func (s *Service) CheckPortal(label string) (tunnel.PortalCheckResponse, error) 
 	return tunnel.PortalCheckResponse{Free: false, Holder: p.Computer}, nil
 }
 
-func (s *Service) AddPortal(computer, label string, port int) (tunnel.PortalAddResponse, error) {
+func (s *Service) AddPortal(computer, label string, port int, private bool) (tunnel.PortalAddResponse, error) {
 	if err := ident.Label(label); err != nil {
 		return tunnel.PortalAddResponse{}, err
 	}
@@ -516,7 +537,7 @@ func (s *Service) AddPortal(computer, label string, port int) (tunnel.PortalAddR
 		return tunnel.PortalAddResponse{}, err
 	}
 	host := ident.Hostname(label, s.Domain)
-	err := s.Store.ClaimPortal(host, computer, port)
+	err := s.Store.ClaimPortal(host, computer, port, private)
 	var held *store.HeldError
 	if errors.As(err, &held) {
 		return tunnel.PortalAddResponse{}, fmt.Errorf("%s is held by %s", label, held.Holder)
@@ -552,8 +573,9 @@ func (s *Service) ListPortals(computer string) (tunnel.PortalList, error) {
 	out := tunnel.PortalList{Portals: make([]tunnel.Portal, 0, len(list))}
 	for _, p := range list {
 		out.Portals = append(out.Portals, tunnel.Portal{
-			Label: portalLabel(p.Hostname, s.Domain),
-			Port:  p.Port,
+			Label:   portalLabel(p.Hostname, s.Domain),
+			Port:    p.Port,
+			Private: p.Private,
 		})
 	}
 	return out, nil

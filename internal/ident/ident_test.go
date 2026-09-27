@@ -30,6 +30,15 @@ func TestLabelRejectsDot(t *testing.T) {
 	if err := Label("web.other"); err == nil {
 		t.Fatal("dot should be rejected")
 	}
+	if err := Label("event"); err == nil || err.Error() != "label event is reserved" {
+		t.Fatalf("event: %v", err)
+	}
+	if err := Label("auth"); err == nil || err.Error() != "label auth is reserved" {
+		t.Fatalf("auth: %v", err)
+	}
+	if err := Computer("event"); err != nil {
+		t.Fatal("a computer may be named event")
+	}
 	if Hostname("web", "box.example.com") != "web.box.example.com" {
 		t.Fatal(Hostname("web", "box.example.com"))
 	}

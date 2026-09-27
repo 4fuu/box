@@ -184,6 +184,25 @@ func TestInitialWindowSizeErases(t *testing.T) {
 	}
 }
 
+func TestTokenStaysVisible(t *testing.T) {
+	const secret = "tokensecretTokensecretTokensecret12"
+	m := &model{
+		screen: screenTokens,
+		snap: control.Snapshot{Tokens: []control.TokenView{{
+			ID: 7, Token: secret, Comment: "door",
+			Expires: time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC),
+		}}},
+	}
+	if !strings.Contains(m.View(), secret) {
+		t.Fatalf("token hidden:\n%s", m.View())
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updated.(*model)
+	if !strings.Contains(m.View(), secret) || strings.Contains(m.View(), "Shown once") {
+		t.Fatalf("token did not stay:\n%s", m.View())
+	}
+}
+
 func TestPairSecretShownOnce(t *testing.T) {
 	const secret = "one-time-secret"
 	m := &model{
@@ -230,3 +249,7 @@ func (f *fakeBackend) DeleteEnv(_ context.Context, name string) error {
 	f.removedEnv = name
 	return nil
 }
+func (f *fakeBackend) AddToken(context.Context, string) (control.TokenView, error) {
+	return control.TokenView{}, nil
+}
+func (f *fakeBackend) RemoveToken(context.Context, int64) error { return nil }

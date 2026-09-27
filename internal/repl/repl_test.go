@@ -7,6 +7,7 @@ import (
 
 	"github.com/4fuu/box/internal/approve"
 	"github.com/4fuu/box/internal/control"
+	"github.com/4fuu/box/internal/event"
 	"github.com/4fuu/box/internal/secret"
 	"github.com/4fuu/box/internal/store"
 )
@@ -81,6 +82,45 @@ func TestExecHelp(t *testing.T) {
 	if err := r.Exec([]string{"key"}); err == nil || !strings.Contains(err.Error(), "needs a subcommand") {
 		t.Fatalf("bare key: err = %v, want needs-a-subcommand", err)
 	}
+	if !strings.Contains(all, "token add") || !strings.Contains(all, "event pub") {
+		t.Fatalf("help all missing token or event:\n%s", all)
+	}
+}
+
+func TestTokenStaysAndEventRoundTrip(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/box.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	var buf bytes.Buffer
+	r := &REPL{Out: &buf, Svc: &control.Service{Store: st, Events: event.New()}}
+	if err := r.Exec([]string{"token", "add", "--for", "2h", "door"}); err != nil {
+		t.Fatal(err)
+	}
+	first := buf.String()
+	if !strings.Contains(first, "token: ") {
+		t.Fatalf("add %q", first)
+	}
+	secret := strings.TrimSpace(strings.Split(strings.Split(first, "token: ")[1], "\n")[0])
+	buf.Reset()
+	if err := r.Exec([]string{"token", "ls"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), secret) {
+		t.Fatalf("ls hid the token:\n%s", buf.String())
+	}
+	buf.Reset()
+	if err := r.Exec([]string{"event", "pub", "door", "open"}); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	if err := r.Exec([]string{"event", "get", "--topic", "door"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "open") || !strings.Contains(buf.String(), "ssh") {
+		t.Fatalf("get %q", buf.String())
+	}
 }
 
 func TestPlainAndJSONLists(t *testing.T) {
@@ -95,7 +135,7 @@ func TestPlainAndJSONLists(t *testing.T) {
 	if err := st.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddPortal("home", "web", 3000); err != nil {
+	if _, err := svc.AddPortal("home", "web", 3000, false); err != nil {
 		t.Fatal(err)
 	}
 	const secretValue = "ghp_secret_value"

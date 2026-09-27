@@ -34,6 +34,12 @@ func ApprovalCode() (string, error) {
 	return draw(approvalAlphabet, 6)
 }
 
+// AccessToken is a server-issued token for private portals and the event API.
+// The caller prints it. It is not logged here.
+func AccessToken() (string, error) {
+	return draw(approvalAlphabet, 32)
+}
+
 // Hash is what the server stores. Pairing rows keep this, not the secret.
 func Hash(s string) string {
 	sum := sha256.Sum256([]byte(s))

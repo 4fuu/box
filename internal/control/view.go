@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/4fuu/box/internal/event"
 	"github.com/4fuu/box/internal/tunnel"
 )
 
@@ -94,6 +95,57 @@ func FormatEnv(names []string, asJSON bool) (string, error) {
 		return "", nil
 	}
 	return strings.Join(names, "\n") + "\n", nil
+}
+
+func FormatTokens(list []TokenView, asJSON bool) (string, error) {
+	if asJSON {
+		if list == nil {
+			list = []TokenView{}
+		}
+		return asJSONString(list)
+	}
+	var b bytes.Buffer
+	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tCOMMENT\tEXPIRES\tTOKEN")
+	for _, t := range list {
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", t.ID, t.Comment, formatExpiry(t.Expires), t.Token)
+	}
+	if err := w.Flush(); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func FormatEvents(list []event.Item, asJSON bool) (string, error) {
+	if asJSON {
+		if list == nil {
+			list = []event.Item{}
+		}
+		return asJSONString(struct {
+			Events []event.Item `json:"events"`
+		}{Events: list})
+	}
+	var b bytes.Buffer
+	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tTIME\tFROM\tTOPIC\tBODY")
+	for _, item := range list {
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", item.ID, item.Time.UTC().Format(time.RFC3339), item.From, item.Topic, item.Body)
+	}
+	if err := w.Flush(); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func FormatToken(t TokenView) string {
+	return fmt.Sprintf("id: %d\ntoken: %s\nexpires: %s\n", t.ID, t.Token, formatExpiry(t.Expires))
+}
+
+func formatExpiry(t time.Time) string {
+	if t.IsZero() {
+		return "none"
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 func FormatStatus(st Status, asJSON bool) (string, error) {

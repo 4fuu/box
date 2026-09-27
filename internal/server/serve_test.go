@@ -634,14 +634,26 @@ func tokenMustNotSplice(t *testing.T, addr, token string) error {
 func httpPong(conn net.Conn) {
 	defer conn.Close()
 	br := bufio.NewReader(conn)
+	saw := false
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil || line == "\r\n" {
 			break
 		}
+		low := strings.ToLower(line)
+		if strings.Contains(low, "x-box-token:") || (strings.Contains(low, "cookie:") && strings.Contains(line, "box_token")) {
+			saw = true
+		}
+		if strings.HasPrefix(low, "authorization:") && strings.Contains(low, "bearer ") {
+			saw = true
+		}
 	}
 	body := "pong"
-	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+	gate := "no"
+	if saw {
+		gate = "yes"
+	}
+	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nX-Saw-Gate: %s\r\nConnection: close\r\n\r\n%s", len(body), gate, body)
 }
 
 func serveAgentSSH(conn net.Conn, host ssh.Signer, authed chan ssh.PublicKey) {

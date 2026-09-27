@@ -3,6 +3,8 @@
 // The server opens ssh and portal streams.
 package tunnel
 
+import "time"
+
 // ProtocolVersion is the only control version this package speaks.
 const ProtocolVersion = 1
 
@@ -17,6 +19,8 @@ const (
 	OpKeys        = "keys"
 	OpEnv         = "env"
 	OpStat        = "stat"
+	OpEventPub    = "event_pub"
+	OpEventGet    = "event_get"
 )
 
 const (
@@ -56,9 +60,11 @@ type PortalCheckResponse struct {
 }
 
 // PortalAddRequest claims a label for a TCP port on the computer.
+// Private requires an access token on later HTTP requests.
 type PortalAddRequest struct {
-	Label string `json:"label"`
-	Port  int    `json:"port"`
+	Label   string `json:"label"`
+	Port    int    `json:"port"`
+	Private bool   `json:"private,omitempty"`
 }
 
 // PortalAddResponse is the public address of a claim.
@@ -75,8 +81,35 @@ type PortalRmRequest struct {
 
 // Portal is one claim.
 type Portal struct {
-	Label string `json:"label"`
-	Port  int    `json:"port"`
+	Label   string `json:"label"`
+	Port    int    `json:"port"`
+	Private bool   `json:"private,omitempty"`
+}
+
+// EventPublish is one line from a computer. The server sets From to the computer name.
+type EventPublish struct {
+	Topic string `json:"topic"`
+	Body  string `json:"body"`
+}
+
+// EventQuery asks for lines newer than Since. Topic empty means every topic.
+type EventQuery struct {
+	Since int64  `json:"since"`
+	Topic string `json:"topic,omitempty"`
+}
+
+// EventItem is one line on the control stream.
+type EventItem struct {
+	ID    int64     `json:"id"`
+	Topic string    `json:"topic"`
+	Body  string    `json:"body"`
+	From  string    `json:"from"`
+	Time  time.Time `json:"time"`
+}
+
+// EventList is the reply to event_get.
+type EventList struct {
+	Events []EventItem `json:"events"`
 }
 
 // PortalList is the computer's claims.

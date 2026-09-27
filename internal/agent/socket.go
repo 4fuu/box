@@ -106,6 +106,26 @@ func (a *agent) handleGuest(op string, body json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return nil, nil
+	case rpc.OpEventPub:
+		var req tunnel.EventPublish
+		if err := decodeBody(body, &req); err != nil {
+			return nil, err
+		}
+		var resp tunnel.EventItem
+		if err := a.call(tunnel.OpEventPub, req, &resp); err != nil {
+			return nil, err
+		}
+		return resp, nil
+	case rpc.OpEventGet:
+		var req tunnel.EventQuery
+		if err := decodeBody(body, &req); err != nil {
+			return nil, err
+		}
+		var resp tunnel.EventList
+		if err := a.call(tunnel.OpEventGet, req, &resp); err != nil {
+			return nil, err
+		}
+		return resp, nil
 	default:
 		return nil, errors.New("unsupported")
 	}

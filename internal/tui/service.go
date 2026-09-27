@@ -44,3 +44,11 @@ func (b ServiceBackend) SetEnv(_ context.Context, name, value string) (string, e
 func (b ServiceBackend) DeleteEnv(_ context.Context, name string) error {
 	return b.Svc.DeleteEnv(name)
 }
+
+func (b ServiceBackend) AddToken(_ context.Context, comment string) (control.TokenView, error) {
+	return b.Svc.AddToken(comment, 0)
+}
+
+func (b ServiceBackend) RemoveToken(_ context.Context, id int64) error {
+	return b.Svc.RemoveToken(id)
+}

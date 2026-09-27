@@ -43,7 +43,11 @@ func Image(name string) error {
 }
 
 // Label is a portal label. It cannot contain a dot, so it cannot escape the parent domain.
+// event and auth are reserved for the server's own HTTP hosts.
 func Label(name string) error {
+	if name == "event" || name == "auth" {
+		return fmt.Errorf("label %s is reserved", name)
+	}
 	if strings.Contains(name, ".") {
 		return errors.New("invalid label")
 	}

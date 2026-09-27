@@ -338,7 +338,7 @@ func TestRun(t *testing.T) {
 	if got := guestOnce(t, sock, "portal", "add", "web", "3000"); got != "http://web.box.example.com\n" {
 		t.Fatalf("add %q", got)
 	}
-	if got := guestOnce(t, sock, "portal", "ls"); got != "HOST\tPORT\nweb\t3000\n" {
+	if got := guestOnce(t, sock, "portal", "ls"); got != "HOST\tPORT\tACCESS\nweb\t3000\tpublic\n" {
 		t.Fatalf("ls %q", got)
 	}
 	if got := guestOnce(t, sock, "portal", "rm", "web"); got != "" {

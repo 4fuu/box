@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/4fuu/box/internal/agent"
 	"github.com/4fuu/box/internal/control"
+	"github.com/4fuu/box/internal/event"
 	"github.com/4fuu/box/internal/guest"
 	"github.com/4fuu/box/internal/ident"
 	"github.com/4fuu/box/internal/paths"
@@ -81,6 +83,10 @@ func Run(o Options) error {
 		return localKey(o)
 	case "env":
 		return localEnv(o)
+	case "token":
+		return localToken(o)
+	case "event":
+		return runEvent(o)
 	default:
 		fmt.Fprint(o.Stderr, hostUsage)
 		return errUsage
@@ -115,6 +121,8 @@ const hostUsage = `usage:
   box pair
   box key ls|rm
   box env ls|set|rm
+  box token add|ls|rm
+  box event pub|get
   box domain
   box portal check|add|ls|rm
 `
@@ -413,6 +421,157 @@ func localEnv(o Options) error {
 		fmt.Fprint(o.Stderr, hostUsage)
 		return errUsage
 	}
+}
+
+func runEvent(o Options) error {
+	if socketPresent(o.GuestSocket) {
+		return runGuest(o)
+	}
+	return localEvent(o)
+}
+
+func localToken(o Options) error {
+	if len(o.Args) < 2 {
+		fmt.Fprint(o.Stderr, hostUsage)
+		return errUsage
+	}
+	switch o.Args[1] {
+	case "add":
+		comment, dur, err := splitTokenAdd(o.Args[2:])
+		if err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errUsage
+		}
+		var view control.TokenView
+		req := map[string]string{"comment": comment, "for": dur}
+		if err := localCall(o, "token_add", req, &view); err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errFail
+		}
+		_, err = io.WriteString(o.Stdout, control.FormatToken(view))
+		return err
+	case "ls":
+		var list []control.TokenView
+		if err := localCall(o, "token_ls", nil, &list); err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errFail
+		}
+		text, err := control.FormatTokens(list, false)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(o.Stdout, text)
+		return err
+	case "rm":
+		if len(o.Args) != 3 {
+			fmt.Fprintln(o.Stderr, "usage: box token rm <id>")
+			return errUsage
+		}
+		id, err := strconv.ParseInt(o.Args[2], 10, 64)
+		if err != nil || id < 1 {
+			fmt.Fprintln(o.Stderr, "usage: box token rm <id>")
+			return errUsage
+		}
+		if err := localCall(o, "token_rm", map[string]int64{"id": id}, nil); err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errFail
+		}
+		return nil
+	default:
+		fmt.Fprint(o.Stderr, hostUsage)
+		return errUsage
+	}
+}
+
+func splitTokenAdd(args []string) (comment, dur string, err error) {
+	var words []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--for" {
+			if i+1 >= len(args) {
+				return "", "", errors.New("usage: box token add [--for 12h] [comment]")
+			}
+			i++
+			dur = args[i]
+			continue
+		}
+		words = append(words, args[i])
+	}
+	return strings.Join(words, " "), dur, nil
+}
+
+func localEvent(o Options) error {
+	if len(o.Args) < 2 {
+		fmt.Fprint(o.Stderr, hostUsage)
+		return errUsage
+	}
+	switch o.Args[1] {
+	case "pub":
+		if len(o.Args) < 4 {
+			fmt.Fprintln(o.Stderr, "usage: box event pub <topic> <text>")
+			return errUsage
+		}
+		var item struct {
+			ID int64 `json:"id"`
+		}
+		req := map[string]string{"topic": o.Args[2], "body": strings.Join(o.Args[3:], " ")}
+		if err := localCall(o, "event_pub", req, &item); err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errFail
+		}
+		fmt.Fprintln(o.Stdout, item.ID)
+		return nil
+	case "get":
+		since, topic, err := eventFlags(o.Args[2:])
+		if err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errUsage
+		}
+		var resp struct {
+			Events []event.Item `json:"events"`
+		}
+		req := map[string]any{"since": since, "topic": topic}
+		if err := localCall(o, "event_get", req, &resp); err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errFail
+		}
+		text, err := control.FormatEvents(resp.Events, false)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(o.Stdout, text)
+		return err
+	default:
+		fmt.Fprint(o.Stderr, hostUsage)
+		return errUsage
+	}
+}
+
+func eventFlags(args []string) (int64, string, error) {
+	var since int64
+	var topic string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--since":
+			if i+1 >= len(args) {
+				return 0, "", errors.New("missing value for --since")
+			}
+			i++
+			n, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || n < 0 {
+				return 0, "", errors.New("invalid since")
+			}
+			since = n
+		case "--topic":
+			if i+1 >= len(args) {
+				return 0, "", errors.New("missing value for --topic")
+			}
+			i++
+			topic = args[i]
+		default:
+			return 0, "", errors.New("usage: box event get [--since n] [--topic name]")
+		}
+	}
+	return since, topic, nil
 }
 
 func localCall(o Options, op string, req, resp any) error {

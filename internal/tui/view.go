@@ -25,6 +25,8 @@ func (m *model) View() string {
 		b.WriteString(m.viewKeys())
 	case screenEnv:
 		b.WriteString(m.viewEnv())
+	case screenTokens:
+		b.WriteString(m.viewTokens())
 	default:
 		b.WriteString(m.viewComputers())
 	}
@@ -53,7 +55,7 @@ func (m *model) viewHeader() string {
 	}
 	left := m.styles.title.Render(title)
 	var tabs []string
-	names := []string{"computers", "pending", "portals", "keys", "env"}
+	names := []string{"computers", "pending", "portals", "keys", "env", "tokens"}
 	for i, name := range names {
 		label := name
 		if i == int(screenPending) && len(m.snap.Pending) > 0 {
@@ -114,9 +116,13 @@ func (m *model) viewPending() string {
 func (m *model) viewPortals() string {
 	rows := make([][]string, 0, len(m.snap.Portals))
 	for _, p := range m.snap.Portals {
-		rows = append(rows, []string{p.Label, p.Computer, fmt.Sprintf("%d", p.Port), p.Host})
+		access := "public"
+		if p.Private {
+			access = "private"
+		}
+		rows = append(rows, []string{p.Label, p.Computer, fmt.Sprintf("%d", p.Port), access, p.Host})
 	}
-	return m.table([]string{"LABEL", "COMPUTER", "PORT", "HOST"}, rows)
+	return m.table([]string{"LABEL", "COMPUTER", "PORT", "ACCESS", "HOST"}, rows)
 }
 
 func (m *model) viewKeys() string {
@@ -143,6 +149,23 @@ func (m *model) viewEnv() string {
 	return b.String()
 }
 
+func (m *model) viewTokens() string {
+	rows := make([][]string, 0, len(m.snap.Tokens))
+	for _, t := range m.snap.Tokens {
+		when := "none"
+		if !t.Expires.IsZero() {
+			when = t.Expires.UTC().Format(time.RFC3339)
+		}
+		rows = append(rows, []string{fmt.Sprintf("%d", t.ID), t.Comment, when, t.Token})
+	}
+	var b strings.Builder
+	b.WriteString(m.table([]string{"ID", "COMMENT", "EXPIRES", "TOKEN"}, rows))
+	if tok, ok := m.tokenAtCursor(); ok {
+		b.WriteString("token: " + tok.Token + "\n")
+	}
+	return b.String()
+}
+
 func (m *model) viewForm() string {
 	switch m.mode {
 	case modeRemove:
@@ -158,6 +181,10 @@ func (m *model) viewForm() string {
 		return "remove key " + m.target + "? y/n"
 	case modeEnvRm:
 		return "remove env " + m.target + "? y/n"
+	case modeTokenAdd:
+		return "token add\ncomment: " + m.input
+	case modeTokenRm:
+		return "remove token " + m.target + "? y/n"
 	default:
 		return ""
 	}
@@ -182,7 +209,7 @@ func (m *model) hint() string {
 	if m.mode != modeNormal && m.mode != modePair {
 		return "enter confirms · esc cancels"
 	}
-	base := "1-5 screens · j/k move · p pair · q quit"
+	base := "1-6 screens · j/k move · p pair · q quit"
 	switch m.screen {
 	case screenComputers:
 		extra := " · r remove · n rename"
@@ -196,6 +223,8 @@ func (m *model) hint() string {
 		return base + " · x remove key"
 	case screenEnv:
 		return base + " · a set · x remove"
+	case screenTokens:
+		return base + " · a add · x remove"
 	default:
 		return base
 	}

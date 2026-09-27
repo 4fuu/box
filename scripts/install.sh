@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install box on a Linux server or a Linux deploy node.
+# Install box on a Linux server or a Linux computer.
 # Run it in a terminal. Piping curl into sh cannot answer the prompts.
 #
 #   curl -fsSL -o install.sh https://raw.githubusercontent.com/4fuu/box/main/scripts/install.sh
@@ -7,21 +7,17 @@
 #
 # Non-interactive:
 #   BOX_LANG=en BOX_ROLE=server BOX_DOMAIN=box.example.com BOX_ASSUME_YES=1 sh install.sh
+#   BOX_LANG=en BOX_ROLE=computer BOX_DOMAIN=box.example.com BOX_ASSUME_YES=1 sh install.sh
 # BOX_START defaults to 0, so services are not started unless BOX_START=1.
 # BOX_DRY_RUN=1 prints the plan and does not install anything.
 set -eu
 
 repo=${BOX_REPOSITORY:-4fuu/box}
-frp_version=0.71.0
 prefix=${BOX_PREFIX:-/usr/local}
 lang=${BOX_LANG:-}
 role=${BOX_ROLE:-}
 version=${BOX_VERSION-}
 domain=${BOX_DOMAIN:-}
-join=${BOX_JOIN:-}
-server_addr=${BOX_SERVER:-}
-code=${BOX_CODE:-}
-node_name=${BOX_NAME:-}
 use_systemd=${BOX_SYSTEMD:-}
 start_now=${BOX_START:-}
 configured=${BOX_CONFIGURED:-0}
@@ -55,17 +51,14 @@ say_en() {
         bad_arch) printf '%s\n' "Unsupported architecture: $2" ;;
         need_tty) printf '%s\n' "Run this script in a terminal, or set BOX_LANG and BOX_ROLE." ;;
         role_prompt) printf '%s\n' "What should this machine run?" ;;
-        role_server) printf '%s\n' "  1) Server — SSH entry, HTTP routing, and frps" ;;
-        role_node) printf '%s\n' "  2) Deploy node — Podman and frpc" ;;
+        role_server) printf '%s\n' "  1) Server — SSH, HTTP, and QUIC" ;;
+        role_computer) printf '%s\n' "  2) Computer — join a server and run the agent" ;;
         version_prompt) printf '%s\n' "Release (empty for latest):" ;;
         bad_version) printf '%s\n' "Version must look like 2026.924.0" ;;
         domain_prompt) printf '%s\n' "Parent domain for this server:" ;;
         bad_domain) printf '%s\n' "Enter a domain such as box.example.com" ;;
-        join_prompt) printf '%s\n' "Join a server now? [y/N]" ;;
-        server_prompt) printf '%s\n' "frps address (host:7000):" ;;
-        code_prompt) printf '%s\n' "Pairing code:" ;;
-        name_prompt) printf '%s\n' "Node name:" ;;
-        bad_name) printf '%s\n' "Enter a lowercase node name." ;;
+        join_host_prompt) printf '%s\n' "Server to join (host or host:port):" ;;
+        bad_host) printf '%s\n' "Enter a host such as box.example.com or box.example.com:22" ;;
         systemd_prompt) printf '%s\n' "Install systemd units? [Y/n]" ;;
         start_prompt) printf '%s\n' "Start services now? [y/N]" ;;
         proceed_prompt) printf '%s\n' "Install with this plan? [y/N]" ;;
@@ -73,11 +66,11 @@ say_en() {
         invalid_choice) printf '%s\n' "Choose 1 or 2." ;;
         plan) printf '%s\n' "Plan" ;;
         plan_server) printf '%s\n' "Role: server" ;;
-        plan_node) printf '%s\n' "Role: deploy node" ;;
+        plan_computer) printf '%s\n' "Role: computer" ;;
         plan_version) printf '%s\n' "Release: $2" ;;
         plan_domain) printf '%s\n' "Domain: $2" ;;
-        plan_join) printf '%s\n' "Join: $2 as $3" ;;
-        plan_no_join) printf '%s\n' "Join: later" ;;
+        plan_join) printf '%s\n' "Join: $2" ;;
+        plan_ports) printf '%s\n' "Ports: SSH :22, HTTP :80, QUIC :7443" ;;
         plan_systemd) printf '%s\n' "systemd: $2" ;;
         plan_start) printf '%s\n' "Start now: $2" ;;
         yes) printf '%s' "yes" ;;
@@ -85,17 +78,18 @@ say_en() {
         packages) printf '%s\n' "Installing packages." ;;
         no_packages) printf '%s\n' "No supported package manager (apt-get, dnf, or pacman)." ;;
         installing_box) printf '%s\n' "Installing box $2." ;;
-        installing_frp) printf '%s\n' "Installing frp $2 ($3)." ;;
         checksum) printf '%s\n' "Checksum verification failed for $2" ;;
         missing_sum) printf '%s\n' "SHA256SUMS has no entry for $2" ;;
-        cgroup) printf '%s\n' "A deploy node needs cgroup v2. /sys/fs/cgroup is not cgroup2fs." ;;
         units) printf '%s\n' "Installed systemd units." ;;
         started) printf '%s\n' "Started services." ;;
-        password_hint) printf '%s\n' "The one-time password is in the server journal: journalctl -u box.service -n 30" ;;
-        server_next) printf '%s\n' "Start later with: systemctl enable --now box.service box-frps.service" ;;
-        node_next) printf '%s\n' "Join later, as root, with: box node join --server <host:7000> --code <code> --name <name>" ;;
-        node_pull) printf '%s\n' "After the node is online, pull the base image before creating a computer: image pull base" ;;
-        image_ref) printf '%s\n' "Published image: ghcr.io/$2:<version>" ;;
+        server_ports) printf '%s\n' "Open three ports in the firewall: SSH (default :22), HTTP (default :80), and QUIC (default :7443)." ;;
+        server_run) printf '%s\n' "Start the server: box serve --domain $2" ;;
+        server_unit) printf '%s\n' "Or enable the unit: systemctl enable --now box.service" ;;
+        password_hint) printf '%s\n' "The first start prints a one-time password. With the systemd unit it is in: journalctl -u box.service -n 30" ;;
+        joining) printf '%s\n' "Joining $2. Approve the code at the server." ;;
+        agent_run) printf '%s\n' "Run the agent: box agent" ;;
+        agent_unit) printf '%s\n' "Enable the user unit: systemctl --user enable --now box-agent.service" ;;
+        agent_linger) printf '%s\n' "To start at boot without a login: loginctl enable-linger" ;;
         installed) printf '%s\n' "box $2 is installed at $3/bin/box" ;;
         dry) printf '%s\n' "Dry run. Nothing was installed." ;;
         *) printf '%s\n' "$1" ;;
@@ -108,17 +102,14 @@ say_zh() {
         bad_arch) printf '%s\n' "不支持的架构：$2" ;;
         need_tty) printf '%s\n' "请在终端里运行此脚本，或设置 BOX_LANG 和 BOX_ROLE。" ;;
         role_prompt) printf '%s\n' "这台机器要担任什么角色？" ;;
-        role_server) printf '%s\n' "  1) 服务器 — SSH 入口、HTTP 转发，以及 frps" ;;
-        role_node) printf '%s\n' "  2) 部署节点 — Podman 和 frpc" ;;
+        role_server) printf '%s\n' "  1) 服务器 — SSH、HTTP 和 QUIC" ;;
+        role_computer) printf '%s\n' "  2) 计算机 — 加入服务器并运行 agent" ;;
         version_prompt) printf '%s\n' "版本（留空表示最新）：" ;;
         bad_version) printf '%s\n' "版本格式应为 2026.924.0" ;;
         domain_prompt) printf '%s\n' "服务器的父域名：" ;;
         bad_domain) printf '%s\n' "请输入类似 box.example.com 的域名" ;;
-        join_prompt) printf '%s\n' "现在就加入一台服务器？[y/N]" ;;
-        server_prompt) printf '%s\n' "frps 地址（host:7000）：" ;;
-        code_prompt) printf '%s\n' "配对码：" ;;
-        name_prompt) printf '%s\n' "节点名称：" ;;
-        bad_name) printf '%s\n' "请输入小写的节点名称。" ;;
+        join_host_prompt) printf '%s\n' "要加入的服务器（域名或 域名:端口）：" ;;
+        bad_host) printf '%s\n' "请输入域名，或域名:端口，例如 box.example.com:22" ;;
         systemd_prompt) printf '%s\n' "安装 systemd 单元？[Y/n]" ;;
         start_prompt) printf '%s\n' "现在启动服务？[y/N]" ;;
         proceed_prompt) printf '%s\n' "按此计划安装？[y/N]" ;;
@@ -126,11 +117,11 @@ say_zh() {
         invalid_choice) printf '%s\n' "请选择 1 或 2。" ;;
         plan) printf '%s\n' "计划" ;;
         plan_server) printf '%s\n' "角色：服务器" ;;
-        plan_node) printf '%s\n' "角色：部署节点" ;;
+        plan_computer) printf '%s\n' "角色：计算机" ;;
         plan_version) printf '%s\n' "版本：$2" ;;
         plan_domain) printf '%s\n' "域名：$2" ;;
-        plan_join) printf '%s\n' "加入：$3 @ $2" ;;
-        plan_no_join) printf '%s\n' "加入：稍后再做" ;;
+        plan_join) printf '%s\n' "加入：$2" ;;
+        plan_ports) printf '%s\n' "端口：SSH :22、HTTP :80、QUIC :7443" ;;
         plan_systemd) printf '%s\n' "systemd：$2" ;;
         plan_start) printf '%s\n' "立即启动：$2" ;;
         yes) printf '%s' "是" ;;
@@ -138,17 +129,18 @@ say_zh() {
         packages) printf '%s\n' "正在安装软件包。" ;;
         no_packages) printf '%s\n' "没有可用的包管理器（apt-get、dnf 或 pacman）。" ;;
         installing_box) printf '%s\n' "正在安装 box $2。" ;;
-        installing_frp) printf '%s\n' "正在安装 frp $2（$3）。" ;;
         checksum) printf '%s\n' "$2 的校验和验证失败" ;;
         missing_sum) printf '%s\n' "SHA256SUMS 里没有 $2" ;;
-        cgroup) printf '%s\n' "部署节点需要 cgroup v2。/sys/fs/cgroup 不是 cgroup2fs。" ;;
         units) printf '%s\n' "已安装 systemd 单元。" ;;
         started) printf '%s\n' "已启动服务。" ;;
-        password_hint) printf '%s\n' "一次性密码在服务器日志里：journalctl -u box.service -n 30" ;;
-        server_next) printf '%s\n' "稍后启动：systemctl enable --now box.service box-frps.service" ;;
-        node_next) printf '%s\n' "稍后以 root 加入：box node join --server <host:7000> --code <配对码> --name <名称>" ;;
-        node_pull) printf '%s\n' "节点在线之后，先拉取基础镜像再创建计算机：image pull base" ;;
-        image_ref) printf '%s\n' "已发布的镜像：ghcr.io/$2:<版本>" ;;
+        server_ports) printf '%s\n' "请在防火墙上放行三个端口：SSH（默认 :22）、HTTP（默认 :80）和 QUIC（默认 :7443）。" ;;
+        server_run) printf '%s\n' "启动服务器：box serve --domain $2" ;;
+        server_unit) printf '%s\n' "或启用单元：systemctl enable --now box.service" ;;
+        password_hint) printf '%s\n' "第一次启动会打印一次性密码。若使用 systemd，它在：journalctl -u box.service -n 30" ;;
+        joining) printf '%s\n' "正在加入 $2。请在服务器上批准验证码。" ;;
+        agent_run) printf '%s\n' "运行代理：box agent" ;;
+        agent_unit) printf '%s\n' "启用用户单元：systemctl --user enable --now box-agent.service" ;;
+        agent_linger) printf '%s\n' "若要在未登录时开机启动：loginctl enable-linger" ;;
         installed) printf '%s\n' "box $2 已安装到 $3/bin/box" ;;
         dry) printf '%s\n' "这是演练，没有安装任何东西。" ;;
         *) printf '%s\n' "$1" ;;
@@ -204,18 +196,18 @@ choose_lang() {
 choose_role() {
     if [ -n "$role" ]; then
         case $role in
-            server|node) return 0 ;;
-            *) fail "BOX_ROLE must be server or node" ;;
+            server|computer) return 0 ;;
+            *) fail "BOX_ROLE must be server or computer" ;;
         esac
     fi
     say role_prompt
     say role_server
-    say role_node
+    say role_computer
     printf '%s' "> "
     choice=$(read_line "")
     case $choice in
         1|server) role=server ;;
-        2|node) role=node ;;
+        2|computer) role=computer ;;
         *) say invalid_choice >&2; exit 1 ;;
     esac
 }
@@ -244,59 +236,47 @@ valid_domain() {
         && ! printf '%s\n' "$1" | grep -q '\.\.'
 }
 
-valid_name() {
-    printf '%s\n' "$1" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+valid_join() {
+    target=$1
+    case $target in
+        *:*)
+            host=${target%:*}
+            port=${target##*:}
+            case $port in
+                *[!0-9]*|'') return 1 ;;
+            esac
+            case $host in
+                *:*) return 1 ;;
+            esac
+            valid_domain "$host"
+            ;;
+        *)
+            valid_domain "$target"
+            ;;
+    esac
 }
 
 choose_details() {
-    if [ "$role" = server ]; then
-        if [ -z "$domain" ]; then
-            if [ "$assume" = 1 ]; then
-                fail "BOX_DOMAIN is required for a server"
-            fi
-            say domain_prompt
-            domain=$(read_line "")
+    if [ -z "$domain" ]; then
+        if [ "$assume" = 1 ]; then
+            fail "BOX_DOMAIN is required"
         fi
-        domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
-        domain=${domain%.}
+        if [ "$role" = server ]; then
+            say domain_prompt
+        else
+            say join_host_prompt
+        fi
+        domain=$(read_line "")
+    fi
+    domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
+    domain=${domain%.}
+    if [ "$role" = server ]; then
         valid_domain "$domain" || fail "$(say bad_domain)"
     else
-        if [ -z "$join" ]; then
-            if [ "$assume" = 1 ]; then
-                join=0
-            else
-                say join_prompt
-                answer=$(read_line "")
-                if is_yes "$answer"; then
-                    join=1
-                else
-                    join=0
-                fi
-            fi
-        fi
-        if [ "$join" = 1 ]; then
-            if [ -z "$server_addr" ]; then
-                say server_prompt
-                server_addr=$(read_line "")
-            fi
-            if [ -z "$code" ]; then
-                say code_prompt
-                code=$(read_line "")
-            fi
-            if [ -z "$node_name" ]; then
-                say name_prompt
-                node_name=$(read_line "")
-            fi
-            if [ -z "$server_addr" ] || [ -z "$code" ]; then
-                fail "$(say bad_name)"
-            fi
-            valid_name "$node_name" || fail "$(say bad_name)"
-        fi
+        valid_join "$domain" || fail "$(say bad_host)"
     fi
     if [ -z "$use_systemd" ]; then
-        if [ "$role" = node ] && [ "$join" != 1 ]; then
-            use_systemd=0
-        elif [ "$assume" = 1 ]; then
+        if [ "$assume" = 1 ]; then
             use_systemd=0
         else
             say systemd_prompt
@@ -336,13 +316,10 @@ show_plan() {
     if [ "$role" = server ]; then
         say plan_server
         say plan_domain "$domain"
+        say plan_ports
     else
-        say plan_node
-        if [ "$join" = 1 ]; then
-            say plan_join "$server_addr" "$node_name"
-        else
-            say plan_no_join
-        fi
+        say plan_computer
+        say plan_join "$domain"
     fi
     shown=$version
     if [ -z "$shown" ]; then
@@ -374,38 +351,23 @@ arch_of() {
     esac
 }
 
-frp_sha() {
-    case $1 in
-        amd64) printf '%s\n' "84f27e39f11169f7adcef8e8b70c9329de17747b1f14dad9fb95eef5682ea716" ;;
-        arm64) printf '%s\n' "f33c293c275d8fc68c654b6fba8f10b2551d6463d09a9fc9cffb7227eae82266" ;;
-        *) return 1 ;;
-    esac
-}
-
 need_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
 
 install_packages() {
-    node_pkgs=
-    if [ "$role" = node ]; then
-        node_pkgs=podman
-    fi
     say packages
     if [ "$dry" = 1 ]; then
         return 0
     fi
     if need_cmd dnf; then
-        # shellcheck disable=SC2086
-        dnf install -y curl tar ca-certificates $node_pkgs
+        dnf install -y curl tar ca-certificates
     elif need_cmd apt-get; then
         export DEBIAN_FRONTEND=noninteractive
         apt-get update
-        # shellcheck disable=SC2086
-        apt-get install -y curl tar ca-certificates $node_pkgs
+        apt-get install -y curl tar ca-certificates
     elif need_cmd pacman; then
-        # shellcheck disable=SC2086
-        pacman -Sy --noconfirm curl tar ca-certificates $node_pkgs
+        pacman -Sy --noconfirm curl tar ca-certificates
     else
         say no_packages >&2
         exit 1
@@ -525,53 +487,10 @@ install_box() {
     install -m 0755 "$tmp_dir/box/box" "$prefix/bin/box"
 }
 
-install_frp() {
-    arch=$1
-    tool=frpc
-    if [ "$role" = server ]; then
-        tool=frps
-    fi
-    say installing_frp "$frp_version" "$tool"
-    if [ "$dry" = 1 ]; then
-        return 0
-    fi
-    name="frp_${frp_version}_linux_${arch}"
-    asset="${name}.tar.gz"
-    url="https://github.com/fatedier/frp/releases/download/v${frp_version}/$asset"
-    download "$url" "$tmp_dir/$asset"
-    actual=$(sha256_file "$tmp_dir/$asset")
-    expected=$(frp_sha "$arch")
-    [ "$actual" = "$expected" ] || fail "$(say checksum "$asset")"
-    tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
-    install -m 0755 "$tmp_dir/$name/$tool" "$prefix/bin/$tool"
-}
-
-check_cgroup() {
-    if [ "$role" != node ] || [ "$dry" = 1 ]; then
-        return 0
-    fi
-    fstype=$(stat -fc %T /sys/fs/cgroup 2>/dev/null || printf '%s' unknown)
-    if [ "$fstype" != cgroup2fs ]; then
-        say cgroup >&2
-        exit 1
-    fi
-}
-
-write_units() {
-    if [ "$use_systemd" != 1 ]; then
-        return 0
-    fi
-    if [ "$dry" = 1 ]; then
-        say units
-        return 0
-    fi
-    if ! need_cmd systemctl; then
-        return 0
-    fi
+write_server_unit() {
     unit_dir=/etc/systemd/system
     mkdir -p "$unit_dir"
-    if [ "$role" = server ]; then
-        cat > "$unit_dir/box.service" <<EOF
+    cat > "$unit_dir/box.service" <<EOF
 [Unit]
 Description=box server
 After=network-online.target
@@ -585,61 +504,107 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
-        cat > "$unit_dir/box-frps.service" <<EOF
-[Unit]
-Description=box frps
-After=box.service
-Requires=box.service
+}
 
-[Service]
-ExecStartPre=/bin/sh -c 'test -f /var/lib/box/frps.toml'
-ExecStart=$prefix/bin/frps -c /var/lib/box/frps.toml
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    else
-        cat > "$unit_dir/box-node.service" <<EOF
+write_agent_unit() {
+    unit_dir=/etc/systemd/user
+    mkdir -p "$unit_dir"
+    cat > "$unit_dir/box-agent.service" <<EOF
 [Unit]
-Description=box deploy node
+Description=box agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=$prefix/bin/box node
+ExecStart=$prefix/bin/box agent
 Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 EOF
+}
+
+enable_user_agent() {
+    if [ "$start_now" != 1 ]; then
+        say agent_unit
+        say agent_linger
+        return 0
     fi
-    systemctl daemon-reload
-    say units
-    if [ "$start_now" = 1 ]; then
-        if [ "$role" = server ]; then
-            systemctl enable --now box.service box-frps.service
+    user=${SUDO_USER:-}
+    if [ -z "$user" ] || [ "$user" = root ]; then
+        if [ "$(id -u)" -ne 0 ]; then
+            systemctl --user daemon-reload
+            systemctl --user enable --now box-agent.service
+            say started
+            return 0
+        fi
+        say agent_unit
+        say agent_linger
+        return 0
+    fi
+    uid=$(id -u "$user")
+    rundir=/run/user/$uid
+    if [ -d "$rundir" ]; then
+        if sudo -u "$user" \
+            XDG_RUNTIME_DIR="$rundir" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$rundir/bus" \
+            systemctl --user daemon-reload \
+            && sudo -u "$user" \
+            XDG_RUNTIME_DIR="$rundir" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$rundir/bus" \
+            systemctl --user enable --now box-agent.service
+        then
+            say started
+            return 0
+        fi
+    fi
+    say agent_unit
+    say agent_linger
+}
+
+write_units() {
+    if [ "$use_systemd" != 1 ]; then
+        return 0
+    fi
+    if [ "$dry" = 1 ]; then
+        say units
+        return 0
+    fi
+    if ! need_cmd systemctl; then
+        return 0
+    fi
+    if [ "$role" = server ]; then
+        write_server_unit
+        systemctl daemon-reload
+        say units
+        if [ "$start_now" = 1 ]; then
+            systemctl enable --now box.service
             say started
             say password_hint
         else
-            systemctl enable --now box-node.service
-            say started
+            say server_unit
         fi
-    elif [ "$role" = server ]; then
-        say server_next
+    else
+        write_agent_unit
+        say units
+        enable_user_agent
     fi
 }
 
-join_node() {
-    if [ "$role" != node ] || [ "$join" != 1 ]; then
+join_computer() {
+    if [ "$role" != computer ]; then
         return 0
     fi
     if [ "$dry" = 1 ]; then
         return 0
     fi
-    "$prefix/bin/box" node join --server "$server_addr" --code "$code" --name "$node_name"
+    say joining "$domain"
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        sudo -u "$SUDO_USER" -- "$prefix/bin/box" join "$domain"
+        return 0
+    fi
+    "$prefix/bin/box" join "$domain"
 }
 
 become_root() {
@@ -659,10 +624,6 @@ become_root() {
         BOX_ROLE="$role" \
         BOX_VERSION="$version" \
         BOX_DOMAIN="$domain" \
-        BOX_JOIN="$join" \
-        BOX_SERVER="$server_addr" \
-        BOX_CODE="$code" \
-        BOX_NAME="$node_name" \
         BOX_SYSTEMD="$use_systemd" \
         BOX_START="$start_now" \
         BOX_REPOSITORY="$repo" \
@@ -686,6 +647,22 @@ configure() {
     confirm_plan
 }
 
+finish_messages() {
+    if [ "$role" = server ]; then
+        say server_ports
+        say server_run "$domain"
+        if [ "$start_now" != 1 ]; then
+            say password_hint
+        fi
+        return 0
+    fi
+    say agent_run
+    if [ "$use_systemd" != 1 ]; then
+        say agent_unit
+        say agent_linger
+    fi
+}
+
 main() {
     if [ "$configured" != 1 ]; then
         configure
@@ -700,24 +677,13 @@ main() {
     fi
     arch=$(arch_of)
     install_packages
-    check_cgroup
     tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/box-install.XXXXXX")
     resolve_version
     install_box "$arch"
-    install_frp "$arch"
-    join_node
+    join_computer
     write_units
     say installed "$version" "$prefix"
-    if [ "$role" = node ]; then
-        say node_pull
-        say image_ref "$repo"
-        if [ "$join" != 1 ]; then
-            say node_next
-        fi
-    elif [ "$start_now" != 1 ]; then
-        say server_next
-        say password_hint
-    fi
+    finish_messages
 }
 
 main

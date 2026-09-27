@@ -741,6 +741,13 @@ func setSSHDial(t *testing.T, addr string) {
 	t.Cleanup(func() { sshDialAddr = prev })
 }
 
+func setSSHHost(t *testing.T, path string) {
+	t.Helper()
+	prev := sshHostPub
+	sshHostPub = path
+	t.Cleanup(func() { sshHostPub = prev })
+}
+
 func setSSHDPath(t *testing.T, path string) {
 	t.Helper()
 	prev := sshdConfigPath

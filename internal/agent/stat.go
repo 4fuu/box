@@ -9,8 +9,13 @@ import (
 	"github.com/4fuu/box/internal/tunnel"
 )
 
+// sshHostPub is the sshd host public key reported at hello. Tests point it
+// at a key they can present: the real host key is not available to a
+// loopback sshd, and an empty key makes the splice fail closed.
+var sshHostPub = "/etc/ssh/ssh_host_ed25519_key.pub"
+
 func hostKey() string {
-	b, err := os.ReadFile("/etc/ssh/ssh_host_ed25519_key.pub")
+	b, err := os.ReadFile(sshHostPub)
 	if err != nil {
 		return ""
 	}

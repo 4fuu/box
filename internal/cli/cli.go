@@ -1,9 +1,8 @@
-// Package cli is the box command line: serve, node, the guest, and the localhost client.
+// Package cli is the box command line: serve, join, the agent, and the localhost client.
 package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,12 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/4fuu/box/internal/agent"
 	"github.com/4fuu/box/internal/control"
 	"github.com/4fuu/box/internal/guest"
-	"github.com/4fuu/box/internal/node"
+	"github.com/4fuu/box/internal/ident"
 	"github.com/4fuu/box/internal/paths"
 	"github.com/4fuu/box/internal/rpc"
-	"github.com/4fuu/box/internal/runtime"
 	"github.com/4fuu/box/internal/server"
 )
 
@@ -49,7 +48,9 @@ func Run(o Options) error {
 		o.DataDir = paths.DataDir
 	}
 	if o.GuestSocket == "" {
-		o.GuestSocket = paths.GuestSocket
+		if dir, err := stateDir(); err == nil {
+			o.GuestSocket = filepath.Join(dir, "agent.sock")
+		}
 	}
 	if o.ServerSocket == "" {
 		o.ServerSocket = filepath.Join(o.DataDir, "box.sock")
@@ -57,34 +58,6 @@ func Run(o Options) error {
 	if o.Context == nil {
 		o.Context = context.Background()
 	}
-	if inGuest(o.GuestSocket) {
-		return runGuest(o)
-	}
-	return runHost(o)
-}
-
-func inGuest(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.Mode()&os.ModeSocket != 0
-}
-
-func runGuest(o Options) error {
-	if len(o.Args) == 0 {
-		fmt.Fprintln(o.Stderr, "usage: box domain | box portal check|add|ls|rm")
-		return errUsage
-	}
-	if o.Args[0] == "serve" || o.Args[0] == "node" {
-		fmt.Fprintf(o.Stderr, "box %s is not available in a computer\n", o.Args[0])
-		return errFail
-	}
-	if err := guest.Run(o.GuestSocket, o.Args, o.Stdout, o.Stderr); err != nil {
-		fmt.Fprintln(o.Stderr, err.Error())
-		return errFail
-	}
-	return nil
-}
-
-func runHost(o Options) error {
 	if len(o.Args) == 0 {
 		if !socketUp(o.ServerSocket) {
 			fmt.Fprint(o.Stderr, hostUsage)
@@ -95,34 +68,54 @@ func runHost(o Options) error {
 	switch o.Args[0] {
 	case "serve":
 		return serve(o)
-	case "node":
-		return runNode(o)
+	case "join":
+		return join(o)
+	case "agent":
+		return runAgent(o)
 	case "domain", "portal":
-		fmt.Fprintln(o.Stderr, "domain is read inside a computer")
-		return errFail
+		return runGuest(o)
 	case "pair":
 		return localPair(o, "pair", "client")
 	case "key":
 		return localKey(o)
 	case "env":
 		return localEnv(o)
-	case "status":
-		return localStatus(o)
 	default:
 		fmt.Fprint(o.Stderr, hostUsage)
 		return errUsage
 	}
 }
 
+func runGuest(o Options) error {
+	if !socketPresent(o.GuestSocket) {
+		fmt.Fprintln(o.Stderr, "these commands run on a computer")
+		return errFail
+	}
+	if err := guest.Run(o.GuestSocket, o.Args, o.Stdout, o.Stderr); err != nil {
+		fmt.Fprintln(o.Stderr, err.Error())
+		return errFail
+	}
+	return nil
+}
+
+func socketPresent(path string) bool {
+	if path == "" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode()&os.ModeSocket != 0
+}
+
 const hostUsage = `usage:
   box
   box serve --domain <domain> [--ssh-addr addr] [--http-addr addr] [--quic-addr addr]
+  box join <host> [--name name] [--user name]
+  box agent
   box pair
-  box node
-  box node join --server <host:port> --code <code> --name <name>
   box key ls|rm
   box env ls|set|rm
-  box status
+  box domain
+  box portal check|add|ls|rm
 `
 
 func serve(o Options) error {
@@ -165,80 +158,129 @@ func serve(o Options) error {
 	return srv.Close()
 }
 
-func runNode(o Options) error {
-	args := o.Args[1:]
-	if len(args) == 0 {
-		return runNodeServe(o)
-	}
-	switch args[0] {
-	case "pair":
-		fmt.Fprintln(o.Stderr, "node pairing is gone")
-		return errFail
-	case "join":
-		return nodeJoin(o, args[1:])
-	default:
+func join(o Options) error {
+	host, name, userName, ok := parseJoinArgs(o.Args[1:])
+	if !ok {
 		fmt.Fprint(o.Stderr, hostUsage)
 		return errUsage
 	}
-}
-
-func nodeJoin(o Options, args []string) error {
-	flags := map[string]string{}
-	for i := 0; i < len(args); i++ {
-		if !strings.HasPrefix(args[i], "--") || i+1 >= len(args) {
-			fmt.Fprintln(o.Stderr, "usage: box node join --server <host:port> --code <code> --name <name>")
-			return errUsage
+	if name == "" {
+		hostName, err := os.Hostname()
+		if err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errFail
 		}
-		flags[strings.TrimPrefix(args[i], "--")] = args[i+1]
-		i++
-	}
-	if flags["server"] == "" || flags["code"] == "" || flags["name"] == "" {
-		fmt.Fprintln(o.Stderr, "usage: box node join --server <host:port> --code <code> --name <name>")
-		return errUsage
-	}
-	host, _, err := net.SplitHostPort(flags["server"])
-	if err != nil {
-		host = flags["server"]
-	}
-	apiBase := "http://" + host + "/box/node/v1"
-	if err := node.Join(o.Context, apiBase, flags["server"], flags["code"], flags["name"], o.DataDir); err != nil {
+		name, err = computerNameFromHost(hostName)
+		if err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errFail
+		}
+	} else if err := ident.Computer(name); err != nil {
 		fmt.Fprintln(o.Stderr, err.Error())
 		return errFail
 	}
-	return runNodeServe(o)
-}
-
-func runNodeServe(o Options) error {
-	host := nodeAPIHost(o.DataDir)
-	ctrl, err := node.Open(o.DataDir, host)
+	dir, err := stateDir()
 	if err != nil {
 		fmt.Fprintln(o.Stderr, err.Error())
 		return errFail
 	}
-	ctrl.Runtime = &runtime.Podman{}
-	if err := ctrl.Serve(o.Context); err != nil {
+	if err := agent.Join(o.Context, host, name, userName, dir, o.Stdout); err != nil {
+		if errors.Is(err, agent.ErrRejected) {
+			fmt.Fprintln(o.Stderr, "rejected")
+			return errFail
+		}
 		fmt.Fprintln(o.Stderr, err.Error())
 		return errFail
 	}
 	return nil
 }
 
-func nodeAPIHost(dataDir string) string {
-	raw, err := os.ReadFile(filepath.Join(dataDir, "node.json"))
+func parseJoinArgs(args []string) (host, name, userName string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--name", "--user":
+			if i+1 >= len(args) {
+				return "", "", "", false
+			}
+			if args[i] == "--name" {
+				name = args[i+1]
+			} else {
+				userName = args[i+1]
+			}
+			i++
+		default:
+			if strings.HasPrefix(args[i], "-") || host != "" {
+				return "", "", "", false
+			}
+			host = args[i]
+		}
+	}
+	return host, name, userName, host != ""
+}
+
+func computerNameFromHost(host string) (string, error) {
+	name := sanitizeComputerName(host)
+	if err := ident.Computer(name); err != nil {
+		return "", fmt.Errorf("hostname %q is not a legal computer name; pass --name", host)
+	}
+	return name, nil
+}
+
+// sanitizeComputerName makes a hostname usable as a computer name.
+// '+' and '.' are not legal, and neither are the reserved names.
+func sanitizeComputerName(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	var b strings.Builder
+	hyphen := true
+	for _, r := range host {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			hyphen = false
+			continue
+		}
+		if !hyphen {
+			b.WriteByte('-')
+			hyphen = true
+		}
+	}
+	s := strings.TrimRight(b.String(), "-")
+	if len(s) > 63 {
+		s = strings.TrimRight(s[:63], "-")
+	}
+	return s
+}
+
+func runAgent(o Options) error {
+	if len(o.Args) != 1 {
+		fmt.Fprint(o.Stderr, hostUsage)
+		return errUsage
+	}
+	dir, err := stateDir()
 	if err != nil {
-		return ""
+		fmt.Fprintln(o.Stderr, err.Error())
+		return errFail
 	}
-	var f struct {
-		Server string `json:"server"`
+	err = agent.Run(o.Context, dir)
+	if errors.Is(err, context.Canceled) {
+		return nil
 	}
-	if json.Unmarshal(raw, &f) != nil {
-		return ""
+	if errors.Is(err, agent.ErrRejected) {
+		fmt.Fprintln(o.Stderr, "rejected")
+		return errFail
 	}
-	host, _, err := net.SplitHostPort(f.Server)
 	if err != nil {
-		host = f.Server
+		fmt.Fprintln(o.Stderr, err.Error())
+		return errFail
 	}
-	return "http://" + host + "/box/node/v1"
+	return nil
+}
+
+func stateDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", errors.New("home directory is not set")
+	}
+	return filepath.Join(home, ".box"), nil
 }
 
 func localPair(o Options, op, kind string) error {
@@ -342,20 +384,6 @@ func localEnv(o Options) error {
 		fmt.Fprint(o.Stderr, hostUsage)
 		return errUsage
 	}
-}
-
-func localStatus(o Options) error {
-	var st control.Status
-	if err := localCall(o, "status", nil, &st); err != nil {
-		fmt.Fprintln(o.Stderr, err.Error())
-		return errFail
-	}
-	text, err := control.FormatStatus(st, false)
-	if err != nil {
-		return err
-	}
-	_, err = io.WriteString(o.Stdout, text)
-	return err
 }
 
 func localCall(o Options, op string, req, resp any) error {

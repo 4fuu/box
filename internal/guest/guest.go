@@ -1,5 +1,5 @@
-// Package guest is the CLI inside a computer: domain and portal.
-// It talks only to the guest socket mounted for this container.
+// Package guest is the CLI on a computer: domain and portal.
+// It talks only to the agent socket.
 package guest
 
 import (

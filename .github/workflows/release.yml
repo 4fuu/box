@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
-      image: ${{ steps.version.outputs.image }}
     steps:
       - name: Check out source and tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -43,9 +42,7 @@ jobs:
             }
             echo "Resuming release v$VERSION"
           fi
-          image=ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
 
   test:
     needs: validate
@@ -101,84 +98,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  image:
-    needs: [validate, build]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: amd64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Download the release binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: box-linux-${{ matrix.arch }}
-      - name: Stage the binary into the image context
-        shell: bash
-        env:
-          VERSION: ${{ needs.validate.outputs.version }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          tar -xzf "box-$VERSION-linux-$ARCH.tar.gz"
-          install -m 0755 box images/base/box
-          install -m 0644 LICENSE images/base/LICENSE
-      - name: Log in to GHCR
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
-      - name: Build and push the base computer image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: images/base
-          file: images/base/Dockerfile
-          push: true
-          provenance: mode=max
-          tags: ${{ needs.validate.outputs.image }}:${{ needs.validate.outputs.version }}-${{ matrix.arch }}
-
-  manifest:
-    needs: [validate, image]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    steps:
-      - name: Log in to GHCR
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
-      - name: Publish the multi-arch image
-        shell: bash
-        env:
-          IMAGE: ${{ needs.validate.outputs.image }}
-          VERSION: ${{ needs.validate.outputs.version }}
-        run: |
-          set -euo pipefail
-          docker buildx imagetools create \
-            -t "$IMAGE:$VERSION" \
-            -t "$IMAGE:latest" \
-            "$IMAGE:$VERSION-amd64" \
-            "$IMAGE:$VERSION-arm64"
-
   release:
     needs: [validate, test, build]
     runs-on: ubuntu-24.04
@@ -199,7 +118,6 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.validate.outputs.version }}
-          IMAGE: ${{ needs.validate.outputs.image }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -212,16 +130,10 @@ jobs:
           (cd release && sha256sum box-* > SHA256SUMS)
           notes=$(mktemp)
           cat > "$notes" <<EOF
-          Base computer image: \`$IMAGE:$VERSION\` (also \`$IMAGE:latest\`).
+          Install a Linux server or computer with \`scripts/install.sh\`.
 
-          On a deploy node, after it is paired:
-
-          \`\`\`
-          image add base $IMAGE:$VERSION
-          image pull base
-          \`\`\`
-
-          Install a Linux server or deploy node with \`scripts/install.sh\`.
+          On the server: \`box serve --domain <domain>\`.
+          On a computer: \`box join <domain>\`, then \`box agent\`.
           EOF
           tag="v$VERSION"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -261,5 +173,5 @@ jobs:
           set -e
           [ "$status" -eq 2 ]
           printf '%s\n' "$usage" | grep -F 'box serve'
-          command -v frps
-          frps --version || frps -v
+          printf '%s\n' "$usage" | grep -F 'box join'
+          command -v box

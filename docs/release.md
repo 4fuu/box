@@ -24,10 +24,7 @@ The workflow:
 
 - tests the module
 - publishes `box-<version>-linux-amd64.tar.gz` and `box-<version>-linux-arm64.tar.gz`, plus `SHA256SUMS`
-- builds the Fedora base computer image with that `box` binary copied in, and pushes a multi-arch image to `ghcr.io/<owner>/box:<version>` and `:latest`
 
-The image does not compile `box`. The Dockerfile copies the release binary.
-
-A Linux server or deploy node installs from the release with
-[`scripts/install.sh`](../scripts/install.sh). The script asks whether the
-machine is a server or a deploy node, in English or Chinese.
+There is no container image. A Linux server or computer installs from the
+release with [`scripts/install.sh`](../scripts/install.sh). The script asks
+whether the machine is a server or a computer, in English or Chinese.

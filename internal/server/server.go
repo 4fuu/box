@@ -333,6 +333,8 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 	return func(op string, body json.RawMessage) (any, error) {
 		name := s.svc.Live.CurrentName(c)
 		switch op {
+		case rpc.OpDomain:
+			return rpc.DomainBody{Domain: s.svc.Domain}, nil
 		case tunnel.OpPortalCheck:
 			var req tunnel.PortalCheckRequest
 			if err := json.Unmarshal(body, &req); err != nil {

@@ -43,15 +43,35 @@ func writeAuthorizedKeys(keys []string, env map[string]string) error {
 		b.WriteString(formatted)
 		b.WriteByte('\n')
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+	// Two agents in one process share this path. A fixed temp name lets one
+	// unlink the file the other is about to rename.
+	f, err := os.CreateTemp(dir, ".box_authorized_keys-*")
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
+	tmpName := f.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
 		return err
 	}
-	return os.Rename(tmp, path)
+	if _, err := f.WriteString(b.String()); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 // formatKeyLine prefixes a key with comma-separated environment="K=V" options.

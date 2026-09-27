@@ -88,7 +88,7 @@ say_en() {
         password_hint) printf '%s\n' "The first start prints a one-time password. With the systemd unit it is in: journalctl -u box.service -n 30" ;;
         joining) printf '%s\n' "Joining $2. Approve the code at the server." ;;
         agent_run) printf '%s\n' "Run the agent: box agent" ;;
-        agent_unit) printf '%s\n' "Enable the user unit: systemctl --user enable --now box-agent.service" ;;
+        agent_unit) printf '%s\n' "Enable the user unit: systemctl --user daemon-reload && systemctl --user enable --now box-agent.service" ;;
         agent_linger) printf '%s\n' "To start at boot without a login: loginctl enable-linger" ;;
         installed) printf '%s\n' "box $2 is installed at $3/bin/box" ;;
         dry) printf '%s\n' "Dry run. Nothing was installed." ;;
@@ -139,7 +139,7 @@ say_zh() {
         password_hint) printf '%s\n' "第一次启动会打印一次性密码。若使用 systemd，它在：journalctl -u box.service -n 30" ;;
         joining) printf '%s\n' "正在加入 $2。请在服务器上批准验证码。" ;;
         agent_run) printf '%s\n' "运行代理：box agent" ;;
-        agent_unit) printf '%s\n' "启用用户单元：systemctl --user enable --now box-agent.service" ;;
+        agent_unit) printf '%s\n' "启用用户单元：systemctl --user daemon-reload && systemctl --user enable --now box-agent.service" ;;
         agent_linger) printf '%s\n' "若要在未登录时开机启动：loginctl enable-linger" ;;
         installed) printf '%s\n' "box $2 已安装到 $3/bin/box" ;;
         dry) printf '%s\n' "这是演练，没有安装任何东西。" ;;
@@ -537,6 +537,7 @@ enable_user_agent() {
             systemctl --user daemon-reload
             systemctl --user enable --now box-agent.service
             say started
+            say agent_linger
             return 0
         fi
         say agent_unit
@@ -556,6 +557,7 @@ enable_user_agent() {
             systemctl --user enable --now box-agent.service
         then
             say started
+            say agent_linger
             return 0
         fi
     fi
@@ -656,10 +658,8 @@ finish_messages() {
         fi
         return 0
     fi
-    say agent_run
     if [ "$use_systemd" != 1 ]; then
-        say agent_unit
-        say agent_linger
+        say agent_run
     fi
 }
 

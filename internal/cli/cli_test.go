@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"net"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -118,6 +119,35 @@ func TestJoinRejectsReservedName(t *testing.T) {
 	if !strings.Contains(stderr.String(), "reserved") {
 		t.Fatalf("stderr %q", stderr.String())
 	}
+}
+
+func TestCheckLoginUser(t *testing.T) {
+	if err := checkLoginUser(""); err != nil {
+		t.Fatal(err)
+	}
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkLoginUser(current.Username); err != nil {
+		t.Fatal(err)
+	}
+	err = checkLoginUser("no-such-box-user-zz")
+	if err == nil || !strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("missing user: %v", err)
+	}
+	for _, name := range []string{"root", "nobody", "daemon"} {
+		u, lookupErr := user.Lookup(name)
+		if lookupErr != nil || u.Uid == current.Uid {
+			continue
+		}
+		err = checkLoginUser(name)
+		if err == nil || !strings.Contains(err.Error(), "not the current account") {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return
+	}
+	t.Fatal("no other local account to reject")
 }
 
 func TestSanitizeComputerName(t *testing.T) {

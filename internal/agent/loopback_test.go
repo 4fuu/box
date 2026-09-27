@@ -140,14 +140,10 @@ func startAgent(t *testing.T, dir string) {
 	t.Cleanup(func() {
 		cancel()
 		err := <-errCh
-		if err != nil && !isCancel(err) {
+		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
 			t.Errorf("agent %s: %v", dir, err)
 		}
 	})
-}
-
-func isCancel(err error) bool {
-	return err == context.Canceled || err == context.DeadlineExceeded
 }
 
 func waitPrintedCode(t *testing.T, out *lockedBuf) string {

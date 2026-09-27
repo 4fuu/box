@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -179,6 +180,10 @@ func join(o Options) error {
 		fmt.Fprintln(o.Stderr, err.Error())
 		return errFail
 	}
+	if err := checkLoginUser(userName); err != nil {
+		fmt.Fprintln(o.Stderr, err.Error())
+		return errFail
+	}
 	dir, err := stateDir()
 	if err != nil {
 		fmt.Fprintln(o.Stderr, err.Error())
@@ -191,6 +196,26 @@ func join(o Options) error {
 		}
 		fmt.Fprintln(o.Stderr, err.Error())
 		return errFail
+	}
+	return nil
+}
+
+// checkLoginUser rejects a --user that is not this process's account.
+// Keys are written under the process home, not another account's.
+func checkLoginUser(name string) error {
+	if name == "" {
+		return nil
+	}
+	u, err := user.Lookup(name)
+	if err != nil {
+		return fmt.Errorf("user %s was not found", name)
+	}
+	current, err := user.Current()
+	if err != nil {
+		return err
+	}
+	if u.Uid != current.Uid {
+		return fmt.Errorf("user %s is not the current account", name)
 	}
 	return nil
 }

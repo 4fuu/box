@@ -155,9 +155,9 @@ func (m *model) viewForm() string {
 	case modeEnvValue:
 		return "env set " + m.envName + "\nvalue: " + m.input
 	case modeKeyRm:
-		return "remove key " + m.keyFingerprint() + "? y/n"
+		return "remove key " + m.target + "? y/n"
 	case modeEnvRm:
-		return "remove env " + m.envAtCursor() + "? y/n"
+		return "remove env " + m.target + "? y/n"
 	default:
 		return ""
 	}

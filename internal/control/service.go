@@ -52,8 +52,8 @@ func (s *Service) httpPort() int {
 }
 
 type Pairing struct {
-	Secret  string
-	Expires time.Time
+	Secret  string    `json:"secret"`
+	Expires time.Time `json:"expires"`
 }
 
 func (s *Service) PairClient() (Pairing, error) {

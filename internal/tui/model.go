@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/4fuu/box/internal/control"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -52,12 +53,15 @@ type model struct {
 	width      int
 	height     int
 
-	snap    Snapshot
+	snap    control.Snapshot
 	screen  screen
 	cursor  int
 	mode    mode
 	input   string
 	envName string
+	// target is the key fingerprint or env name captured when a confirm
+	// dialog opens. A later snapshot must not change what y deletes.
+	target string
 	// secret is the one-time password. It is cleared on the next key.
 	secret string
 	exp    time.Time
@@ -66,7 +70,7 @@ type model struct {
 }
 
 type snapMsg struct {
-	snap Snapshot
+	snap control.Snapshot
 	err  error
 }
 
@@ -76,7 +80,7 @@ type doneMsg struct {
 }
 
 type pairMsg struct {
-	pairing Pairing
+	pairing control.Pairing
 	err     error
 }
 
@@ -232,11 +236,21 @@ func (m *model) onNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "x", "d":
-		if m.screen == screenKeys && m.keyFingerprint() != "" {
+		if m.screen == screenKeys {
+			fp := m.keyFingerprint()
+			if fp == "" {
+				return m, nil
+			}
+			m.target = fp
 			m.mode = modeKeyRm
 			return m, nil
 		}
-		if m.screen == screenEnv && m.envAtCursor() != "" {
+		if m.screen == screenEnv {
+			name := m.envAtCursor()
+			if name == "" {
+				return m, nil
+			}
+			m.target = name
 			m.mode = modeEnvRm
 			return m, nil
 		}
@@ -269,6 +283,7 @@ func (m *model) onConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.confirmYes()
 	case "n", "esc":
 		m.mode = modeNormal
+		m.target = ""
 		return m, nil
 	}
 	return m, nil
@@ -337,7 +352,8 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 func (m *model) confirmYes() (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeKeyRm:
-		fp := m.keyFingerprint()
+		fp := m.target
+		m.target = ""
 		m.mode = modeNormal
 		if fp == "" {
 			return m, nil
@@ -345,7 +361,8 @@ func (m *model) confirmYes() (tea.Model, tea.Cmd) {
 		m.busy = true
 		return m, m.removeKey(fp)
 	case modeEnvRm:
-		name := m.envAtCursor()
+		name := m.target
+		m.target = ""
 		m.mode = modeNormal
 		if name == "" {
 			return m, nil
@@ -354,6 +371,7 @@ func (m *model) confirmYes() (tea.Model, tea.Cmd) {
 		return m, m.deleteEnv(name)
 	default:
 		m.mode = modeNormal
+		m.target = ""
 		return m, nil
 	}
 }
@@ -441,6 +459,7 @@ func tick() tea.Cmd {
 func (m *model) clearSensitive() {
 	m.input = ""
 	m.envName = ""
+	m.target = ""
 	m.secret = ""
 	m.exp = time.Time{}
 }

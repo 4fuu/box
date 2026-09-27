@@ -32,6 +32,8 @@ var (
 type sshServer struct {
 	s   *Server
 	srv *ssh.Server
+	// dialHook replaces dial in tests. Production leaves it nil.
+	dialHook func(context.Context, string) (*gossh.Client, error)
 }
 
 func newSSH(s *Server, hostKey string) (*sshServer, error) {
@@ -240,10 +242,25 @@ func (h *sshServer) serveTUI(sess ssh.Session, ptyReq ssh.Pty, winch <-chan ssh.
 	}
 	var mu sync.Mutex
 	var onWin func(ssh.Window)
+	// latest starts as the PTY request size. charmbracelet/ssh has already
+	// queued that size on winch. The reader records it before calling a
+	// listener, so a nil listener does not drop the seed. Publishing a
+	// listener and copying latest share one lock, so a resize cannot land
+	// in the gap and disappear.
+	latest := ptyReq.Window
+	sizeWith := func(fn func(ssh.Window)) ssh.Window {
+		mu.Lock()
+		onWin = fn
+		cur := latest
+		mu.Unlock()
+		return cur
+	}
+	setWinch := func(fn func(ssh.Window)) { sizeWith(fn) }
 	if pty && winch != nil {
 		go func() {
 			for w := range winch {
 				mu.Lock()
+				latest = w
 				fn := onWin
 				mu.Unlock()
 				if fn != nil {
@@ -252,18 +269,13 @@ func (h *sshServer) serveTUI(sess ssh.Session, ptyReq ssh.Pty, winch <-chan ssh.
 			}
 		}()
 	}
-	setWinch := func(fn func(ssh.Window)) {
-		mu.Lock()
-		onWin = fn
-		mu.Unlock()
-	}
 	in := newSessionInput(sess)
 	notice := ""
 	ctx := sess.Context()
 	for {
 		reader := in.attach()
 		resize := make(chan tui.Size, 4)
-		setWinch(func(w ssh.Window) {
+		cur := sizeWith(func(w ssh.Window) {
 			select {
 			case resize <- tui.Size{Width: w.Width, Height: w.Height}:
 			default:
@@ -273,7 +285,7 @@ func (h *sshServer) serveTUI(sess ssh.Session, ptyReq ssh.Pty, winch <-chan ssh.
 			Context: ctx, In: reader, Out: sess,
 			Backend:    tui.ServiceBackend{Svc: h.s.svc, From: from},
 			AllowShell: true, Identity: id, Notice: notice,
-			Width: ptyReq.Window.Width, Height: ptyReq.Window.Height,
+			Width: cur.Width, Height: cur.Height,
 			Resize: resize,
 		}
 		if pty {
@@ -297,7 +309,7 @@ func (h *sshServer) serveTUI(sess ssh.Session, ptyReq ssh.Pty, winch <-chan ssh.
 			in.detach()
 			return
 		}
-		if err := h.bridgeIO(sess, name, false, in.attach(), setWinch); err != nil {
+		if err := h.bridgeIO(sess, name, false, in.attach(), setWinch, true); err != nil {
 			notice = err.Error()
 		}
 	}
@@ -437,12 +449,23 @@ func parseHostKey(line string) (gossh.PublicKey, error) {
 }
 
 func (h *sshServer) bridge(sess ssh.Session, computer string, closeSession bool) error {
-	return h.bridgeIO(sess, computer, closeSession, nil, nil)
+	return h.bridgeIO(sess, computer, closeSession, nil, nil, false)
+}
+
+// dialNamed dials computer on every call. A failure is not remembered.
+// Tests replace dialHook; production calls dial.
+func (h *sshServer) dialNamed(ctx context.Context, computer string) (*gossh.Client, error) {
+	if h.dialHook != nil {
+		return h.dialHook(ctx, computer)
+	}
+	return h.dial(ctx, computer)
 }
 
 // bridgeIO splices to the computer. stdin nil reads the session. setWinch, when
 // set, receives window changes because the TUI already owns the pty channel.
-func (h *sshServer) bridgeIO(sess ssh.Session, computer string, closeSession bool, stdin io.Reader, setWinch func(func(ssh.Window))) error {
+// fresh is the TUI path: dial the named computer now, and do not reuse the
+// splice session's cached client. The splice route passes fresh false.
+func (h *sshServer) bridgeIO(sess ssh.Session, computer string, closeSession bool, stdin io.Reader, setWinch func(func(ssh.Window)), fresh bool) error {
 	if stdin == nil {
 		stdin = sess
 	}
@@ -450,13 +473,22 @@ func (h *sshServer) bridgeIO(sess ssh.Session, computer string, closeSession boo
 	if _, _, pty := sess.Pty(); pty {
 		errOut = repl.CRLF(sess)
 	}
-	client, err := h.clientFor(sess.Context(), computer)
+	var client *gossh.Client
+	var err error
+	if fresh {
+		client, err = h.dialNamed(sess.Context(), computer)
+	} else {
+		client, err = h.clientFor(sess.Context(), computer)
+	}
 	if err != nil {
 		fmt.Fprintln(errOut, err.Error())
 		if closeSession {
 			_ = sess.Exit(1)
 		}
 		return err
+	}
+	if fresh {
+		defer client.Close()
 	}
 	bs, err := client.NewSession()
 	if err != nil {

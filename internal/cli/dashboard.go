@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/4fuu/box/internal/control"
 	"github.com/4fuu/box/internal/tui"
 )
 
@@ -50,8 +51,8 @@ func dashboard(o Options) error {
 // the SSH REPL calls. It cannot bind a client key; there is no such op.
 type dashBackend struct{ o Options }
 
-func (d dashBackend) Snapshot(context.Context) (tui.Snapshot, error) {
-	var snap tui.Snapshot
+func (d dashBackend) Snapshot(context.Context) (control.Snapshot, error) {
+	var snap control.Snapshot
 	err := localCall(d.o, "snapshot", nil, &snap)
 	return snap, err
 }
@@ -76,15 +77,12 @@ func (d dashBackend) RemoveKey(_ context.Context, fingerprint string) error {
 	return localCall(d.o, "key_rm", map[string]string{"match": fingerprint}, nil)
 }
 
-func (d dashBackend) Pair(context.Context) (tui.Pairing, error) {
-	var resp struct {
-		Secret  string    `json:"secret"`
-		Expires time.Time `json:"expires"`
-	}
+func (d dashBackend) Pair(context.Context) (control.Pairing, error) {
+	var resp control.Pairing
 	if err := localCall(d.o, "pair", nil, &resp); err != nil {
-		return tui.Pairing{}, err
+		return control.Pairing{}, err
 	}
-	return tui.Pairing{Secret: resp.Secret, Expires: resp.Expires}, nil
+	return resp, nil
 }
 
 func (d dashBackend) SetEnv(_ context.Context, name, value string) (string, error) {

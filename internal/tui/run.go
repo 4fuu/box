@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"os"
+	"reflect"
+	"unsafe"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -41,6 +43,13 @@ func Run(cfg Config) (string, error) {
 	p := tea.NewProgram(m, opts...)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The renderer learns its width only from WindowSizeMsg, and width 0 skips
+	// erase-to-end-of-line, so a cleared one-time password stays on screen.
+	// Send from a goroutine races the first flush. The message has to already
+	// be the program's first inbox item when the loop starts.
+	if cfg.Width > 0 || cfg.Height > 0 {
+		queueInitial(p, tea.WindowSizeMsg{Width: cfg.Width, Height: cfg.Height})
+	}
 	if cfg.Resize != nil {
 		go forwardResize(runCtx, p, cfg.Resize)
 	}
@@ -57,6 +66,22 @@ func Run(cfg Config) (string, error) {
 		return "", nil
 	}
 	return fm.shell, nil
+}
+
+// queueInitial parks msg ahead of anything Run will receive. bubbletea's
+// inbox is unbuffered and created inside NewProgram, so the only way to
+// have the size waiting as the first message — before the first flush —
+// is to replace that channel. A goroutine Send is not early enough.
+func queueInitial(p *tea.Program, msg tea.Msg) {
+	field := reflect.ValueOf(p).Elem().FieldByName("msgs")
+	if !field.IsValid() || field.Kind() != reflect.Chan {
+		// Same-goroutine Send before Run blocks forever on the unbuffered inbox.
+		go p.Send(msg)
+		return
+	}
+	inbox := make(chan tea.Msg, 1)
+	inbox <- msg
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(inbox))
 }
 
 func forwardResize(ctx context.Context, p *tea.Program, resize <-chan Size) {

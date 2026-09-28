@@ -610,9 +610,10 @@ func TestTUIStatesOverPTY(t *testing.T) {
 	}
 	s := newPTYStream(out)
 
-	s.until(t, "computers", 10*time.Second)
-	// The pending screen lists the waiting join; approve it from the form.
-	fmt.Fprint(in, "2")
+	// The TUI opens on the summary; the pending screen lists the waiting
+	// join; approve it from the form.
+	s.until(t, "summary", 10*time.Second)
+	fmt.Fprint(in, "3")
 	s.until(t, "home", 10*time.Second)
 	fmt.Fprint(in, "\r")
 	s.until(t, "code:", 10*time.Second)
@@ -644,8 +645,13 @@ func TestTUIStatesOverPTY(t *testing.T) {
 	defer cancel()
 	agent := e2eAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), reply.Token)
 	defer agent.Close()
-	fmt.Fprint(in, "1")
+	fmt.Fprint(in, "2")
 	s.until(t, "yes", 10*time.Second)
+
+	// The summary shows the live computer's card with its tunnel counters.
+	fmt.Fprint(in, "1")
+	s.until(t, "● home", 10*time.Second)
+	fmt.Fprint(in, "2")
 
 	// Drain the frame tail (it still carries the last notice), wait out
 	// the TTL, then force a repaint with a key and read the bar: the
@@ -657,13 +663,13 @@ func TestTUIStatesOverPTY(t *testing.T) {
 	if strings.Contains(window, "home joined") || strings.Contains(window, "home online") {
 		t.Fatalf("notice did not expire: %q", window)
 	}
-	if !strings.Contains(window, "1-6 screens") {
+	if !strings.Contains(window, "1-7 screens") {
 		t.Fatalf("hints did not return: %q", window)
 	}
 
 	// The tunnel drops; the panel notices.
 	_ = agent.Close()
-	fmt.Fprint(in, "1")
+	fmt.Fprint(in, "2")
 	s.until(t, "home offline", 10*time.Second)
 
 	// Back online, then splice into the computer straight from the row.

@@ -57,6 +57,12 @@ func (d dashBackend) Snapshot(context.Context) (control.Snapshot, error) {
 	return snap, err
 }
 
+func (d dashBackend) Summary(context.Context) (control.Summary, error) {
+	var sum control.Summary
+	err := localCall(d.o, "summary", nil, &sum)
+	return sum, err
+}
+
 func (d dashBackend) Approve(_ context.Context, code string) (string, error) {
 	var resp struct {
 		Message string `json:"message"`

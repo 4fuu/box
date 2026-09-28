@@ -96,8 +96,10 @@ box join box.example.com
 box agent
 ```
 
-`box join` prints an approval code. Enter it in the server TUI, or run
-`approve <code>` from a bound client. The login user is whoever ran
+`box join` prints an approval code. Enter it in the server TUI (screen 3,
+pending), or run `approve <code>` from a bound client. The TUI opens on a
+summary of every computer's tunnel, load, and traffic, and works down to a
+30-column terminal. The login user is whoever ran
 `box join`, unless `--user` names another account on that machine.
 
 `ssh home@box.example.com` is that computer's sshd. The SSH username is the

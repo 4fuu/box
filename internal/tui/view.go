@@ -7,15 +7,18 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Below this size the layout cannot survive, so a warning replaces it.
+// Between this and a full-width terminal, tabs shorten, low-priority table
+// columns drop out, and cards stack in one column.
 const (
-	minWidth  = 56
-	minHeight = 14
+	minWidth  = 30
+	minHeight = 10
 )
 
-var screenNames = []string{"computers", "pending", "portals", "keys", "env", "tokens"}
+var screenNames = []string{"summary", "computers", "pending", "portals", "keys", "env", "tokens"}
 
 func (m *model) View() string {
 	if m.width > 0 && m.height > 0 {
@@ -31,7 +34,7 @@ func (m *model) View() string {
 	var b strings.Builder
 	b.WriteString(m.viewHeader())
 	b.WriteString(m.viewTabs())
-	b.WriteString(m.viewPane())
+	b.WriteString(m.viewBody())
 	if form := m.viewForm(); form != "" {
 		b.WriteByte('\n')
 		b.WriteString(form)
@@ -52,7 +55,7 @@ func (m *model) viewSized() string {
 	var b strings.Builder
 	b.WriteString(m.viewHeader())
 	b.WriteString(m.viewTabs())
-	b.WriteString(m.viewPane())
+	b.WriteString(m.viewBody())
 	b.WriteString(m.viewBar())
 	out := m.padToHeight(b.String())
 	if box := m.viewModal(); box != "" {
@@ -61,10 +64,22 @@ func (m *model) viewSized() string {
 	return out
 }
 
+// viewBody is the summary cards, or the framed pane every other screen uses.
+func (m *model) viewBody() string {
+	if m.screen == screenSummary {
+		return m.viewSummary()
+	}
+	return m.viewPane()
+}
+
 func (m *model) viewHeader() string {
 	line := m.styles.title.Render("box")
 	if m.snap.Domain != "" {
-		line += m.styles.dim.Render("  " + m.snap.Domain)
+		domain := "  " + m.snap.Domain
+		if m.width > 0 {
+			domain = trunc(domain, m.width-4)
+		}
+		line += m.styles.dim.Render(domain)
 	}
 	if m.identity != "" {
 		right := m.styles.dim.Render(m.identity)
@@ -79,21 +94,57 @@ func (m *model) viewHeader() string {
 	return line + "\n"
 }
 
+// viewTabs draws the screen row at the widest form that fits: every name;
+// then the current name with the others as their number keys; then only
+// the current name and its position.
 func (m *model) viewTabs() string {
-	segs := make([]string, 0, len(screenNames))
-	for i, name := range screenNames {
-		label := name
-		if i == int(screenPending) && len(m.snap.Pending) > 0 {
-			label = fmt.Sprintf("%s(%d)", name, len(m.snap.Pending))
+	pending := len(m.snap.Pending)
+	label := func(i int, short bool) string {
+		name := screenNames[i]
+		if short && screen(i) != m.screen {
+			name = fmt.Sprint(i + 1)
 		}
-		if screen(i) == m.screen {
-			segs = append(segs, m.styles.tabOn.Render(" "+label+" "))
-		} else {
-			segs = append(segs, m.styles.tabOff.Render(" "+label+" "))
+		if i == int(screenPending) && pending > 0 {
+			if short && screen(i) != m.screen {
+				return name + "!"
+			}
+			name = fmt.Sprintf("%s(%d)", name, pending)
+		}
+		return name
+	}
+	row := func(short bool) (string, int) {
+		segs := make([]string, 0, len(screenNames))
+		w := 0
+		for i := range screenNames {
+			l := " " + label(i, short) + " "
+			if i == 0 {
+				// Let the row start in column 0; the first tab loses its left pad.
+				l = l[1:]
+			}
+			w += lipgloss.Width(l)
+			switch {
+			case screen(i) == m.screen:
+				segs = append(segs, m.styles.tabOn.Render(l))
+			case i == int(screenPending) && pending > 0:
+				segs = append(segs, m.styles.warn.Render(l))
+			default:
+				segs = append(segs, m.styles.tabOff.Render(l))
+			}
+		}
+		return strings.Join(segs, " "), w + len(segs) - 1
+	}
+	for _, short := range []bool{false, true} {
+		if line, w := row(short); m.width <= 0 || w <= m.width {
+			return line + "\n"
 		}
 	}
-	// Let the row start in column 0; the first tab loses its left pad.
-	return strings.TrimPrefix(strings.Join(segs, " "), " ") + "\n"
+	cur := label(int(m.screen), false)
+	pos := m.styles.dim.Render(fmt.Sprintf(" %d/%d", int(m.screen)+1, len(screenNames)))
+	line := m.styles.tabOn.Render(" "+cur+" ") + pos
+	if pending > 0 && m.screen != screenPending {
+		line += m.styles.warn.Render(fmt.Sprintf(" · %d pending", pending))
+	}
+	return trunc(line, m.width) + "\n"
 }
 
 func (m *model) viewPane() string {
@@ -214,7 +265,7 @@ func (m *model) viewComputers() string {
 		return m.styles.off, true
 	}
 	return m.table(
-		[]string{"NAME", "ONLINE", "USER", "ADDRESS", "AGENT", "PORTALS"},
+		[]column{{"NAME", 0}, {"ONLINE", 1}, {"USER", 3}, {"ADDRESS", 4}, {"AGENT", 5}, {"PORTALS", 2}},
 		rows,
 		"no computers yet - press p to pair one",
 		onlineColor,
@@ -227,22 +278,32 @@ func (m *model) viewPending() string {
 	for _, p := range m.snap.Pending {
 		exp := ""
 		if !p.ExpiresAt.IsZero() {
-			exp = p.ExpiresAt.UTC().Format(time.RFC3339)
+			exp = "in " + dur(time.Until(p.ExpiresAt))
 		}
 		rows = append(rows, []string{p.Name, p.Address, p.User, exp})
 	}
-	b.WriteString(m.table([]string{"NAME", "ADDRESS", "USER", "EXPIRES"}, rows, "no pending approvals", nil))
-	b.WriteByte('\n')
-	b.WriteString(m.styles.header.Render("Approval"))
-	b.WriteByte('\n')
+	b.WriteString(m.table([]column{{"NAME", 0}, {"ADDRESS", 2}, {"USER", 3}, {"EXPIRES", 1}}, rows, "no pending approvals", nil))
 	code := ""
 	if m.mode == modeApprove {
 		code = m.input + m.styles.cursor.Render("▌")
 	}
+	if m.shortApproval() {
+		b.WriteString(m.styles.header.Render("approval code: ") + code + "\n")
+		return b.String()
+	}
+	b.WriteByte('\n')
+	b.WriteString(m.styles.header.Render("Approval"))
+	b.WriteByte('\n')
 	b.WriteString("code: " + code + "\n")
 	b.WriteString(m.styles.dim.Render("type the code, then enter to approve"))
 	b.WriteByte('\n')
 	return b.String()
+}
+
+// shortApproval folds the approval form into one line on a short terminal,
+// so the pending rows keep the space.
+func (m *model) shortApproval() bool {
+	return m.height > 0 && m.height < 16
 }
 
 func (m *model) viewPortals() string {
@@ -254,7 +315,7 @@ func (m *model) viewPortals() string {
 		}
 		rows = append(rows, []string{p.Label, p.Computer, fmt.Sprintf("%d", p.Port), access, p.Host})
 	}
-	return m.table([]string{"LABEL", "COMPUTER", "PORT", "ACCESS", "HOST"}, rows, "no portals", nil)
+	return m.table([]column{{"LABEL", 0}, {"COMPUTER", 1}, {"PORT", 2}, {"ACCESS", 3}, {"HOST", 4}}, rows, "no portals", nil)
 }
 
 func (m *model) viewKeys() string {
@@ -262,11 +323,11 @@ func (m *model) viewKeys() string {
 	for _, k := range m.snap.Keys {
 		when := ""
 		if !k.BoundAt.IsZero() {
-			when = k.BoundAt.UTC().Format(time.RFC3339)
+			when = k.BoundAt.UTC().Format(time.DateOnly)
 		}
 		rows = append(rows, []string{k.Fingerprint, k.Comment, when})
 	}
-	return m.table([]string{"FINGERPRINT", "COMMENT", "BOUND"}, rows, "no keys bound", nil)
+	return m.table([]column{{"FINGERPRINT", 0}, {"COMMENT", 1}, {"BOUND", 2}}, rows, "no keys bound", nil)
 }
 
 func (m *model) viewEnv() string {
@@ -277,7 +338,7 @@ func (m *model) viewEnv() string {
 	for _, name := range m.snap.Env {
 		rows = append(rows, []string{name})
 	}
-	b.WriteString(m.table([]string{"NAME"}, rows, "no env names", nil))
+	b.WriteString(m.table([]column{{"NAME", 0}}, rows, "no env names", nil))
 	return b.String()
 }
 
@@ -286,16 +347,37 @@ func (m *model) viewTokens() string {
 	for _, t := range m.snap.Tokens {
 		when := "none"
 		if !t.Expires.IsZero() {
-			when = t.Expires.UTC().Format(time.RFC3339)
+			when = t.Expires.UTC().Format(time.DateOnly)
 		}
 		rows = append(rows, []string{fmt.Sprintf("%d", t.ID), t.Comment, when, t.Token})
 	}
 	var b strings.Builder
-	b.WriteString(m.table([]string{"ID", "COMMENT", "EXPIRES", "TOKEN"}, rows, "no tokens", nil))
-	if tok, ok := m.tokenAtCursor(); ok {
-		b.WriteString("token: " + tok.Token + "\n")
+	b.WriteString(m.table([]column{{"ID", 0}, {"COMMENT", 1}, {"EXPIRES", 2}, {"TOKEN", 3}}, rows, "no tokens", nil))
+	for _, l := range m.tokenLines() {
+		b.WriteString(l + "\n")
 	}
 	return b.String()
+}
+
+// tokenLines shows the selected token in full. The operator copies it from
+// here, so it wraps onto more lines instead of being cut at the pane edge.
+func (m *model) tokenLines() []string {
+	tok, ok := m.tokenAtCursor()
+	if !ok {
+		return nil
+	}
+	line := "token: " + tok.Token
+	inner := m.width - 4
+	if m.width <= 0 || lipgloss.Width(line) <= inner {
+		return []string{line}
+	}
+	out := []string{"token:"}
+	for r := []rune(tok.Token); len(r) > 0; {
+		n := min(inner, len(r))
+		out = append(out, string(r[:n]))
+		r = r[n:]
+	}
+	return out
 }
 
 // viewForm is the inline form used when the terminal size is unknown and a
@@ -420,8 +502,12 @@ func (m *model) modal(title string, lines []string) string {
 	b.WriteString(border.Render("╭─ ") + m.styles.ptitle.Render(title) + border.Render(" "+strings.Repeat("─", dash)+"╮"))
 	b.WriteByte('\n')
 	for _, l := range lines {
-		b.WriteString(border.Render("│ ") + pad(trunc(l, inner), inner) + border.Render(" │"))
-		b.WriteByte('\n')
+		// Wrap rather than cut: a modal holds a secret or a name the
+		// operator has to read whole.
+		for _, part := range strings.Split(ansi.Hardwrap(l, inner, true), "\n") {
+			b.WriteString(border.Render("│ ") + pad(part, inner) + border.Render(" │"))
+			b.WriteByte('\n')
+		}
 	}
 	b.WriteString(border.Render("╰" + strings.Repeat("─", inner+2) + "╯"))
 	return b.String()
@@ -431,14 +517,16 @@ func (m *model) helpLines() []string {
 	type binding struct{ key, what string }
 	global := []binding{
 		{"tab / shift+tab", "switch screen"},
-		{"1-6", "jump to a screen"},
-		{"j / k", "move"},
+		{"1-7", "jump to a screen"},
+		{"j / k", "move, or scroll the summary"},
 		{"p", "pair a computer"},
 		{"?", "this help"},
 		{"q", "quit"},
 	}
 	var local []binding
 	switch m.screen {
+	case screenSummary:
+		local = []binding{{"j / k", "scroll"}}
 	case screenComputers:
 		if m.allowShell {
 			local = append(local, binding{"enter", "open a shell"})
@@ -511,7 +599,7 @@ func (m *model) viewTooSmall() string {
 	return b.String()
 }
 
-const hintBase = "1-6 screens · j/k move · p pair · ? help · q quit"
+const hintBase = "1-7 screens · j/k move · p pair · ? help · q quit"
 
 func (m *model) hint() string {
 	if m.mode != modeNormal && m.mode != modePair && m.mode != modeHelp {
@@ -519,6 +607,8 @@ func (m *model) hint() string {
 	}
 	base := hintBase
 	switch m.screen {
+	case screenSummary:
+		return "1-7 screens · j/k scroll · p pair · ? help · q quit"
 	case screenComputers:
 		extra := " · r remove · n rename"
 		if m.allowShell {
@@ -541,10 +631,78 @@ func (m *model) hint() string {
 // colorize picks a style for one table cell. ok=false means plain.
 type colorize func(col int, val string) (style lipgloss.Style, ok bool)
 
-func (m *model) table(headers []string, rows [][]string, empty string, color colorize) string {
-	widths := make([]int, len(headers))
-	for i, h := range headers {
-		widths[i] = lipgloss.Width(h)
+// column is a table header. prio orders what gives way on a narrow
+// terminal: the highest prio drops out first, and 0 always stays.
+type column struct {
+	title string
+	prio  int
+}
+
+// fitColumns picks which columns show in avail cells and how wide each is.
+// When the table is too wide it first caps any one column at two fifths of
+// the width, so a long name cannot push every other column out. Then it
+// drops the least important column until the rest fit, unless shrinking
+// that column would do and still leave it readable. Space left over goes
+// back to the capped columns. Cells in a narrowed column end in "…".
+func fitColumns(cols []column, natural []int, avail int) (keep []int, widths []int) {
+	w := append([]int(nil), natural...)
+	keep = make([]int, len(cols))
+	for i := range keep {
+		keep[i] = i
+	}
+	total := func() int {
+		t := 2 * (len(keep) - 1)
+		for _, i := range keep {
+			t += w[i]
+		}
+		return t
+	}
+	if avail > 0 && total() > avail {
+		limit := max(avail*2/5, 8)
+		for i := range w {
+			if w[i] > limit {
+				w[i] = max(limit, lipgloss.Width(cols[i].title))
+			}
+		}
+		for len(keep) > 1 && total() > avail {
+			least := 0
+			for j, i := range keep {
+				if cols[i].prio > cols[keep[least]].prio {
+					least = j
+				}
+			}
+			i := keep[least]
+			if w[i]-(total()-avail) >= max(6, lipgloss.Width(cols[i].title)) {
+				break
+			}
+			keep = append(keep[:least], keep[least+1:]...)
+		}
+		for _, i := range keep {
+			if slack := avail - total(); slack > 0 && w[i] < natural[i] {
+				w[i] += min(slack, natural[i]-w[i])
+			}
+		}
+		if over := total() - avail; over > 0 {
+			least := 0
+			for j, i := range keep {
+				if cols[i].prio > cols[keep[least]].prio {
+					least = j
+				}
+			}
+			w[keep[least]] = max(w[keep[least]]-over, 1)
+		}
+	}
+	widths = make([]int, len(keep))
+	for j, i := range keep {
+		widths[j] = w[i]
+	}
+	return keep, widths
+}
+
+func (m *model) table(cols []column, rows [][]string, empty string, color colorize) string {
+	widths := make([]int, len(cols))
+	for i, c := range cols {
+		widths[i] = lipgloss.Width(c.title)
 	}
 	for _, row := range rows {
 		for i, cell := range row {
@@ -556,8 +714,36 @@ func (m *model) table(headers []string, rows [][]string, empty string, color col
 			}
 		}
 	}
+	avail := 0
+	if m.width > 0 {
+		avail = m.width - 6 // pane borders and the row marker
+	}
+	keep, kw := fitColumns(cols, widths, avail)
+	pick := func(row []string) []string {
+		out := make([]string, len(keep))
+		for j, i := range keep {
+			if i < len(row) {
+				out[j] = ellipsis(row[i], kw[j])
+			}
+		}
+		return out
+	}
+	headers := make([]string, len(cols))
+	for i, c := range cols {
+		headers[i] = c.title
+	}
+	if color != nil {
+		inner := color
+		color = func(col int, val string) (lipgloss.Style, bool) {
+			if col >= len(keep) {
+				return lipgloss.Style{}, false
+			}
+			return inner(keep[col], val)
+		}
+	}
+	widths = kw
 	var b strings.Builder
-	b.WriteString(m.styles.header.Render("  " + m.rowLine(headers, widths, false, nil)))
+	b.WriteString(m.styles.header.Render("  " + m.rowLine(pick(headers), widths, false, nil)))
 	b.WriteByte('\n')
 	if len(rows) == 0 {
 		b.WriteString(m.styles.dim.Render("  " + empty))
@@ -567,7 +753,7 @@ func (m *model) table(headers []string, rows [][]string, empty string, color col
 	start, end, _ := m.window()
 	sel := m.idx()
 	for i := start; i < end && i < len(rows); i++ {
-		line := m.rowLine(rows[i], widths, i == sel, color)
+		line := m.rowLine(pick(rows[i]), widths, i == sel, color)
 		if i == sel {
 			// Run the highlight to the pane's right edge, not just the
 			// last column. The marker takes two cells of the pane width.
@@ -617,16 +803,17 @@ func (m *model) rowBudget() int {
 	b := m.height - 6
 	switch m.screen {
 	case screenPending:
-		b -= 4 // approval section
+		if m.shortApproval() {
+			b-- // one-line approval form
+		} else {
+			b -= 4 // approval section
+		}
 	case screenEnv:
 		b -= 1 // "names only"
 	case screenTokens:
-		b -= 1 // "token:" line
+		b -= max(len(m.tokenLines()), 1) // the selected token, wrapped
 	}
-	if b < 3 {
-		b = 3
-	}
-	return b
+	return max(b, 1)
 }
 
 // padToHeight fills to the screen height so the status bar sits on the last
@@ -636,7 +823,12 @@ func (m *model) padToHeight(out string) string {
 		return out
 	}
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) >= m.height {
+	if len(lines) > m.height {
+		// Too tall for the screen: keep the top and the status bar.
+		bar := lines[len(lines)-1]
+		return strings.Join(append(lines[:m.height-1], bar), "\n")
+	}
+	if len(lines) == m.height {
 		return strings.Join(lines, "\n")
 	}
 	fill := m.height - len(lines)
@@ -821,6 +1013,17 @@ func (m *model) rowLine(cols []string, widths []int, sel bool, color colorize) s
 		line = trunc(line, m.width-6)
 	}
 	return line
+}
+
+// ellipsis cuts plain text to n cells, marking the cut with "…".
+func ellipsis(s string, n int) string {
+	if lipgloss.Width(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return trunc(s, n)
+	}
+	return trunc(s, n-1) + "…"
 }
 
 func pad(s string, n int) string {

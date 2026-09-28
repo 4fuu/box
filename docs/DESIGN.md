@@ -1,6 +1,8 @@
 # Design
 
-A self-hosted way to put machines you own behind one SSH entry. A computer is a whole machine — a workstation, a home server, a VM. It is not a container. The operator's client is the `ssh` already installed everywhere. The server is the only public entry. Computers dial out, so they can sit behind NAT.
+This document is the source of truth. The README is the short version; when they disagree, follow this document.
+
+box puts machines you own behind one SSH entry. A computer is a whole machine — a workstation, a home server, a VM — not a container. The client is the stock `ssh`. The server is the only public entry. Computers dial out, so they can sit behind NAT. The reference is [exe.dev](https://exe.dev), as a private deployment rather than a hosted service.
 
 ```diagram
 client                      server                         computer
@@ -19,46 +21,31 @@ ssh web@box.example.com     username is the computer       box agent (no root)
                             HTTP by Host ──────────▶  127.0.0.1:port on the machine
 ```
 
-The reference is [exe.dev](https://exe.dev): machines get names, state survives, a website on a machine gets a hostname. This is a private deployment, not a hosted service.
-
-## Status
-
-This document is the source of truth. The README is the short version. When they disagree, follow this document.
-
-This revision replaces the container design. There is no Podman, no image, no node/controller split, and no frp. A node **is** a computer. The data plane is a QUIC tunnel the computer opens to the server.
-
 ## Ports
 
-The server listens on three ports. All three are configurable at first start and stored in the server's database; later starts reuse the stored values.
+Set at first start and stored in the database; later starts reuse the stored values.
 
 | Port | Transport | Flag | Default | Use |
 | --- | --- | --- | --- | --- |
 | SSH | TCP | `--ssh-addr` | `:22` | Client entry, computer bootstrap, REPL |
-| HTTP | TCP | `--http-addr` | `:80` | Portals, the event API, and the sign-in page. Plain HTTP |
+| HTTP | TCP | `--http-addr` | `:80` | Portals, the event API, the sign-in page. Plain HTTP |
 | QUIC | UDP | `--quic-addr` | `:7443` | Computer tunnels |
 
-The operator's firewall must allow all three. Computers never configure a port: they connect to the SSH port, which is the one address a person types, and learn the QUIC endpoint during the handshake.
+The firewall must allow all three. A computer only ever types the SSH address; it learns the QUIC endpoint during the handshake.
 
-The HTTP port serves portals, plus two hosts the server answers itself. `event.<domain>` is the event API. `auth.<domain>` is the sign-in page for private portals. Labels `event` and `auth` cannot be claimed as portals. Any other unknown `Host` gets 421. TLS, if any, is terminated by an edge the operator runs in front of this port. This project does not issue certificates. A private portal's token is an access check, not encryption of the HTTP bytes.
+On the HTTP port, `event.<domain>` is the event API and `auth.<domain>` is the sign-in page; neither label can be claimed. Any other unknown `Host` gets 421. TLS, if any, is terminated by an edge the operator runs in front. box issues no certificates, and a private portal's token is an access check, not encryption.
 
 ## Binding clients
 
-There is no account. Trust is a public key accepted by the server.
+There is no account. Trust is a public key the server accepted.
 
-When the server is initialized it prints a one-time password and its expiry (five minutes). While that password is live, the first client to connect with any key gets a password prompt inside the session; the client that types the password is bound: the server stores that client's public key and then refuses the password. Expiry also refuses it. The password is never written to the client.
+At init the server prints a one-time password valid for five minutes. While it is live, the first client to connect with any key gets a password prompt inside the session; typing it binds that client's key, after which the password is refused. The password is never written to the client.
 
-To bind another client, either:
-
-- from an already bound client, run `pair`, which prints a new one-time password, or
-- on the server machine, run `box pair`.
-
-A bound key can be listed and removed from a bound client, or from the localhost CLI. Removing the last key does not unlock the server. Initialize again, or pair from localhost.
-
-Any bound key may reach any computer. Per-computer key scoping is not in the first version.
+To bind another client, run `pair` from a bound client, or `box pair` on the server machine. Keys are listed and removed from a bound client or the localhost CLI. Removing the last key does not unlock the server; initialize again or pair from localhost. Every bound key reaches every computer.
 
 ## Adding a computer
 
-A computer joins with a short approval code, verified by a person at the server. The code confirms the machine is the one the operator intends to add.
+A computer joins with a short approval code that a person verifies at the server.
 
 ```
 me@home:~$ box join box.example.com
@@ -68,69 +55,58 @@ waiting…
 approved. tunnel up as home.box.example.com
 ```
 
-1. The computer generates a 6-character code (mixed-case letters and digits) and prints it. It opens an SSH connection to the server — just the domain, default port 22, or `domain:port` — authenticating as `join+<name>` with a freshly generated key pair. Machine keys are never bound on the server; the key only opens the session. The computer then sends a hash of the code, not the code, as the first line of the session, and waits.
-2. The server adds a pending join: name, remote address, code hash, expiry 10 minutes. It appears in the server TUI and in the REPL `pending` list.
-3. A person approves it: enter the code in the TUI, or run `approve <code>` from a bound client. Five wrong attempts discard the pending join. Attempts are rate-limited per remote address.
-4. On approval the server generates a computer token and replies over the waiting SSH session: the token, the QUIC endpoint, and the server's QUIC certificate fingerprint. The computer stores them in `~/.box/computer.json`, mode 0600.
-5. The computer then runs its agent: it opens the QUIC tunnel and stays up.
+1. The computer prints a 6-character code (mixed-case letters and digits), connects over SSH (domain, default port 22, or `domain:port`) as `join+<name>` with a fresh key pair, sends a hash of the code as the first session line, and waits. Machine keys are never bound.
+2. The server adds a pending join — name, remote address, code hash, 10-minute expiry — shown in the TUI and the REPL `pending` list.
+3. A person approves: the code in the TUI, or `approve <code>` from a bound client. Five wrong attempts discard the join. Attempts are rate-limited per remote address.
+4. The server replies on the waiting session with a computer token, the QUIC endpoint, and its QUIC certificate fingerprint. The computer stores them in `~/.box/computer.json`, mode 0600, and starts its agent.
 
-The code is single use and never logged. Approval requires an already-bound key or access to the server console, so an attacker who can only reach the SSH port cannot approve their own machine.
+The code is single use and never logged. Approval needs a bound key or the server console, so reaching the SSH port is not enough to approve your own machine.
 
-`rm <name>` on the server deletes the computer's record and revokes its token. The agent's next reconnect is rejected; it wipes `~/.box` and exits. Rejoining repeats the approval ceremony.
+`rm <name>` deletes the record and revokes the token. The agent's next reconnect is rejected; it wipes `~/.box` and exits. Rejoining repeats the approval.
 
 ## The tunnel
 
-Every persistent byte between the server and a computer travels one QUIC connection the computer dials out. QUIC gives independent streams, so a stalled portal request never blocks an SSH session, and a single TLS 1.3 stack is the only encryption.
-
-The server's QUIC certificate is self-signed, generated at first start and stored next to the database. The computer pins its fingerprint at join time, delivered over the already-approved SSH session. There is no CA and no certificate renewal.
-
-Streams:
+Every persistent byte between server and computer travels one QUIC connection the computer dials. Streams are independent, so a stalled portal request never blocks an SSH session. TLS 1.3 is the only encryption. The server's certificate is self-signed at first start and pinned by the computer at join. There is no CA and no renewal.
 
 | Stream | Opened by | Carries |
 | --- | --- | --- |
-| Control | computer, once per connection | newline-delimited JSON frames: hello, portal claim/check/release, key pushes, stat replies, event publish and fetch |
-| `ssh` | server, per client session | raw TCP splice. The agent connects it to the machine's own sshd |
-| `portal` | server, per HTTP request | raw TCP. The agent connects it to 127.0.0.1 and the claimed port |
+| Control | computer, once per connection | newline-delimited JSON: hello, portal claim/check/release, key pushes, stat replies, event publish and fetch |
+| `ssh` | server, per client session | raw TCP to the machine's own sshd |
+| `portal` | server, per HTTP request | raw TCP to 127.0.0.1 and the claimed port |
 
-A server-opened stream begins with a small header naming its type and target; after the header the bytes pass through unchanged. The SSH handshake of a client runs end-to-end between the client and the computer's sshd. The server cannot read it.
+A server-opened stream starts with a small header naming its type and target, then passes bytes unchanged. A client's SSH handshake runs end-to-end with the computer's sshd; the server cannot read it.
 
-The control stream's first frame is the agent's hello: protocol version, computer name, token, login user, and the sshd host public key. The server refuses a protocol version it does not understand and an unknown token. Online **is** the tunnel: a computer is online exactly while its QUIC connection lives. There is no heartbeat table and no staleness window. When the tunnel drops, the server tears down its routes; when the agent reconnects, routes rebuild from the database.
-
-Reconnect always repeats the full bootstrap: SSH handshake first, which returns the current QUIC endpoint, then the tunnel. Moving the server or changing its QUIC port needs no change on any computer. The agent backs off from 1 second to 30 with jitter.
+The first control frame is the hello: protocol version, name, token, login user, sshd host public key. An unknown version or token is refused. Online **is** the tunnel — no heartbeat table, no staleness window. When the tunnel drops, routes go; when it returns, they rebuild from the database. Every reconnect repeats the SSH bootstrap first, so moving the server or its QUIC port needs no change on any computer. The agent backs off from 1 to 30 seconds with jitter.
 
 ## SSH entry
 
-The server speaks SSH with [charmbracelet/wish](https://github.com/charmbracelet/wish). SSH has no `Host` header, so the username and the key are the route. Auth is public-key only: the server never offers password auth, so an unknown key fails with `Permission denied (publickey)` and no password prompt ever appears. The one-time pairing password is typed at a prompt inside an already-keyed session, and the credentials machines present — the join hash and the computer token — ride the first line of the session.
+The server speaks SSH with [charmbracelet/wish](https://github.com/charmbracelet/wish). The username and the key are the route. Auth is public-key only, so an unknown key fails with `Permission denied (publickey)`. The pairing password is typed inside an already-keyed session; the join hash and the computer token ride the first session line.
 
 | Username | Auth | Result |
 | --- | --- | --- |
 | empty, or `box` | bound key | control REPL |
-| empty, or `box` | unknown key, only while a live pairing password exists | bind this key at an in-session prompt |
+| empty, or `box` | unknown key, only while a pairing password is live | bind this key at an in-session prompt |
 | `pair+<password>` | any key | bind this key, non-interactively |
-| `join+<name>` | any unbound key; approval-code hash as the first session line | park a pending computer join |
-| `boot+<name>` | any unbound key; computer token as the first session line | tunnel bootstrap for the agent |
-| a computer's name | bound client key | splice to that computer's sshd |
-| any other name | bound client key | control REPL |
+| `join+<name>` | any unbound key; code hash as first line | park a pending join |
+| `boot+<name>` | any unbound key; computer token as first line | tunnel bootstrap for the agent |
+| a computer's name | bound key | splice to that computer's sshd |
+| any other name | bound key | control REPL |
 
-Outside the pairing flows (`pair+`, `join+`, `boot+`, and the live-pairing prompt), an unbound key is rejected at auth. A bound key reaches every computer and opens the console under any username that is not a registered computer.
+Outside those pairing flows an unbound key is rejected at auth. A computer name cannot be `box`, `pair`, or `join`, and cannot contain `+` or `.`. Names are globally unique.
 
-A computer name cannot be `box`, `pair`, or `join`, and cannot contain `+` or `.`. Names are globally unique, so the username alone is enough.
-
-The splice is end-to-end: the client's handshake finishes at the computer's sshd against the keys the server pushed there. `scp`, `rsync`, SFTP, VS Code Remote-SSH, and `ssh -L` work because they arrive at a normal sshd. A disconnect does not stop anything on the computer.
+Because the splice ends at a normal sshd, `scp`, `rsync`, SFTP, VS Code Remote-SSH, and `ssh -L` work. A disconnect stops nothing on the computer.
 
 ## A computer
 
-The agent runs as a regular user. It never needs root. The login user is the user who ran `box join`, unless `--user <name>` names an existing account on that machine.
+The agent runs as a regular user and never needs root. The login user is whoever ran `box join`, unless `--user <name>` names another existing account. `ssh home@box.example.com` opens a shell as that account on the computer registered as `home`; the two names need not match.
 
-The SSH username is the computer's registered name. The account inside the session is the account that ran `box join`. Those names do not have to match. `ssh home@box.example.com` opens a shell as that account on the machine registered as `home`.
+The agent manages one file, `~/.ssh/box_authorized_keys`, kept in sync with the server's bound keys. The user's own `authorized_keys` is untouched. `box join` adds the file to sshd's `AuthorizedKeysFile` when it can write the config, prints each change, and reloads sshd when it can; otherwise it prints the lines and the reload command.
 
-The agent manages one file, `~/.ssh/box_authorized_keys`, and nothing else in the account. The server's bound client keys are written there and kept in sync over the control stream. The user's own `authorized_keys` is never touched, so logins that already use that file keep working. sshd ignores the managed file until `AuthorizedKeysFile` lists it. `box join` adds it when it can write sshd's config, prints each change, and reloads sshd when it can. When it cannot write the file, it prints the lines and the reload command.
+`env set` values live on the server only. Each splice session receives the current set as SSH env requests, so values exist on the computer only in that session's memory. sshd drops names outside `AcceptEnv`, so `box join` adds `AcceptEnv *` when no global `AcceptEnv` line exists and says so; existing lines are left alone. `env ls` prints names, never values.
 
-Environment variables set with `env set` are stored on the server only. When the server opens a splice session it sends the current set as per-session SSH env requests, so the values exist on the computer only inside that session's memory; the agent never writes them to disk. OpenSSH's sshd drops env requests whose names do not match its `AcceptEnv` setting, so `box join` adds `AcceptEnv *` when no global `AcceptEnv` line exists, and prints that change. `AcceptEnv` lines the operator already set are left as they are, and join says so. Because a splice session can only arrive through a live tunnel, there is no offline window to trade away. `env ls` prints names, never values.
+The agent writes the box skill to `~/.agents/skills/box/SKILL.md`. It holds no credentials.
 
-The agent also writes the box skill to `~/.agents/skills/box/SKILL.md` so an agent on the computer knows how to claim portals. The skill contains no credentials.
-
-Inside a computer, `box` is the guest CLI talking to the agent's unix socket at `~/.box/agent.sock`:
+On a computer, `box` is the guest CLI on the agent socket `~/.box/agent.sock`:
 
 ```
 box domain
@@ -146,47 +122,43 @@ box event get --since 0
 
 ## Portals
 
-A portal is a hostname routed to one TCP port on one computer. The computer claims it; the control REPL does not.
+A portal is a hostname routed to one TCP port on one computer. The computer claims it; the REPL does not.
 
-The parent domain is set when the server starts. `box domain` prints it. `check` and `add` take a label, never a full hostname; the server joins the label to the domain. A label cannot contain a dot, so a computer cannot claim a name outside that domain. `event` and `auth` are reserved. `add` claims atomically or refuses and names the holder. A computer can hold several labels; each points at one port. A portal hostname is globally unique and is not derived from the computer's name.
+`check` and `add` take a label; the server joins it to the domain set at server start (`box domain` prints it). A label cannot contain a dot; `event` and `auth` are reserved. `add` claims atomically or refuses and names the holder. A computer can hold several labels, each on one port. Hostnames are globally unique and not derived from the computer's name.
 
-`box portal add <label> <port>` is public. `box portal add <label> <port> private` requires an access token. The same computer can claim the label again to change that. Existing rows stay public.
+`box portal add <label> <port>` is public; appending `private` requires an access token. Claiming the label again changes that. Existing rows stay public.
 
-The claim travels the control stream. The server is the only place that knows every claim. Once accepted, an HTTP request arriving at the server's HTTP port with that `Host` opens a `portal` stream to the computer, and the agent connects it to `127.0.0.1:<port>` — so the process only needs to listen on loopback. The route exists before anything listens; the operator sees a connection error until it does. The printed URL carries no port; the edge in front of the server decides the reachable one.
+A request with a claimed `Host` opens a `portal` stream, which the agent connects to `127.0.0.1:<port>`, so the process only needs loopback. The route exists before anything listens. The printed URL carries no port; the edge decides the reachable one.
 
-A private portal checks the token before it opens the stream. A browser navigation (`Accept` contains `text/html`) with no token is redirected to `http://auth.<domain>/`. The page is served by box. Submitting a valid token sets an HttpOnly cookie on the parent domain, so the browser sends it to every portal host while the token is valid. Other clients send `X-Box-Token` or `Authorization: Bearer` and get 401 when it is missing or wrong. The server strips that cookie, and a bearer token that is one of its access tokens, before forwarding the request. One token opens every private portal. Public portals do not ask.
+A private portal checks the token before opening the stream. A browser navigation (`Accept` contains `text/html`) without one is redirected to `http://auth.<domain>/`, which sets an HttpOnly cookie on the parent domain once a valid token is submitted. Other clients send `X-Box-Token` or `Authorization: Bearer` and get 401 without it. The server strips that cookie, and a bearer token that is one of its access tokens, before forwarding. One token opens every private portal.
 
-Removing a computer drops its portals. The claim record lives on the server; the route lives only while the tunnel lives.
+Removing a computer drops its portals. Claims live on the server; routes live while the tunnel does.
 
 ## Events
 
-Events are a small in-memory log on the server. The log holds 256 lines. When it is full, the oldest line is dropped. Nothing is written to disk. A line has an id, a topic, a short body, a from label, and a time. The body is at most 4096 bytes and is a single line. Ids only increase. `get` and the HTTP poll return lines with a greater id.
-
-Three doors write and read the same log:
+An in-memory log of 256 lines on the server; the oldest drops when full. Nothing is written to disk. A line has an id, topic, body (single line, at most 4096 bytes), from label, and time. Ids only increase; reads return lines with a greater id.
 
 | Door | Who | How |
 | --- | --- | --- |
-| `http://event.<domain>/api/events` | a device that can speak HTTP | `POST` a JSON object `{"topic","body","from"}`. `GET /api/events?since=<id>&topic=<name>` polls. `from` defaults to `http`. Both require an access token |
-| `event pub` / `event get` | a bound SSH client, or `box event` on the server | the control REPL and the localhost socket. `from` is `ssh` or `server` |
-| `box event pub` / `box event get` | a program on a computer | the agent socket, then the control stream. `from` is the computer's name |
+| `http://event.<domain>/api/events` | a device that speaks HTTP | `POST {"topic","body","from"}`; `GET ?since=<id>&topic=<name>`. `from` defaults to `http`. Access token required |
+| `event pub` / `event get` | a bound SSH client, or `box event` on the server | `from` is `ssh` or `server` |
+| `box event pub` / `box event get` | a program on a computer | agent socket, then the control stream. `from` is the computer's name |
 
-`event.<domain>` answers only `/api/events`. It does not redirect to the sign-in page. A device stores the last id it saw and polls. A computer does not speak this HTTP API; it uses `box event`.
+`event.<domain>` answers only `/api/events` and never redirects to sign-in. Computers use `box event`, not the HTTP API.
 
 ## Access tokens
 
-The server creates access tokens. A computer cannot. `token add [comment]` prints the token. It does not expire. `token add --for 12h [comment]` sets a lifetime; `30d` and Go durations such as `720h` are accepted. The row keeps the token, a comment, and the expiry when one was set. `token ls` prints the token again. The TUI tokens screen shows every token and leaves it on screen, so the operator can copy it whenever they want. `token rm <id>` revokes it. A revoked or expired token stops opening private portals and the event API. The cookie the browser already holds fails the next check.
-
-Do not log a token. The SQLite file is the copy the operator reads back.
+Only the server creates them. `token add [comment]` prints a token with no expiry; `--for 12h` sets a lifetime (`30d` and Go durations such as `720h` work). `token ls` prints tokens again, and the TUI tokens screen keeps them on screen, so the operator can copy them any time. `token rm <id>` revokes one. A revoked or expired token stops opening private portals and the event API, including through a cookie the browser already holds. Never log a token.
 
 ## Control REPL and TUI
 
-The control plane is the SSH command itself, plus a REPL for a person. Interactive sessions are a full TUI built with bubbletea: tables for lists, forms for approval, color for state. The TUI is always dark. The status line shows a notice for five seconds — an action's result, or a computer joining, coming online, or going offline — then falls back to the key hints. Non-interactive sessions (`ssh box.example.com ls`) print plain text; `--json` is for scripts. Both share one service layer.
+The SSH command is the control plane. Non-interactive sessions (`ssh box.example.com ls`) print plain text, or JSON with `--json`. Interactive sessions get a bubbletea TUI. Both share one service layer.
 
 | Command | Effect |
 | --- | --- |
 | `ls` | Computers: name, online, user, address, agent version, portals |
 | `ssh <name>` | Open a shell on that computer |
-| `rm <name>` | Delete the computer and revoke its token. Ask for the name again |
+| `rm <name>` | Delete the computer and revoke its token. Asks for the name again |
 | `rename <name> <new>` | Rename. Portals stay claimed; the SSH username changes |
 | `stat <name>` | Live load from the agent: cpu, memory, disk, uptime |
 | `pending` | Computers waiting for approval |
@@ -196,62 +168,63 @@ The control plane is the SSH command itself, plus a REPL for a person. Interacti
 | `env set <name> <value>` | Store a variable. New splice sessions receive it |
 | `env rm <name>` | Remove it. Existing sessions keep the old value |
 | `env ls` | List names only |
-| `token add [--for 12h] [comment]` | Create an access token. No expiry unless `--for` is set |
-| `token ls` / `token rm <id>` | List tokens, including the secret, or revoke one |
+| `token add [--for 12h] [comment]` | Create an access token |
+| `token ls` / `token rm <id>` | List tokens with their secret, or revoke one |
 | `event pub <topic> <text>` | Append one event. `from` is `ssh` |
 | `event get [--since n] [--topic name]` | Print events newer than an id |
 | `whoami` | Which key this session used |
 
-On the server machine, `box` with no arguments opens the server TUI over the localhost socket: computers and their live state, the pending-join queue with an approval form, portals, keys, env names, and access tokens. The tokens screen shows each token in full and keeps showing it. It can add and remove tokens. It can approve, remove computers, and remove keys. It cannot bind a client key for itself — that stays on the SSH password path, so a person on the console cannot skip the key check by accident.
+The TUI is always dark. Screens, keyed 1–7: **summary**, computers, pending (with the approval form), portals, keys, env names, tokens. It opens on the summary:
 
-`box token` and `box event` on the server use the same localhost socket. On a computer, `box event` uses the agent socket. `box token` is refused there: only the server creates tokens.
+- Fleet tiles: computers online, pending joins, open and total spliced SSH sessions, control consoles, portal requests (rate, denied, failed), tunnel traffic and average RTT, server uptime, portal and token counts, tokens expired or expiring within a week.
+- One card per computer: RTT gauge, load sparkline, memory and disk used, traffic rate, open and total `ssh` and `portal` streams, tunnel age, host uptime, packet loss. Offline computers show as offline.
+- The newest events.
+
+Counters start when `box serve` or the tunnel starts; sparklines keep about 80 seconds of samples in the TUI and reset when it reopens. Load is asked from each live agent in parallel with a one-second timeout, and only while the summary is showing. The summary holds no secrets.
+
+The layout works down to 30×10. As width shrinks, tabs shorten to number keys, table columns drop by priority, fleet tiles fold into one overview card, and cards stack. The selected token and the one-time password wrap rather than being cut. The status line shows a notice for five seconds — an action's result, or a computer joining, coming online, or going offline — then falls back to the key hints.
+
+On the server machine, `box` with no arguments opens the same TUI over the localhost socket. It can approve, remove computers, remove keys, and add and remove tokens. It cannot bind a client key; that stays on the SSH password path. `box token` and `box event` on the server use the same socket. On a computer, `box event` uses the agent socket and `box token` is refused.
 
 ## Processes
-
-One process per machine. There is no frps, no Podman, no second binary.
 
 | Machine | Process | Listens |
 | --- | --- | --- |
 | Server | `box serve` | SSH, HTTP, QUIC, and a localhost socket |
 | Computer | `box join`, then `box agent` | nothing public; a unix socket in `~/.box` |
 
-`box agent` reads `~/.box/computer.json` and reconnects. It is meant to run under a systemd user unit so it starts at boot without root.
+`box agent` reads `~/.box/computer.json` and reconnects. It is meant to run under a systemd user unit.
 
 ## Data
 
-The server keeps one SQLite file in its data directory (default `/var/lib/box`, configurable with `--data-dir`).
+One SQLite file in the data directory (default `/var/lib/box`, `--data-dir`). It is the secret store and is not world-readable.
 
 - `keys`: public key, comment, bound at
 - `pairings`: hash of a one-time password, expiry, used at, failed attempts
 - `computers`: name, token hash, login user, sshd host public key, joined at
-- `portals`: hostname, computer, port, private, claimed at. `private` defaults to false
-- `tokens`: access token, comment, expiry, created at. The token value is stored so it can be copied again
-- `env`: name, value. The value is not returned by list commands
+- `portals`: hostname, computer, port, private (default false), claimed at
+- `tokens`: access token, comment, expiry, created at. The value is stored so it can be copied again
+- `env`: name, value. List commands never return the value
 - `meta`: domain, the three listen addresses, server keys, schema version
 
-Pending joins live in memory only. Events live in memory only. The SQLite file is the secret store; it is not world-readable. Computer names and portal hostnames are globally unique.
-
-The agent keeps `~/.box/computer.json`: token, QUIC endpoint, server fingerprint, name, login user. The server does not store per-computer files.
+Pending joins, events, and TUI counters live in memory only. The agent keeps `~/.box/computer.json`: token, QUIC endpoint, server fingerprint, name, login user.
 
 ## Install and deploy
 
-One release archive per OS and architecture, containing the single `box` binary. The install script (`scripts/install.sh`) downloads and verifies it, then asks one question: server or computer.
+One release archive per OS and architecture holds the `box` binary. `scripts/install.sh` downloads and verifies it, then asks: server or computer.
 
-- **Server**: install the binary, optionally a systemd unit, then `box serve --domain box.example.com`. Open the three ports in the firewall. The first start prints the one-time password.
-- **Computer**: install the binary, run `box join <domain>`, approve the code at the server, optionally install a systemd user unit for `box agent`.
-
-No container runtime, no image, no frp download, no cgroup check.
+- **Server**: install, optionally a systemd unit, run `box serve --domain box.example.com`, open the three ports. The first start prints the one-time password.
+- **Computer**: install, run `box join <domain>`, approve the code at the server, optionally install a systemd user unit for `box agent`.
 
 ## Not in the first version
 
-- accounts, billing, invites, teams, SSO
-- email
+- accounts, billing, invites, teams, SSO, email
 - a web coding agent
-- per-computer key scoping; every bound key reaches every computer
-- a TCP fallback for the tunnel. Networks that block UDP cannot run a computer
-- TLS on the HTTP port. Private portals check a token; they do not encrypt the connection
+- per-computer key scoping
+- a TCP fallback for the tunnel; networks that block UDP cannot run a computer
+- TLS on the HTTP port
 - moving a computer's identity between machines
-- resource limits on a computer; it is a whole machine
+- resource limits on a computer
 - CDN
 
 ## Dependencies
@@ -260,9 +233,7 @@ No container runtime, no image, no frp download, no cgroup check.
 | --- | --- | --- |
 | Client | OpenSSH, already installed | No client to ship |
 | Control SSH | charmbracelet/wish | An sshd we can branch on username and auth method |
-| TUI | bubbletea + lipgloss | wish's native companion; one framework for REPL and dashboard |
-| Tunnel | quic-go | Independent streams, one TLS stack, NAT rebinding, no extra daemon |
+| TUI | bubbletea + lipgloss | wish's companion; one framework for REPL and dashboard |
+| Tunnel | quic-go | Independent streams, one TLS stack, NAT rebinding, connection stats |
 | Server state | SQLite | One file, enough for a private deployment |
 | Computer SSH | the machine's openssh-server | A normal sshd, so scp and Remote-SSH work |
-
-The `box` binary, the server, the agent, and the skill are the code to write. The rest is the software above.

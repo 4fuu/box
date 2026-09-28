@@ -14,7 +14,8 @@ import (
 
 func TestModelRendersTableAndApproval(t *testing.T) {
 	m := &model{
-		width: 120,
+		width:  120,
+		screen: screenComputers,
 		snap: control.Snapshot{
 			Domain: "box.example.com",
 			Computers: []control.ComputerView{{
@@ -49,7 +50,8 @@ func TestModelRendersTableAndApproval(t *testing.T) {
 func TestRemoveAsksForTheName(t *testing.T) {
 	f := &fakeBackend{}
 	m := &model{
-		b: f,
+		b:      f,
+		screen: screenComputers,
 		snap: control.Snapshot{Computers: []control.ComputerView{{
 			Name: "home", User: "alice",
 		}}},
@@ -89,6 +91,7 @@ func TestRemoveAsksForTheName(t *testing.T) {
 func TestEnterSelectsThatComputer(t *testing.T) {
 	m := &model{
 		allowShell: true,
+		screen:     screenComputers,
 		cursor:     1,
 		snap: control.Snapshot{Computers: []control.ComputerView{
 			{Name: "home"},
@@ -286,6 +289,9 @@ type fakeBackend struct {
 
 func (f *fakeBackend) Snapshot(context.Context) (control.Snapshot, error) {
 	return control.Snapshot{}, nil
+}
+func (f *fakeBackend) Summary(context.Context) (control.Summary, error) {
+	return control.Summary{}, nil
 }
 func (f *fakeBackend) Approve(context.Context, string) (string, error) { return "", nil }
 func (f *fakeBackend) Remove(_ context.Context, name string) error {

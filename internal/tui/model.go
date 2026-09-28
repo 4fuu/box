@@ -20,7 +20,8 @@ const statusTTL = 5 * time.Second
 type screen int
 
 const (
-	screenComputers screen = iota
+	screenSummary screen = iota
+	screenComputers
 	screenPending
 	screenPortals
 	screenKeys
@@ -48,6 +49,7 @@ const (
 
 type styles struct {
 	title, header, selected lipgloss.Style
+	frame, value            lipgloss.Style
 	rowActive               lipgloss.Color
 	tabOn, tabOff           lipgloss.Style
 	on, off, warn, bad, dim lipgloss.Style
@@ -72,7 +74,16 @@ type model struct {
 	width     int
 	height    int
 
-	snap    control.Snapshot
+	snap control.Snapshot
+	// sum is the summary screen's data. It is fetched only while that
+	// screen is showing; hist keeps the samples its sparklines draw.
+	sum       control.Summary
+	sumLoaded bool
+	sumErr    string
+	hist      *history
+	// scroll is the summary screen's first visible line.
+	scroll int
+
 	screen  screen
 	cursor  int
 	mode    mode
@@ -91,6 +102,11 @@ type model struct {
 type snapMsg struct {
 	snap control.Snapshot
 	err  error
+}
+
+type sumMsg struct {
+	sum control.Summary
+	err error
 }
 
 type doneMsg struct {
@@ -112,6 +128,9 @@ type statusExpireMsg struct{ seq int }
 
 func (m *model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.load(), tick()}
+	if m.screen == screenSummary {
+		cmds = append(cmds, m.loadSummary())
+	}
 	// The startup notice (a completed bind, a parked session) is a status
 	// like any other: dismiss it to the hints after statusTTL.
 	if m.status != "" {
@@ -148,6 +167,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loaded = true
 		m.clamp()
 		return m, cmd
+	case sumMsg:
+		if msg.err != nil {
+			m.sumErr = msg.err.Error()
+			return m, nil
+		}
+		m.sumErr = ""
+		m.sum = msg.sum
+		m.sumLoaded = true
+		m.recordHistory()
+		return m, nil
 	case doneMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -170,6 +199,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		if m.busy {
 			return m, tick()
+		}
+		if m.screen == screenSummary {
+			return m, tea.Batch(m.load(), m.loadSummary(), tick())
 		}
 		return m, tea.Batch(m.load(), tick())
 	case statusExpireMsg:
@@ -258,30 +290,32 @@ func (m *model) onNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.shell = ""
 		return m, tea.Quit
 	case "tab", "right":
-		m.screen = (m.screen + 1) % screenCount
-		m.cursor = 0
-		return m, nil
+		return m, m.switchTo((m.screen + 1) % screenCount)
 	case "shift+tab", "left":
-		m.screen = (m.screen + screenCount - 1) % screenCount
-		m.cursor = 0
-		return m, nil
-	case "1", "2", "3", "4", "5", "6":
+		return m, m.switchTo((m.screen + screenCount - 1) % screenCount)
+	case "1", "2", "3", "4", "5", "6", "7":
 		n := int(k.String()[0] - '1')
 		if n >= int(screenCount) {
 			return m, nil
 		}
-		m.screen = screen(n)
-		m.cursor = 0
-		return m, nil
+		return m, m.switchTo(screen(n))
 	case "?":
 		m.mode = modeHelp
 		return m, nil
 	case "up", "k":
+		if m.screen == screenSummary {
+			m.scrollBy(-1)
+			return m, nil
+		}
 		if m.cursor > 0 {
 			m.cursor--
 		}
 		return m, nil
 	case "down", "j":
+		if m.screen == screenSummary {
+			m.scrollBy(1)
+			return m, nil
+		}
 		if m.cursor+1 < m.count() {
 			m.cursor++
 		}
@@ -492,6 +526,29 @@ func (m *model) confirmYes() (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		m.target = ""
 		return m, nil
+	}
+}
+
+// switchTo changes screen. The summary is fetched at once rather than on the
+// next tick, so it does not open on stale numbers.
+func (m *model) switchTo(s screen) tea.Cmd {
+	m.screen = s
+	m.cursor = 0
+	m.scroll = 0
+	if s == screenSummary {
+		return m.loadSummary()
+	}
+	return nil
+}
+
+func (m *model) loadSummary() tea.Cmd {
+	b, ctx := m.b, m.ctx
+	if b == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		sum, err := b.Summary(ctx)
+		return sumMsg{sum: sum, err: err}
 	}
 }
 

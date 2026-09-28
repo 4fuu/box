@@ -31,6 +31,8 @@ type Service struct {
 	Live         *Live
 	// Events is the in-memory log. Nil means publishing is unavailable.
 	Events *event.Bus
+	// Metrics counts sessions and portal requests. Nil counts nothing.
+	Metrics *Metrics
 	// Grant finishes an approved join. The server parks the SSH session and
 	// sends the token there. Approve does not hold the queue lock across Grant.
 	Grant      func(approve.Pending) error

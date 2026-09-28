@@ -569,6 +569,8 @@ func TestPairOverPTY(t *testing.T) {
 
 	readUntil(t, br, "password: ")
 	fmt.Fprintf(in, "%s\r", pass)
+	readUntil(t, br, "summary")
+	fmt.Fprint(in, "2")
 	got := readUntil(t, br, "PORTALS")
 	if !strings.Contains(got, "NAME") || !strings.Contains(got, "ONLINE") || !strings.Contains(got, "\r\n") {
 		t.Fatalf("tui missing the computer table, got %q", got)

@@ -24,6 +24,9 @@ type streamConn struct {
 	r      io.Reader
 	local  net.Addr
 	remote net.Addr
+	// onClose runs once, on the first Close. Conn uses it to count open streams.
+	onClose   func()
+	closeOnce sync.Once
 }
 
 func newStreamConn(st *quic.Stream, r io.Reader, local, remote net.Addr) net.Conn {
@@ -37,6 +40,9 @@ func (c *streamConn) Read(p []byte) (int, error)  { return c.r.Read(p) }
 func (c *streamConn) Write(p []byte) (int, error) { return c.str.Write(p) }
 
 func (c *streamConn) Close() error {
+	if c.onClose != nil {
+		c.closeOnce.Do(c.onClose)
+	}
 	c.str.CancelRead(0)
 	return c.str.Close()
 }

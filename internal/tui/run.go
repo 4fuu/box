@@ -155,6 +155,8 @@ func newStyles(w io.Writer, term string) styles {
 	}
 	return styles{
 		title:     r.NewStyle().Bold(true).Foreground(p.accent),
+		frame:     r.NewStyle().Foreground(p.muted),
+		value:     r.NewStyle().Bold(true).Foreground(p.text),
 		header:    r.NewStyle().Bold(true),
 		selected:  r.NewStyle().Bold(true).Foreground(p.text).Background(p.rowActive),
 		rowActive: p.rowActive,

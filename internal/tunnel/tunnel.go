@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/4fuu/box/internal/rpc"
@@ -137,7 +138,7 @@ func (s *Server) Accept(ctx context.Context) (*Conn, error) {
 		return nil, err
 	}
 	ctrl := newControl(qconn, st, dec, "s")
-	c := &Conn{srv: s, ctrl: ctrl, id: id}
+	c := &Conn{srv: s, ctrl: ctrl, id: id, since: time.Now()}
 	if err := s.track(c); err != nil {
 		_ = qconn.CloseWithError(0, "closed")
 		return nil, err
@@ -277,9 +278,51 @@ func (s *Server) Close() error {
 
 // Conn is one computer accepted by the server.
 type Conn struct {
-	srv  *Server
-	ctrl *control
-	id   Identity
+	srv   *Server
+	ctrl  *control
+	id    Identity
+	since time.Time
+
+	sshOpen, sshTotal       atomic.Int64
+	portalOpen, portalTotal atomic.Int64
+}
+
+// ConnStats is one tunnel's transport counters. They start at zero when the
+// computer connects; a reconnect is a new Conn.
+type ConnStats struct {
+	Since         time.Time     `json:"since"`
+	RTT           time.Duration `json:"rtt"`
+	RTTVar        time.Duration `json:"rtt_var"`
+	BytesSent     uint64        `json:"bytes_sent"`
+	BytesReceived uint64        `json:"bytes_received"`
+	PacketsSent   uint64        `json:"packets_sent"`
+	PacketsLost   uint64        `json:"packets_lost"`
+	SSHOpen       int64         `json:"ssh_open"`
+	SSHTotal      int64         `json:"ssh_total"`
+	PortalOpen    int64         `json:"portal_open"`
+	PortalTotal   int64         `json:"portal_total"`
+}
+
+// Stats reads the QUIC connection's counters and the streams this Conn opened.
+func (c *Conn) Stats() ConnStats {
+	st := ConnStats{
+		Since:       c.since,
+		SSHOpen:     c.sshOpen.Load(),
+		SSHTotal:    c.sshTotal.Load(),
+		PortalOpen:  c.portalOpen.Load(),
+		PortalTotal: c.portalTotal.Load(),
+	}
+	if c.ctrl == nil || c.ctrl.qconn == nil {
+		return st
+	}
+	q := c.ctrl.qconn.ConnectionStats()
+	st.RTT = q.SmoothedRTT
+	st.RTTVar = q.MeanDeviation
+	st.BytesSent = q.BytesSent
+	st.BytesReceived = q.BytesReceived
+	st.PacketsSent = q.PacketsSent
+	st.PacketsLost = q.PacketsLost
+	return st
 }
 
 func (c *Conn) Name() string       { return c.id.Name }
@@ -328,7 +371,15 @@ func (c *Conn) open(ctx context.Context, kind string, port int) (net.Conn, error
 		st.CancelWrite(0)
 		return nil, err
 	}
-	return newStreamConn(st, nil, c.ctrl.qconn.LocalAddr(), c.ctrl.qconn.RemoteAddr()), nil
+	open, total := &c.portalOpen, &c.portalTotal
+	if kind == KindSSH {
+		open, total = &c.sshOpen, &c.sshTotal
+	}
+	total.Add(1)
+	open.Add(1)
+	sc := newStreamConn(st, nil, c.ctrl.qconn.LocalAddr(), c.ctrl.qconn.RemoteAddr()).(*streamConn)
+	sc.onClose = func() { open.Add(-1) }
+	return sc, nil
 }
 
 func (c *Conn) Close() error {

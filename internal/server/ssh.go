@@ -197,6 +197,7 @@ func (h *sshServer) serveBootstrap(sess ssh.Session) {
 }
 
 func (h *sshServer) serveREPL(sess ssh.Session) {
+	defer h.s.svc.Metrics.Console()()
 	ptyReq, winch, pty := sess.Pty()
 	if len(sess.Command()) == 0 {
 		h.serveTUI(sess, ptyReq, winch, pty)
@@ -515,6 +516,7 @@ func (h *sshServer) bridgeIO(sess ssh.Session, computer string, closeSession boo
 		return err
 	}
 	defer bs.Close()
+	defer h.s.svc.Metrics.Session()()
 	if pty, winch, ok := sess.Pty(); ok {
 		_ = bs.RequestPty(pty.Term, pty.Window.Height, pty.Window.Width, gossh.TerminalModes{})
 		if setWinch != nil {
@@ -603,6 +605,7 @@ func (h *sshServer) subsystem(sess ssh.Session) {
 		return
 	}
 	defer bs.Close()
+	defer h.s.svc.Metrics.Session()()
 	stdin, err := bs.StdinPipe()
 	if err != nil {
 		_ = sess.Exit(1)

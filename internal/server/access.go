@@ -34,8 +34,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "unknown host\n")
 		return
 	}
+	s.svc.Metrics.Request()
 	if p.Private {
 		if _, ok := s.presented(r); !ok {
+			s.svc.Metrics.Denied()
 			if wantsHTML(r) && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 				http.Redirect(w, r, s.authURL(r), http.StatusFound)
 				return

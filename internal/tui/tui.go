@@ -14,6 +14,7 @@ import (
 // The SSH REPL adapts control.Service. The dashboard adapts the localhost socket.
 type Backend interface {
 	Snapshot(context.Context) (control.Snapshot, error)
+	Summary(context.Context) (control.Summary, error)
 	Approve(ctx context.Context, code string) (string, error)
 	Remove(ctx context.Context, name string) error
 	Rename(ctx context.Context, oldName, newName string) error

@@ -17,6 +17,10 @@ func (b ServiceBackend) Snapshot(context.Context) (control.Snapshot, error) {
 	return b.Svc.Snapshot()
 }
 
+func (b ServiceBackend) Summary(ctx context.Context) (control.Summary, error) {
+	return b.Svc.Summary(ctx)
+}
+
 func (b ServiceBackend) Approve(_ context.Context, code string) (string, error) {
 	return b.Svc.Approve(code, b.From)
 }

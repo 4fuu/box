@@ -133,7 +133,22 @@ func TestStreamsAndHello(t *testing.T) {
 	if peer.LocalAddr() == nil || peer.RemoteAddr() == nil {
 		t.Fatal("missing addr")
 	}
+	if st := conn.Stats(); st.PortalOpen != 1 || st.SSHOpen != 0 {
+		t.Fatalf("open streams %+v", st)
+	}
 	exchange(t, portal, peer)
+	st := conn.Stats()
+	if st.SSHTotal != 1 || st.PortalTotal != 1 || st.SSHOpen != 0 || st.PortalOpen != 0 {
+		t.Fatalf("stream counts %+v", st)
+	}
+	if st.Since.IsZero() || st.BytesSent == 0 || st.BytesReceived == 0 {
+		t.Fatalf("transport stats %+v", st)
+	}
+	// A second Close must not count the stream closed twice.
+	_ = portal.Close()
+	if st := conn.Stats(); st.PortalOpen != 0 {
+		t.Fatalf("double close counted: %+v", st)
+	}
 }
 
 func exchange(t *testing.T, a, b interface {

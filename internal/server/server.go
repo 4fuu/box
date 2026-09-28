@@ -130,6 +130,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Queue:        approve.New(),
 		Live:         control.NewLive(),
 		Events:       event.New(),
+		Metrics:      control.NewMetrics(),
 	}
 	if err := printFirstPassword(svc, st, cfg.Stdout); err != nil {
 		st.Close()
@@ -454,6 +455,7 @@ func (s *Server) Close() error {
 func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Portal) {
 	conn := s.svc.Live.Get(p.Computer)
 	if conn == nil {
+		s.svc.Metrics.Failed()
 		http.Error(w, "computer offline\n", http.StatusBadGateway)
 		return
 	}
@@ -471,6 +473,7 @@ func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Por
 			DisableKeepAlives: true,
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			s.svc.Metrics.Failed()
 			http.Error(w, "bad gateway\n", http.StatusBadGateway)
 		},
 		FlushInterval: -1,
@@ -579,6 +582,8 @@ func (s *Server) local(op string, body json.RawMessage) (any, error) {
 		return s.svc.Stat(context.Background(), req.Name)
 	case "status":
 		return s.svc.Status()
+	case "summary":
+		return s.svc.Summary(context.Background())
 	case "snapshot":
 		// Tokens are included so the TUI can copy them. Do not log this value.
 		return s.svc.Snapshot()

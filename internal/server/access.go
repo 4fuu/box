@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/4fuu/box/internal/event"
 	"github.com/4fuu/box/internal/ident"
@@ -51,55 +54,202 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveEvent(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/api/events" {
-		http.NotFound(w, r)
-		return
-	}
-	if _, ok := s.presented(r); !ok {
+	tok, ok := s.presented(r)
+	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, "unauthorized\n")
 		return
 	}
-	switch r.Method {
-	case http.MethodGet:
-		since, err := parseSince(r.URL.Query().Get("since"))
-		if err != nil {
-			http.Error(w, "invalid since\n", http.StatusBadRequest)
-			return
-		}
-		list, err := s.svc.ReadEvents(since, r.URL.Query().Get("topic"))
-		if err != nil {
-			http.Error(w, "unavailable\n", http.StatusServiceUnavailable)
-			return
-		}
-		writeJSON(w, http.StatusOK, struct {
-			Events []event.Item `json:"events"`
-		}{Events: list})
-	case http.MethodPost:
-		var req struct {
-			Topic string `json:"topic"`
-			Body  string `json:"body"`
-			From  string `json:"from"`
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, event.MaxBody+512)
-		dec := json.NewDecoder(r.Body)
-		if err := dec.Decode(&req); err != nil {
-			http.Error(w, "bad request\n", http.StatusBadRequest)
-			return
-		}
-		from := strings.TrimSpace(req.From)
-		if from == "" {
-			from = "http"
-		}
-		item, err := s.svc.PublishEvent(from, req.Topic, req.Body)
-		if err != nil {
-			http.Error(w, "bad request\n", http.StatusBadRequest)
-			return
-		}
-		writeJSON(w, http.StatusCreated, item)
-	default:
+	// A client never names its own from: it comes from the token.
+	from := event.ParseFrom(tok.Comment, tok.ID)
+	tokenID := tok.ID
+	switch {
+	case r.URL.Path == "/api/events" && r.Method == http.MethodGet:
+		s.eventRead(w, r)
+	case r.URL.Path == "/api/events" && r.Method == http.MethodPost:
+		s.eventPostJSON(w, r, from, tokenID)
+	case strings.HasPrefix(r.URL.Path, "/api/events/") && r.Method == http.MethodPost:
+		s.eventPostRaw(w, r, from, tokenID)
+	case r.URL.Path == "/api/events" || strings.HasPrefix(r.URL.Path, "/api/events/"):
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method\n", http.StatusMethodNotAllowed)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// eventCtx ends a read when the client leaves or the server shuts down.
+func (s *Server) eventCtx(r *http.Request) (context.Context, context.CancelFunc, error) {
+	select {
+	case <-s.done:
+		return nil, nil, errShuttingDown
+	default:
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	go func() {
+		select {
+		case <-s.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel, nil
+}
+
+var errShuttingDown = errors.New("shutting down")
+
+func (s *Server) eventRead(w http.ResponseWriter, r *http.Request) {
+	q, err := parseEventQuery(r.URL.Query())
+	if err != nil {
+		http.Error(w, err.Error()+"\n", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel, err := s.eventCtx(r)
+	if err != nil {
+		http.Error(w, "unavailable\n", http.StatusServiceUnavailable)
+		return
+	}
+	defer cancel()
+	res, err := s.svc.ReadEvents(ctx, q)
+	if err != nil {
+		// Canceled means the client or the server went away mid-wait and
+		// there is no one left to tell.
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		http.Error(w, "unavailable\n", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// parseEventQuery reads since, topic (repeatable), from (repeatable),
+// limit (1–1000, default 100), and wait (0–25 whole seconds).
+func parseEventQuery(v url.Values) (event.Query, error) {
+	q := event.Query{Limit: event.DefaultLimit}
+	since, err := parseSince(v.Get("since"))
+	if err != nil {
+		return q, errBadSince
+	}
+	q.Since = since
+	q.Topics = v["topic"]
+	for _, f := range v["from"] {
+		if !event.ValidFrom(f) {
+			return q, errBadFrom
+		}
+	}
+	if _, err := event.ParseFilters(q.Topics); err != nil {
+		return q, errBadTopic
+	}
+	if raw := v.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > event.MaxLimit {
+			return q, errBadLimit
+		}
+		q.Limit = n
+	}
+	if raw := v.Get("wait"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 || n > event.MaxWaitSeconds {
+			return q, errBadWait
+		}
+		q.Wait = time.Duration(n) * time.Second
+	}
+	return q, nil
+}
+
+var (
+	errBadSince = errors.New("invalid since")
+	errBadFrom  = errors.New("invalid from")
+	errBadTopic = errors.New("invalid topic filter")
+	errBadLimit = errors.New("invalid limit")
+	errBadWait  = errors.New("invalid wait")
+)
+
+// eventEnvelopeMax bounds one JSON POST envelope. A 1 MiB body is ~1.4 MiB
+// base64 and up to ~6 MiB as escaped JSON text; anything larger is a mistake.
+const eventEnvelopeMax = 8 << 20
+
+func (s *Server) eventPostJSON(w http.ResponseWriter, r *http.Request, from string, tokenID int64) {
+	r.Body = http.MaxBytesReader(w, r.Body, eventEnvelopeMax)
+	var req struct {
+		Topic   string  `json:"topic"`
+		Body    *string `json:"body"`
+		BodyB64 *string `json:"body_b64"`
+		Key     string  `json:"key"`
+		From    string  `json:"from"` // ignored: from comes from the token
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeEventError(w, err)
+		return
+	}
+	var body []byte
+	switch {
+	case req.Body != nil && req.BodyB64 != nil:
+		http.Error(w, "one body field\n", http.StatusBadRequest)
+		return
+	case req.Body != nil:
+		body = []byte(*req.Body)
+	case req.BodyB64 != nil:
+		b, err := base64.StdEncoding.DecodeString(*req.BodyB64)
+		if err != nil {
+			http.Error(w, "invalid body_b64\n", http.StatusBadRequest)
+			return
+		}
+		body = b
+	}
+	s.eventStore(w, from, tokenID, req.Topic, body, req.Key)
+}
+
+func (s *Server) eventPostRaw(w http.ResponseWriter, r *http.Request, from string, tokenID int64) {
+	topic := strings.TrimPrefix(r.URL.Path, "/api/events/")
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		key = r.URL.Query().Get("key")
+	}
+	// The request body is stored verbatim; only its size is checked.
+	body, err := io.ReadAll(io.LimitReader(r.Body, event.MaxBody+1))
+	if err != nil {
+		http.Error(w, "bad request\n", http.StatusBadRequest)
+		return
+	}
+	s.eventStore(w, from, tokenID, topic, body, key)
+}
+
+func (s *Server) eventStore(w http.ResponseWriter, from string, tokenID int64, topic string, body []byte, key string) {
+	if len(body) > event.MaxBody {
+		http.Error(w, "body over 1 MiB\n", http.StatusRequestEntityTooLarge)
+		return
+	}
+	item, dup, err := s.svc.PublishEvent(from, &tokenID, topic, body, key)
+	if err != nil {
+		writeEventError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if dup {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, struct {
+		ID        int64 `json:"id"`
+		Duplicate bool  `json:"duplicate,omitempty"`
+	}{ID: item.ID, Duplicate: dup})
+}
+
+// writeEventError maps one publish or envelope failure to a short answer.
+func writeEventError(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	switch {
+	case errors.As(err, &maxErr), errors.Is(err, event.ErrBodyTooLarge):
+		http.Error(w, "body over 1 MiB\n", http.StatusRequestEntityTooLarge)
+	case errors.Is(err, event.ErrInvalidTopic):
+		http.Error(w, "invalid topic\n", http.StatusBadRequest)
+	case errors.Is(err, event.ErrInvalidKey):
+		http.Error(w, "invalid key\n", http.StatusBadRequest)
+	case errors.Is(err, event.ErrInvalidFrom):
+		http.Error(w, "invalid from\n", http.StatusBadRequest)
+	default:
+		http.Error(w, "bad request\n", http.StatusBadRequest)
 	}
 }
 
@@ -296,5 +446,3 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(v)
 }
-
-var errBadSince = errors.New("invalid since")

@@ -29,8 +29,8 @@ type Service struct {
 	SplicePublic string
 	Queue        *approve.Queue
 	Live         *Live
-	// Events is the in-memory log. Nil means publishing is unavailable.
-	Events *event.Bus
+	// Events is the durable log. Nil means publishing is unavailable.
+	Events *event.Log
 	// Metrics counts sessions and portal requests. Nil counts nothing.
 	Metrics *Metrics
 	// Grant finishes an approved join. The server parks the SSH session and

@@ -102,22 +102,37 @@ box token rm 1
 
 `token add` 打印令牌。`token ls` 和 TUI 会再次打印它，所以可以反复复制。默认没有有效期，需要时再用 `--for`（`box token add --for 12h door`）。
 
-事件是服务器内存里的一份日志。不是计算机的设备走 HTTP。计算机用 `box event`。已绑定的 SSH 客户端用 `event pub` 和 `event get`。
+事件是服务器 SQLite 文件里的一份持久日志：最多 100000 条，最多保留 7 天。不是计算机的设备用令牌走 HTTP。计算机用 `box event`。已绑定的 SSH 客户端用 `event pub` 和 `event get`。
 
 ```bash
 box event pub door open
+box event pub door --key door-1   # 去重：重试返回同一个 id
 box event get --since 0
+box event get --follow --topic door
+```
+
+每个设备发一个自己的令牌，备注写设备名 —— 备注会成为事件的 `from`：
+
+```bash
+box token add door-sensor
 ```
 
 ```bash
-curl -H "X-Box-Token: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"topic":"door","body":"open","from":"sensor-1"}' \
-  http://event.box.example.com/api/events
-curl -H "X-Box-Token: $TOKEN" \
-  'http://event.box.example.com/api/events?since=0&topic=door'
+# 小设备一行搞定；请求体按原样存储
+curl -H "X-Box-Token: $TOKEN" -H "Idempotency-Key: door-1" \
+  -d 'open' http://event.box.example.com/api/events/kitchen/door
+
+# 长轮询循环
+while true; do
+  curl -s -H "X-Box-Token: $TOKEN" \
+    "http://event.box.example.com/api/events?since=$SINCE&topic=kitchen/%23&wait=25"
+done
 ```
 
-日志保留 256 条，满了丢掉最旧的。不写入磁盘。
+每次读取都会返回 `{"events":[...],"oldest":n,"latest":n,"more":b}`：
+`oldest` 是仍保留的最小 id，`latest` 是分配过的最大 id。id 是 64 位 ——
+游标要存进 64 位整数。正文编码规则、去重键等细节见
+[DESIGN.md](docs/DESIGN.md#events)（英文）。
 
 `env set NAME <value>` 保存变量并推送到在线的计算机。`env ls` 只打印名字，不打印值。访问令牌不是环境变量：`token ls` 会打印令牌。
 

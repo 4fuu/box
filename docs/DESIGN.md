@@ -118,6 +118,7 @@ http://web.box.example.com
 box portal add lock 3000 private
 box event pub door open
 box event get --since 0
+box event get --follow --topic door
 ```
 
 ## Portals
@@ -136,15 +137,61 @@ Removing a computer drops its portals. Claims live on the server; routes live wh
 
 ## Events
 
-An in-memory log of 256 lines on the server; the oldest drops when full. Nothing is written to disk. A line has an id, topic, body (single line, at most 4096 bytes), from label, and time. Ids only increase; reads return lines with a greater id.
+A durable log in the server's SQLite file. An event has an id, topic, body, from label, time, and a key when the publisher sent one. Ids are 64-bit, server-assigned, and only increase; they never repeat, not across restarts, not after pruning. The server keeps at most 100000 events and nothing older than 7 days. Pruning runs on the write path, amortised over inserts, with index-driven deletes. Constants, not flags.
 
-| Door | Who | How |
-| --- | --- | --- |
-| `http://event.<domain>/api/events` | a device that speaks HTTP | `POST {"topic","body","from"}`; `GET ?since=<id>&topic=<name>`. `from` defaults to `http`. Access token required |
-| `event pub` / `event get` | a bound SSH client, or `box event` on the server | `from` is `ssh` or `server` |
-| `box event pub` / `box event get` | a program on a computer | agent socket, then the control stream. `from` is the computer's name |
+- Topic: 1–255 bytes, segments separated by `/`, each segment `[A-Za-z0-9_.-]+`. No empty segments, so no leading or trailing `/` and none doubled. `#`, `+`, and whitespace never appear in a published topic.
+- Body: any bytes, including newlines and binary, at most 1 MiB (1048576). Empty is allowed. 1 MiB is a protection cap, not a format rule.
+- Key (optional): 1–128 bytes of printable ASCII without spaces. When the same `from` publishes the same key while the original is still retained, the original event comes back — same id, `duplicate` set — and nothing is stored. One transaction behind a unique index makes this race-free. A key expires with its event.
 
-`event.<domain>` answers only `/api/events` and never redirects to sign-in. Computers use `box event`, not the HTTP API.
+| Door | `from` |
+| --- | --- |
+| `http://event.<domain>/api/events` — a device that speaks HTTP. Access token required | the token's comment, when it is a valid label; else `token-<id>` |
+| `event pub` / `event get` — the control REPL | `ssh` |
+| `box event` on the server, over the localhost socket | `server` |
+| `box event` on a computer — agent socket, then the control stream | the computer's name |
+
+A client never names its own `from`; a `from` in a JSON body is ignored. Give each device its own token with a meaningful comment: `box token add door-sensor`.
+
+### Reading
+
+`GET /api/events?since=&topic=&from=&limit=&wait=`. `since` is an id cursor, default 0. `topic` and `from` are repeatable; each list is a union. A topic filter is an exact topic, or a prefix ending in `/#`: `site1/#` matches `site1/a` and `site1/a/b`, not `site1` itself and not `site10/x`. A bare `#` matches everything. Prefix filters walk an index range, never `LIKE`. In a URL, `#` is written `%23`: `topic=site1/%23`. `limit` is 1–1000, default 100. Results are ordered by id ascending, ids strictly greater than `since`, at most `limit`.
+
+Every read response carries the window, so a client can detect gaps and start from now:
+
+```json
+{"events":[...],"oldest":123,"latest":456,"more":false}
+```
+
+`oldest` is the smallest retained id, `latest` the largest id ever assigned; both are 0 on an empty log, and `latest` survives pruning and restarts. A client whose `since` is below `oldest-1` missed events. `more` is set when `limit` cut the result.
+
+With `wait` (0–25 whole seconds, default 0) and no matching event after `since`, the read blocks until a matching publish or the wait ends, then answers — possibly empty, always with the window. A publish broadcasts in-process; each wake-up re-queries SQLite; no goroutine polls the database. The wait ends early when the client leaves, the control stream closes, or the server stops. 25 seconds stays under the agent's 30-second call timeout to the server. Concurrent waiters are not capped; each holds one goroutine and one open request.
+
+A body that is valid UTF-8 is a JSON string in `body`; any other bytes are base64 in `body_b64`. An empty body carries neither field.
+
+### Publishing
+
+- `POST /api/events` with JSON `{"topic","body","key"?}`. Binary bodies use `"body_b64"` instead of `"body"`; sending both is 400. A `from` field is ignored. Answers `201 {"id":n}`; a dedup hit answers `200 {"id":n,"duplicate":true}`.
+- `POST /api/events/<topic>` with any body and any content type: the request bytes are stored verbatim. This is the one-line path for tiny devices. The key rides `Idempotency-Key` or `?key=`. Same answers.
+- A body over 1 MiB is 413. A bad topic, key, or filter value is 400 with a one-line reason.
+
+`event.<domain>` answers only `/api/events` and `/api/events/...` and never redirects to sign-in. Computers use `box event`, not the HTTP API.
+
+### Small devices
+
+Ids are 64-bit. Store the cursor in a 64-bit integer; a 32-bit counter (some ArduinoJson configurations) wraps. Two patterns with curl:
+
+```bash
+curl -H "X-Box-Token: $TOKEN" -H "Idempotency-Key: door-1" \
+  -d 'open' http://event.box.example.com/api/events/kitchen/door
+
+while true; do
+  curl -s -H "X-Box-Token: $TOKEN" \
+    "http://event.box.example.com/api/events?since=$SINCE&topic=kitchen/%23&wait=25"
+  # advance SINCE to the last id seen, or to latest on the first answer
+done
+```
+
+On a computer, `box event get --follow` runs that loop and prints one line per event; `box event get --since 0` replays what is retained.
 
 ## Access tokens
 
@@ -170,8 +217,8 @@ The SSH command is the control plane. Non-interactive sessions (`ssh box.example
 | `env ls` | List names only |
 | `token add [--for 12h] [comment]` | Create an access token |
 | `token ls` / `token rm <id>` | List tokens with their secret, or revoke one |
-| `event pub <topic> <text>` | Append one event. `from` is `ssh` |
-| `event get [--since n] [--topic name]` | Print events newer than an id |
+| `event pub <topic> [text…] [--key k]` | Append one event. Text args join into the body. `from` is `ssh` |
+| `event get [--since n] [--topic t]… [--from f]… [--limit n] [--wait s]` | Print events newer than an id, oldest first. `--topic` takes `prefix/#` too |
 | `whoami` | Which key this session used |
 
 The TUI is always dark. Screens, keyed 1–7: **summary**, computers, pending (with the approval form), portals, keys, env names, tokens. It opens on the summary:
@@ -197,7 +244,7 @@ On the server machine, `box` with no arguments opens the same TUI over the local
 
 ## Data
 
-One SQLite file in the data directory (default `/var/lib/box`, `--data-dir`). It is the secret store and is not world-readable.
+One SQLite file in the data directory (default `/var/lib/box`, `--data-dir`). It is the secret store and is not world-readable. The file runs in WAL journal mode with `synchronous=NORMAL`.
 
 - `keys`: public key, comment, bound at
 - `pairings`: hash of a one-time password, expiry, used at, failed attempts
@@ -205,9 +252,10 @@ One SQLite file in the data directory (default `/var/lib/box`, `--data-dir`). It
 - `portals`: hostname, computer, port, private (default false), claimed at
 - `tokens`: access token, comment, expiry, created at. The value is stored so it can be copied again
 - `env`: name, value. List commands never return the value
+- `events`: id (AUTOINCREMENT, int64), topic, body (any bytes), from label, token id, dedup key, created at. Indexed on (topic, id) and (from, id); a partial unique index on (from, dedup key) makes dedup race-free. At most 100000 rows, none older than 7 days
 - `meta`: domain, the three listen addresses, server keys, schema version
 
-Pending joins, events, and TUI counters live in memory only. The agent keeps `~/.box/computer.json`: token, QUIC endpoint, server fingerprint, name, login user.
+Pending joins and TUI counters live in memory only. The agent keeps `~/.box/computer.json`: token, QUIC endpoint, server fingerprint, name, login user.
 
 ## Install and deploy
 

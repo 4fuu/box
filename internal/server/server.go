@@ -63,6 +63,7 @@ type Server struct {
 	mu       sync.Mutex
 	waiters  map[string]*joinWaiter
 	cancel   context.CancelFunc
+	done     chan struct{}
 	once     sync.Once
 	closeErr error
 }
@@ -129,7 +130,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		SplicePublic: strings.TrimSpace(spliceLine),
 		Queue:        approve.New(),
 		Live:         control.NewLive(),
-		Events:       event.New(),
+		Events:       event.NewLog(st),
 		Metrics:      control.NewMetrics(),
 	}
 	if err := printFirstPassword(svc, st, cfg.Stdout); err != nil {
@@ -143,6 +144,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		splice:      signer,
 		fingerprint: fp,
 		waiters:     map[string]*joinWaiter{},
+		done:        make(chan struct{}),
 	}
 	svc.Grant = s.grant
 	ctx, cancel := context.WithCancel(ctx)
@@ -331,6 +333,20 @@ func (s *Server) attach(c *tunnel.Conn) {
 	go s.svc.PushAll(context.Background(), c)
 }
 
+// controlCtx ends a control-stream handler when the tunnel drops. Long
+// polls need it; one-shot calls finish before it matters.
+func controlCtx(c *tunnel.Conn) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-c.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx
+}
+
 func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 	return func(op string, body json.RawMessage) (any, error) {
 		name := s.svc.Live.CurrentName(c)
@@ -362,22 +378,29 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, errors.New("bad request")
 			}
-			item, err := s.svc.PublishEvent(name, req.Topic, req.Body)
+			item, dup, err := s.svc.PublishEvent(name, nil, req.Topic, req.Body, req.Key)
 			if err != nil {
 				return nil, err
 			}
-			return control.WireEvent(item), nil
+			return tunnel.EventResult{ID: item.ID, Duplicate: dup}, nil
 		case tunnel.OpEventGet:
 			var req tunnel.EventQuery
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, errors.New("bad request")
 			}
-			list, err := s.svc.ReadEvents(req.Since, req.Topic)
+			q := event.Query{
+				Since: req.Since, Topics: req.Topics, Froms: req.Froms, Limit: req.Limit,
+				Wait: time.Duration(req.Wait) * time.Second,
+			}
+			res, err := s.svc.ReadEvents(controlCtx(c), q)
 			if err != nil {
 				return nil, err
 			}
-			out := tunnel.EventList{Events: make([]tunnel.EventItem, 0, len(list))}
-			for _, item := range list {
+			out := tunnel.EventList{
+				Events: make([]tunnel.EventItem, 0, len(res.Events)),
+				Oldest: res.Oldest, Latest: res.Latest, More: res.More,
+			}
+			for _, item := range res.Events {
 				out.Events = append(out.Events, control.WireEvent(item))
 			}
 			return out, nil
@@ -421,6 +444,10 @@ func (s *Server) QUICFingerprint() string { return s.fingerprint }
 // Close stops listeners. It is safe to call more than once.
 func (s *Server) Close() error {
 	s.once.Do(func() {
+		// Event long polls and waiters see this before anything unwinds.
+		if s.done != nil {
+			close(s.done)
+		}
 		if s.cancel != nil {
 			s.cancel()
 		}
@@ -613,29 +640,38 @@ func (s *Server) local(op string, body json.RawMessage) (any, error) {
 	case "event_pub":
 		var req struct {
 			Topic string `json:"topic"`
-			Body  string `json:"body"`
+			Body  []byte `json:"body"`
+			Key   string `json:"key"`
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			return nil, err
 		}
-		return s.svc.PublishEvent("server", req.Topic, req.Body)
+		item, dup, err := s.svc.PublishEvent("server", nil, req.Topic, req.Body, req.Key)
+		if err != nil {
+			return nil, err
+		}
+		return struct {
+			ID        int64 `json:"id"`
+			Duplicate bool  `json:"duplicate,omitempty"`
+		}{ID: item.ID, Duplicate: dup}, nil
 	case "event_get":
 		var req struct {
-			Since int64  `json:"since"`
-			Topic string `json:"topic"`
+			Since  int64    `json:"since"`
+			Topics []string `json:"topics"`
+			Froms  []string `json:"froms"`
+			Limit  int      `json:"limit"`
+			Wait   int      `json:"wait"`
 		}
 		if len(body) != 0 && string(body) != "null" {
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, err
 			}
 		}
-		list, err := s.svc.ReadEvents(req.Since, req.Topic)
-		if err != nil {
-			return nil, err
+		q := event.Query{
+			Since: req.Since, Topics: req.Topics, Froms: req.Froms, Limit: req.Limit,
+			Wait: time.Duration(req.Wait) * time.Second,
 		}
-		return struct {
-			Events []event.Item `json:"events"`
-		}{Events: list}, nil
+		return s.svc.ReadEvents(context.Background(), q)
 	default:
 		return nil, errors.New("unknown command")
 	}

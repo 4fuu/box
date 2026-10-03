@@ -983,7 +983,7 @@ func guestRetry(t *testing.T, sock string, args ...string) string {
 	var last error
 	for time.Now().Before(deadline) {
 		var stdout, stderr bytes.Buffer
-		err := guest.Run(sock, args, &stdout, &stderr)
+		err := guest.Run(context.Background(), sock, args, nil, &stdout, &stderr)
 		if err == nil {
 			return stdout.String()
 		}
@@ -997,7 +997,7 @@ func guestRetry(t *testing.T, sock string, args ...string) string {
 func guestOnce(t *testing.T, sock string, args ...string) string {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	if err := guest.Run(sock, args, &stdout, &stderr); err != nil {
+	if err := guest.Run(context.Background(), sock, args, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("guest %v: %v (%s)", args, err, stderr.String())
 	}
 	return stdout.String()

@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -98,7 +99,10 @@ func runGuest(o Options) error {
 		fmt.Fprintln(o.Stderr, "these commands run on a computer")
 		return errFail
 	}
-	if err := guest.Run(o.GuestSocket, o.Args, o.Stdout, o.Stderr); err != nil {
+	if err := guest.Run(o.Context, o.GuestSocket, o.Args, o.Stdin, o.Stdout, o.Stderr); err != nil {
+		if o.Context.Err() != nil {
+			return nil
+		}
 		fmt.Fprintln(o.Stderr, err.Error())
 		return errFail
 	}
@@ -430,6 +434,195 @@ func runEvent(o Options) error {
 	return localEvent(o)
 }
 
+const localEventUsage = "usage: box event pub <topic> [text...] [--key k] | box event get [--since n] [--topic t]... [--from f]... [--limit n] [--wait s] [--json] [--follow]"
+
+func localEvent(o Options) error {
+	if len(o.Args) < 2 {
+		fmt.Fprintln(o.Stderr, localEventUsage)
+		return errUsage
+	}
+	switch o.Args[1] {
+	case "pub":
+		args := o.Args[2:]
+		var key string
+		var pos []string
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--key" {
+				if i+1 >= len(args) {
+					fmt.Fprintln(o.Stderr, "missing value for --key")
+					return errUsage
+				}
+				i++
+				key = args[i]
+				continue
+			}
+			pos = append(pos, args[i])
+		}
+		if len(pos) < 1 {
+			fmt.Fprintln(o.Stderr, localEventUsage)
+			return errUsage
+		}
+		body, err := event.ReadBody(pos[1:], o.Stdin, stdinIsTerminal(o.Stdin))
+		if err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errFail
+		}
+		var out struct {
+			ID        int64 `json:"id"`
+			Duplicate bool  `json:"duplicate,omitempty"`
+		}
+		req := map[string]any{"topic": pos[0], "body": body, "key": key}
+		if err := localCall(o, "event_pub", req, &out); err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errFail
+		}
+		fmt.Fprintln(o.Stdout, out.ID)
+		return nil
+	case "get":
+		f, err := parseEventFlags(o.Args[2:])
+		if err != nil {
+			fmt.Fprintln(o.Stderr, err.Error())
+			return errUsage
+		}
+		fetch := func(ctx context.Context, q event.Query) (event.Result, error) {
+			var res event.Result
+			req := map[string]any{
+				"since": q.Since, "topics": q.Topics, "froms": q.Froms,
+				"limit": q.Limit, "wait": int(q.Wait.Seconds()),
+			}
+			if err := localCallCtx(ctx, o, "event_get", req, &res); err != nil {
+				return event.Result{}, err
+			}
+			return res, nil
+		}
+		q := event.Query{Since: f.since, Topics: f.topics, Froms: f.froms, Limit: f.limit}
+		if !f.follow {
+			q.Wait = time.Duration(f.wait) * time.Second
+			res, err := fetch(o.Context, q)
+			if err != nil {
+				fmt.Fprintln(o.Stderr, err.Error())
+				return errFail
+			}
+			text, err := control.FormatEvents(res, f.asJSON)
+			if err != nil {
+				return err
+			}
+			_, err = io.WriteString(o.Stdout, text)
+			return err
+		}
+		printHeader := true
+		err = event.Follow(o.Context, q, f.since, !f.sinceSet, fetch, func(res event.Result) error {
+			if f.asJSON {
+				raw, err := json.Marshal(res)
+				if err != nil {
+					return err
+				}
+				raw = append(raw, '\n')
+				_, err = o.Stdout.Write(raw)
+				return err
+			}
+			if printHeader {
+				fmt.Fprintln(o.Stdout, "ID\tTIME\tFROM\tTOPIC\tBODY")
+				printHeader = false
+			}
+			for _, item := range res.Events {
+				fmt.Fprintln(o.Stdout, control.FormatEventLine(item))
+			}
+			return nil
+		}, func(since, oldest int64) {
+			fmt.Fprintf(o.Stderr, "box: missed events: cursor %d, oldest retained %d\n", since, oldest)
+		})
+		if err != nil && o.Context.Err() != nil {
+			return nil
+		}
+		return err
+	default:
+		fmt.Fprintln(o.Stderr, localEventUsage)
+		return errUsage
+	}
+}
+
+type eventFlags struct {
+	since    int64
+	sinceSet bool
+	topics   []string
+	froms    []string
+	limit    int
+	wait     int
+	asJSON   bool
+	follow   bool
+}
+
+func parseEventFlags(args []string) (*eventFlags, error) {
+	f := &eventFlags{}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--since":
+			if i+1 >= len(args) {
+				return nil, errors.New("missing value for --since")
+			}
+			i++
+			n, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || n < 0 {
+				return nil, errors.New("invalid since")
+			}
+			f.since = n
+			f.sinceSet = true
+		case "--topic":
+			if i+1 >= len(args) {
+				return nil, errors.New("missing value for --topic")
+			}
+			i++
+			f.topics = append(f.topics, args[i])
+		case "--from":
+			if i+1 >= len(args) {
+				return nil, errors.New("missing value for --from")
+			}
+			i++
+			f.froms = append(f.froms, args[i])
+		case "--limit":
+			if i+1 >= len(args) {
+				return nil, errors.New("missing value for --limit")
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 1 || n > event.MaxLimit {
+				return nil, errors.New("invalid limit")
+			}
+			f.limit = n
+		case "--wait":
+			if i+1 >= len(args) {
+				return nil, errors.New("missing value for --wait")
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 0 || n > event.MaxWaitSeconds {
+				return nil, errors.New("invalid wait")
+			}
+			f.wait = n
+		case "--json":
+			f.asJSON = true
+		case "--follow":
+			f.follow = true
+		default:
+			return nil, errors.New(localEventUsage)
+		}
+	}
+	return f, nil
+}
+
+func stdinIsTerminal(r io.Reader) bool {
+	f, ok := r.(interface{ Stat() (os.FileInfo, error) })
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
 func localToken(o Options) error {
 	if len(o.Args) < 2 {
 		fmt.Fprint(o.Stderr, hostUsage)
@@ -499,88 +692,22 @@ func splitTokenAdd(args []string) (comment, dur string, err error) {
 	return strings.Join(words, " "), dur, nil
 }
 
-func localEvent(o Options) error {
-	if len(o.Args) < 2 {
-		fmt.Fprint(o.Stderr, hostUsage)
-		return errUsage
-	}
-	switch o.Args[1] {
-	case "pub":
-		if len(o.Args) < 4 {
-			fmt.Fprintln(o.Stderr, "usage: box event pub <topic> <text>")
-			return errUsage
-		}
-		var item struct {
-			ID int64 `json:"id"`
-		}
-		req := map[string]string{"topic": o.Args[2], "body": strings.Join(o.Args[3:], " ")}
-		if err := localCall(o, "event_pub", req, &item); err != nil {
-			fmt.Fprintln(o.Stderr, err.Error())
-			return errFail
-		}
-		fmt.Fprintln(o.Stdout, item.ID)
-		return nil
-	case "get":
-		since, topic, err := eventFlags(o.Args[2:])
-		if err != nil {
-			fmt.Fprintln(o.Stderr, err.Error())
-			return errUsage
-		}
-		var resp struct {
-			Events []event.Item `json:"events"`
-		}
-		req := map[string]any{"since": since, "topic": topic}
-		if err := localCall(o, "event_get", req, &resp); err != nil {
-			fmt.Fprintln(o.Stderr, err.Error())
-			return errFail
-		}
-		text, err := control.FormatEvents(resp.Events, false)
-		if err != nil {
-			return err
-		}
-		_, err = io.WriteString(o.Stdout, text)
-		return err
-	default:
-		fmt.Fprint(o.Stderr, hostUsage)
-		return errUsage
-	}
-}
-
-func eventFlags(args []string) (int64, string, error) {
-	var since int64
-	var topic string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--since":
-			if i+1 >= len(args) {
-				return 0, "", errors.New("missing value for --since")
-			}
-			i++
-			n, err := strconv.ParseInt(args[i], 10, 64)
-			if err != nil || n < 0 {
-				return 0, "", errors.New("invalid since")
-			}
-			since = n
-		case "--topic":
-			if i+1 >= len(args) {
-				return 0, "", errors.New("missing value for --topic")
-			}
-			i++
-			topic = args[i]
-		default:
-			return 0, "", errors.New("usage: box event get [--since n] [--topic name]")
-		}
-	}
-	return since, topic, nil
-}
-
 func localCall(o Options, op string, req, resp any) error {
+	return localCallCtx(context.Background(), o, op, req, resp)
+}
+
+// localCallCtx ends one call when ctx does: a long poll must not sit out
+// its 25 seconds after an interrupt.
+func localCallCtx(ctx context.Context, o Options, op string, req, resp any) error {
 	conn, err := net.DialTimeout("unix", o.ServerSocket, 3*time.Second)
 	if err != nil {
 		return errors.New("server is not running")
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	// 25s of event long poll plus slack.
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
 	return rpc.Call(conn, op, req, resp)
 }
 

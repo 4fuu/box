@@ -1,7 +1,8 @@
 // Package store is the server's SQLite file.
-// Env values, computer tokens, and access tokens live here. List methods do not
-// return env values. Access tokens are stored so the operator can copy them again.
-// Do not log them. A new column is added in place; rows are not rewritten.
+// Env values, computer tokens, access tokens, and the event log live here.
+// List methods do not return env values. Access tokens are stored so the
+// operator can copy them again. Do not log them. A new column is added in
+// place; rows are not rewritten.
 package store
 
 import (
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/4fuu/box/internal/secret"
@@ -20,6 +22,15 @@ import (
 // maxPairingAttempts is how many wrong guesses the sole live password survives.
 // Several live passwords are not counted: a miss does not identify which one.
 const maxPairingAttempts = 5
+
+// Event retention. Constants, not flags: at most eventMaxRows events and
+// nothing older than eventMaxAge. Tests shrink the copies on the Store.
+const (
+	eventMaxRows = 100000
+	eventMaxAge  = 7 * 24 * time.Hour
+	// eventPruneEvery amortises the delete: one prune per this many inserts.
+	eventPruneEvery = 64
+)
 
 var (
 	ErrNotFound = errors.New("not found")
@@ -43,6 +54,13 @@ type Store struct {
 	db    *sql.DB
 	path  string
 	nowfn func() time.Time
+
+	// Event retention state. The constants above set these; tests shrink
+	// them to exercise pruning without a hundred thousand inserts.
+	eventRows      int64
+	eventAge       time.Duration
+	eventPruneStep int64
+	pruneCount     atomic.Int64
 }
 
 // Key is a bound client public key. The splice key is not a row.
@@ -86,13 +104,19 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	// WAL keeps readers and the one writer off each other; NORMAL is safe
+	// with WAL and does not fsync every commit.
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)" +
+		"&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, path: path, nowfn: func() time.Time { return time.Now().UTC() }}
+	s := &Store{
+		db: db, path: path, nowfn: func() time.Time { return time.Now().UTC() },
+		eventRows: eventMaxRows, eventAge: eventMaxAge, eventPruneStep: eventPruneEvery,
+	}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -188,6 +212,20 @@ CREATE TABLE IF NOT EXISTS env (
   name TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  topic TEXT NOT NULL,
+  body BLOB NOT NULL,
+  from_label TEXT NOT NULL,
+  token_id INTEGER,
+  dedup_key TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_topic ON events(topic, id);
+CREATE INDEX IF NOT EXISTS events_from ON events(from_label, id);
+CREATE INDEX IF NOT EXISTS events_created ON events(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS events_dedup
+  ON events(from_label, dedup_key) WHERE dedup_key IS NOT NULL;
 `
 
 func (s *Store) Meta(key string) (string, bool, error) {

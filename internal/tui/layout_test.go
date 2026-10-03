@@ -50,7 +50,7 @@ func richModel(w, h int) *model {
 				{Name: "work-laptop-with-a-long-name"},
 			},
 			EventsTotal: 12, EventsHeld: 12,
-			Events: []event.Item{{ID: 12, Topic: "door", From: "home", Body: "opened by someone with a rather long description", Time: now.Add(-2 * time.Minute)}},
+			Events: []event.Item{{ID: 12, Topic: "door", From: "home", Body: []byte("opened by someone with a rather long description"), Time: now.Add(-2 * time.Minute)}},
 		},
 	}
 }

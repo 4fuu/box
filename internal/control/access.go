@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -88,25 +89,28 @@ func tokenView(row store.Token) TokenView {
 	}
 }
 
-// PublishEvent appends one line. from is the publisher label the server assigns.
-func (s *Service) PublishEvent(from, topic, body string) (event.Item, error) {
+// PublishEvent stores one event and wakes long polls. from is the publisher
+// label the server assigns; tokenID records the access token when one
+// published. A duplicate key returns the original event with dup set.
+func (s *Service) PublishEvent(from string, tokenID *int64, topic string, body []byte, key string) (event.Item, bool, error) {
 	if s.Events == nil {
-		return event.Item{}, errors.New("events are unavailable")
+		return event.Item{}, false, errors.New("events are unavailable")
 	}
-	return s.Events.Publish(from, topic, body)
+	return s.Events.Publish(from, tokenID, topic, body, key)
 }
 
-// ReadEvents returns lines newer than since. topic empty means every topic.
-func (s *Service) ReadEvents(since int64, topic string) ([]event.Item, error) {
+// ReadEvents queries the log. A Wait blocks until a matching event lands or
+// the wait runs out. ctx cancels the wait.
+func (s *Service) ReadEvents(ctx context.Context, q event.Query) (event.Result, error) {
 	if s.Events == nil {
-		return nil, errors.New("events are unavailable")
+		return event.Result{}, errors.New("events are unavailable")
 	}
-	return s.Events.Since(since, topic), nil
+	return s.Events.Get(ctx, q)
 }
 
-// WireEvent copies a log line onto the control-stream shape.
+// WireEvent copies a stored event onto the control-stream shape.
 func WireEvent(item event.Item) tunnel.EventItem {
 	return tunnel.EventItem{
-		ID: item.ID, Topic: item.Topic, Body: item.Body, From: item.From, Time: item.Time,
+		ID: item.ID, Topic: item.Topic, Body: item.Body, From: item.From, Key: item.Key, Time: item.Time,
 	}
 }

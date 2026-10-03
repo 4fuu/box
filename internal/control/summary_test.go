@@ -11,7 +11,7 @@ import (
 func TestSummaryCountsAndOffline(t *testing.T) {
 	svc := newSvc(t)
 	svc.Metrics = NewMetrics()
-	svc.Events = event.New()
+	svc.Events = event.NewLog(svc.Store)
 	if err := svc.Store.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestSummaryCountsAndOffline(t *testing.T) {
 	svc.Metrics.Denied()
 	svc.Metrics.Failed()
 	for i := 0; i < recentEvents+2; i++ {
-		if _, err := svc.Events.Publish("ssh", "door", "open"); err != nil {
+		if _, _, err := svc.Events.Publish("ssh", nil, "door", []byte("open"), ""); err != nil {
 			t.Fatal(err)
 		}
 	}

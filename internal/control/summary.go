@@ -150,14 +150,22 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 	}
 	wg.Wait()
 	if s.Events != nil {
-		all := s.Events.Since(0, "")
-		sum.EventsHeld = len(all)
-		if n := len(all); n > 0 {
-			sum.EventsTotal = all[n-1].ID
-			if n > recentEvents {
-				all = all[n-recentEvents:]
-			}
-			sum.Events = all
+		held, err := s.Store.EventCount()
+		if err != nil {
+			return sum, err
+		}
+		_, latest, err := s.Store.EventWindow()
+		if err != nil {
+			return sum, err
+		}
+		sum.EventsHeld = int(held)
+		sum.EventsTotal = latest
+		recent, err := s.Store.RecentEvents(recentEvents)
+		if err != nil {
+			return sum, err
+		}
+		if recent != nil {
+			sum.Events = recent
 		}
 	}
 	return sum, nil

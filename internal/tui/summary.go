@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/4fuu/box/internal/control"
+	"github.com/4fuu/box/internal/event"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -432,7 +433,8 @@ func (m *model) eventsCard() card {
 		for i := len(s.Events) - 1; i >= 0; i-- {
 			e := s.Events[i]
 			age := dur(s.Now.Sub(e.Time))
-			out = append(out, st.dim.Render(pad(age, 6))+st.value.Render(e.Topic)+st.dim.Render(" "+e.From+" ")+e.Body)
+			body := event.EscapeBodyMax(e.Body, 60)
+			out = append(out, st.dim.Render(pad(age, 6))+st.value.Render(e.Topic)+st.dim.Render(" "+e.From+" ")+body)
 		}
 		return out
 	}}

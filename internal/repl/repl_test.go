@@ -94,7 +94,7 @@ func TestTokenStaysAndEventRoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 	var buf bytes.Buffer
-	r := &REPL{Out: &buf, Svc: &control.Service{Store: st, Events: event.New()}}
+	r := &REPL{Out: &buf, Svc: &control.Service{Store: st, Events: event.NewLog(st)}}
 	if err := r.Exec([]string{"token", "add", "--for", "2h", "door"}); err != nil {
 		t.Fatal(err)
 	}

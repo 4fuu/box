@@ -104,7 +104,7 @@ func (s *Server) Accept(ctx context.Context) (*Conn, error) {
 		_ = qconn.CloseWithError(appRefused, "no control stream")
 		return nil, err
 	}
-	dec := json.NewDecoder(st)
+	dec := json.NewDecoder(rpc.FrameLimit(st, rpc.MaxFrame))
 	m, err := readMsg(ctx, dec, st)
 	if err != nil {
 		_ = qconn.CloseWithError(appRefused, "hello")
@@ -466,7 +466,7 @@ func (s *Session) hello(ctx context.Context, id Identity, version int) (HelloRes
 		_ = s.qconn.CloseWithError(appRefused, "hello")
 		return HelloResult{}, err
 	}
-	dec := json.NewDecoder(st)
+	dec := json.NewDecoder(rpc.FrameLimit(st, rpc.MaxFrame))
 	m, err := readMsg(ctx, dec, st)
 	if err != nil {
 		_ = s.qconn.CloseWithError(appRefused, "hello")

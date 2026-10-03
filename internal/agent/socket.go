@@ -110,7 +110,7 @@ func (a *agent) handleGuest(op string, body json.RawMessage) (any, error) {
 		if err := decodeBody(body, &req); err != nil {
 			return nil, err
 		}
-		var resp tunnel.EventItem
+		var resp tunnel.EventResult
 		if err := a.call(tunnel.OpEventPub, req, &resp); err != nil {
 			return nil, err
 		}

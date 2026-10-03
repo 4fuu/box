@@ -35,12 +35,17 @@ box portal rm web
 
 ## Events
 
-`box event` publishes and reads the server's in-memory log. The computer's name is the event's `from`. This command does not use the HTTP API and does not take a token.
+`box event` publishes and reads the server's durable event log. The computer's name is the event's `from`. This command does not use the HTTP API and does not take a token.
 
 ```
 box event pub door open
+box event pub door --key door-1
 box event get --since 0
-box event get --topic door
+box event get --topic door/#
+box event get --follow --topic door
+echo '{"temp":21}' | box event pub sensor1
 ```
 
-`get` prints lines whose id is greater than `--since`. Devices that are not this computer use `http://event.<domain>/api/events` instead. This skill does not contain that token.
+Text arguments join into the body; with no text, the body comes from stdin. `--key` deduplicates: a retry while the original is retained returns the same id. `get` prints one line per event, bodies escaped so they stay on one line; `--json` prints the whole answer including `oldest`, `latest`, and `more`. `--follow` long-polls and prints new events until interrupted. `--topic` accepts `prefix/#`. Ids are 64-bit; keep the cursor in a 64-bit integer.
+
+Devices that are not this computer use `http://event.<domain>/api/events` with their own access token; the token comment names the device. This skill does not contain that token.

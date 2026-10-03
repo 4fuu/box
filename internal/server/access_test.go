@@ -42,14 +42,18 @@ func TestEventAPIAndPrivatePortal(t *testing.T) {
 	if status, _ := do(t, srv.HTTPAddr(), http.MethodPost, eventHost, "/api/events", "", nil); status != 401 {
 		t.Fatalf("event without token %d", status)
 	}
+	// A client-supplied from is ignored: the token's comment names the device.
 	body := []byte(`{"topic":"door","body":"open","from":"sensor-1"}`)
 	status, raw := do(t, srv.HTTPAddr(), http.MethodPost, eventHost, "/api/events", created.Token, body)
 	if status != 201 || !strings.Contains(raw, `"id"`) {
 		t.Fatalf("publish %d %s", status, raw)
 	}
 	status, raw = do(t, srv.HTTPAddr(), http.MethodGet, eventHost, "/api/events?since=0&topic=door", created.Token, nil)
-	if status != 200 || !strings.Contains(raw, "sensor-1") || !strings.Contains(raw, "open") {
+	if status != 200 || !strings.Contains(raw, `"from":"door"`) || !strings.Contains(raw, "open") {
 		t.Fatalf("poll %d %s", status, raw)
+	}
+	if strings.Contains(raw, "sensor-1") {
+		t.Fatalf("client from was trusted: %s", raw)
 	}
 	if status, _ := do(t, srv.HTTPAddr(), http.MethodGet, eventHost, "/", created.Token, nil); status != 404 {
 		t.Fatalf("event host extra path %d", status)
@@ -178,12 +182,25 @@ func TestEventAPIAndPrivatePortal(t *testing.T) {
 		t.Fatalf("cookie proxy %d %q saw %s", cresp.StatusCode, cb, cresp.Header.Get("X-Saw-Gate"))
 	}
 
-	var published tunnel.EventItem
-	if err := agent.Call(ctx, tunnel.OpEventPub, tunnel.EventPublish{Topic: "door", Body: "from-agent"}, &published); err != nil {
+	var published tunnel.EventResult
+	if err := agent.Call(ctx, tunnel.OpEventPub, tunnel.EventPublish{Topic: "door", Body: []byte("from-agent")}, &published); err != nil {
 		t.Fatal(err)
 	}
-	if published.From != "home" {
-		t.Fatalf("from %q", published.From)
+	if published.ID == 0 {
+		t.Fatalf("publish id %d", published.ID)
+	}
+	var events tunnel.EventList
+	if err := agent.Call(ctx, tunnel.OpEventGet, tunnel.EventQuery{Since: 0}, &events); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range events.Events {
+		if e.ID == published.ID && e.From == "home" && string(e.Body) == "from-agent" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("agent event missing or wrong: %+v", events.Events)
 	}
 }
 

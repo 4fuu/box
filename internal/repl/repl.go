@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/4fuu/box/internal/control"
-	"strconv"
+	"github.com/4fuu/box/internal/event"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -200,28 +202,33 @@ func (r *REPL) Exec(argv []string) error {
 		}
 		return r.Svc.RemoveToken(id)
 	case "event pub":
-		if len(args) < 2 {
-			return errors.New("usage: event pub <topic> <text>")
+		if len(args) < 1 {
+			return errors.New("usage: event pub <topic> [text…] [--key k]")
 		}
-		item, err := r.Svc.PublishEvent("ssh", args[0], strings.Join(args[1:], " "))
+		body := ""
+		if len(args) > 1 {
+			body = strings.Join(args[1:], " ")
+		}
+		item, dup, err := r.Svc.PublishEvent("ssh", nil, args[0], []byte(body), flags["key"])
 		if err != nil {
 			return err
+		}
+		if dup {
+			fmt.Fprintf(r.Out, "%d duplicate\n", item.ID)
+			return nil
 		}
 		fmt.Fprintln(r.Out, item.ID)
 		return nil
 	case "event get":
-		if len(args) != 0 {
-			return errors.New("usage: event get [--since n] [--topic name]")
-		}
-		since, err := parseSince(flags["since"])
+		q, err := parseEventFlags(flags)
 		if err != nil {
 			return err
 		}
-		list, err := r.Svc.ReadEvents(since, flags["topic"])
+		res, err := r.Svc.ReadEvents(context.Background(), q)
 		if err != nil {
 			return err
 		}
-		return r.print(control.FormatEvents(list, asJSON))
+		return r.print(control.FormatEvents(res, asJSON))
 	case "whoami":
 		line, err := r.Svc.WhoAmI(r.Pub)
 		if err != nil {
@@ -270,9 +277,63 @@ func (r *REPL) print(text string, err error) error {
 	return err
 }
 
+// parseEventFlags reads event get's flags. A repeated flag joins with
+// commas, which no topic or label may contain, so --topic a --topic b and
+// --topic a,b are the same union.
+func parseEventFlags(flags map[string]string) (event.Query, error) {
+	q := event.Query{Limit: event.DefaultLimit}
+	if raw := flags["since"]; raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 0 {
+			return q, errors.New("invalid since")
+		}
+		q.Since = n
+	}
+	for _, t := range splitFlagList(flags["topic"]) {
+		q.Topics = append(q.Topics, t)
+	}
+	for _, f := range splitFlagList(flags["from"]) {
+		if !event.ValidFrom(f) {
+			return q, errors.New("invalid from")
+		}
+		q.Froms = append(q.Froms, f)
+	}
+	if _, err := event.ParseFilters(q.Topics); err != nil {
+		return q, errors.New("invalid topic filter")
+	}
+	if raw := flags["limit"]; raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > event.MaxLimit {
+			return q, errors.New("invalid limit")
+		}
+		q.Limit = n
+	}
+	if raw := flags["wait"]; raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 || n > event.MaxWaitSeconds {
+			return q, errors.New("invalid wait")
+		}
+		q.Wait = time.Duration(n) * time.Second
+	}
+	return q, nil
+}
+
+func splitFlagList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func parseArgv(argv []string) (pos []string, flags map[string]string, asJSON bool, err error) {
 	flags = map[string]string{}
-	known := map[string]bool{"since": true, "topic": true, "for": true}
+	known := map[string]bool{"since": true, "topic": true, "for": true, "key": true, "from": true, "limit": true, "wait": true}
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
 		if a == "--" {
@@ -292,7 +353,11 @@ func parseArgv(argv []string) (pos []string, flags map[string]string, asJSON boo
 				return nil, nil, false, fmt.Errorf("missing value for --%s", name)
 			}
 			i++
-			flags[name] = argv[i]
+			if old, ok := flags[name]; ok && old != "" {
+				flags[name] = old + "," + argv[i]
+			} else {
+				flags[name] = argv[i]
+			}
 			continue
 		}
 		pos = append(pos, a)
@@ -388,8 +453,8 @@ var helpHelp = []helpEntry{
 	{
 		name: "Events",
 		subs: []helpEntry{
-			{name: "event pub", usage: "event pub <topic> <text>", short: "Publish one event"},
-			{name: "event get", usage: "event get [--since n] [--topic name]", short: "Print events newer than an id"},
+			{name: "event pub", usage: "event pub <topic> [text…] [--key k]", short: "Publish one event; text args join into the body"},
+			{name: "event get", usage: "event get [--since n] [--topic t]… [--from f]… [--limit n] [--wait s]", short: "Print events newer than an id; --topic takes prefix/# too"},
 		},
 	},
 	{

@@ -147,23 +147,42 @@ box token rm 1
 can be copied later. A token does not expire unless `--for` is set
 (`box token add --for 12h door`).
 
-Events are one in-memory log. Devices that are not computers use HTTP.
-Computers use `box event`. A bound SSH client uses `event pub` and `event get`.
+Events are a durable log in the server's SQLite file: at most 100000
+events, nothing older than 7 days. Devices that are not computers use HTTP
+with a token. Computers use `box event`. A bound SSH client uses
+`event pub` and `event get`.
 
 ```bash
 box event pub door open
+box event pub door --key door-1   # dedup: a retry returns the same id
 box event get --since 0
+box event get --follow --topic door
+```
+
+Give each device its own token, with a comment naming it — the comment
+becomes the event's `from`:
+
+```bash
+box token add door-sensor
 ```
 
 ```bash
-curl -H "X-Box-Token: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"topic":"door","body":"open","from":"sensor-1"}' \
-  http://event.box.example.com/api/events
-curl -H "X-Box-Token: $TOKEN" \
-  'http://event.box.example.com/api/events?since=0&topic=door'
+# one line from a tiny device; the body is stored verbatim
+curl -H "X-Box-Token: $TOKEN" -H "Idempotency-Key: door-1" \
+  -d 'open' http://event.box.example.com/api/events/kitchen/door
+
+# long-poll loop
+while true; do
+  curl -s -H "X-Box-Token: $TOKEN" \
+    "http://event.box.example.com/api/events?since=$SINCE&topic=kitchen/%23&wait=25"
+done
 ```
 
-The log keeps 256 lines and drops the oldest. It is not saved.
+Every read answers with `{"events":[...],"oldest":n,"latest":n,"more":b}`:
+`oldest` is the smallest id still retained, `latest` the largest id ever
+assigned. Ids are 64-bit — keep the cursor in a 64-bit integer. The details,
+including the body encoding rule and dedup keys, are in
+[DESIGN.md](docs/DESIGN.md#events).
 
 `env set NAME <value>` stores a variable and pushes it to online computers.
 `env ls` prints names, never values. Access tokens are not env values:

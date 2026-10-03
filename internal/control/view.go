@@ -116,25 +116,30 @@ func FormatTokens(list []TokenView, asJSON bool) (string, error) {
 	return b.String(), nil
 }
 
-func FormatEvents(list []event.Item, asJSON bool) (string, error) {
+func FormatEvents(res event.Result, asJSON bool) (string, error) {
 	if asJSON {
-		if list == nil {
-			list = []event.Item{}
+		if res.Events == nil {
+			res.Events = []event.Item{}
 		}
-		return asJSONString(struct {
-			Events []event.Item `json:"events"`
-		}{Events: list})
+		return asJSONString(res)
 	}
 	var b bytes.Buffer
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tTIME\tFROM\tTOPIC\tBODY")
-	for _, item := range list {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", item.ID, item.Time.UTC().Format(time.RFC3339), item.From, item.Topic, item.Body)
+	for _, item := range res.Events {
+		fmt.Fprintln(w, FormatEventLine(item))
 	}
 	if err := w.Flush(); err != nil {
 		return "", err
 	}
 	return b.String(), nil
+}
+
+// FormatEventLine is one event as one tab-separated line. The body is
+// escaped, so a line never wraps: backslash and controls become \-escapes,
+// and a body that is not valid UTF-8 prints as base64:<...>.
+func FormatEventLine(item event.Item) string {
+	return fmt.Sprintf("%d\t%s\t%s\t%s\t%s", item.ID, item.Time.UTC().Format(time.RFC3339), item.From, item.Topic, event.EscapeBody(item.Body))
 }
 
 func FormatToken(t TokenView) string {

@@ -27,6 +27,21 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// TestMain points the default sshd config at a path that does not exist, so
+// join and agent runs inside tests never touch the machine's real sshd
+// config or restart its sshd. Tests that exercise the editor use
+// setSSHDPath with their own file.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "box-agent-test-sshd-")
+	if err != nil {
+		panic(err)
+	}
+	sshdConfigPath = filepath.Join(dir, "missing-sshd-config")
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 func TestJoin(t *testing.T) {
 	setSSHDPath(t, filepath.Join(t.TempDir(), "missing-sshd-config"))
 	dir := filepath.Join(t.TempDir(), "state")
@@ -232,7 +247,9 @@ func TestRun(t *testing.T) {
 	conn := acceptConn(t, srv)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Generous budget: a cold CI Windows VM can take seconds for the first
+	// control roundtrip.
+	callCtx, callCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer callCancel()
 	var stat tunnel.StatResponse
 	if err := conn.Call(callCtx, tunnel.OpStat, tunnel.StatRequest{}, &stat); err != nil {

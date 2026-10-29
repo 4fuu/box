@@ -1,16 +1,28 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
 // sshdConfigPath is the sshd config box join edits when it can write it.
-var sshdConfigPath = "/etc/ssh/sshd_config"
+var sshdConfigPath = sshdPlatform.config
+
+// sshdBehavior is what differs per OS: where sshd's config lives, how to
+// reload it, and what to tell the operator when box cannot do it for them.
+type sshdBehavior struct {
+	config    string                     // default sshd_config
+	manual    string                     // full text when the config is not writable
+	reloadTip string                     // printed when a reload attempt fails
+	reloaded  string                     // printed after a successful reload
+	reload    func() bool                // ask sshd to pick the config up again
+	missing   func() string              // full text when the config is absent; "" falls through to manual
+	adminNote func(config string) string // extra key-diversion warning; "" for none
+}
 
 const (
 	boxAuthorizedKeys = ".ssh/box_authorized_keys"
@@ -32,6 +44,12 @@ func ensureSSHD(out io.Writer) {
 	if out == nil {
 		out = io.Discard
 	}
+	if hint := sshdPlatform.missing(); hint != "" {
+		if _, err := os.Stat(sshdConfigPath); errors.Is(err, os.ErrNotExist) {
+			fmt.Fprint(out, hint)
+			return
+		}
+	}
 	notes, warning, err := updateSSHD(sshdConfigPath)
 	if err != nil {
 		if body, rerr := os.ReadFile(sshdConfigPath); rerr == nil {
@@ -44,11 +62,17 @@ func ensureSSHD(out io.Writer) {
 				return
 			}
 		}
-		fmt.Fprintf(out, "sshd_config is not writable. Add these lines, then reload sshd:\n  %s\n  AcceptEnv *\n  sudo systemctl reload ssh\n", sshdKeysLine)
+		fmt.Fprint(out, sshdPlatform.manual)
+		if note := sshdPlatform.adminNote(sshdConfigPath); note != "" {
+			fmt.Fprint(out, note)
+		}
 		return
 	}
 	if warning != "" {
 		fmt.Fprintln(out, warning)
+	}
+	if note := sshdPlatform.adminNote(sshdConfigPath); note != "" {
+		fmt.Fprint(out, note)
 	}
 	if len(notes) == 0 {
 		return
@@ -57,11 +81,11 @@ func ensureSSHD(out io.Writer) {
 	for _, note := range notes {
 		fmt.Fprintf(out, "  %s\n", note)
 	}
-	if reloadSSHD() {
-		fmt.Fprintln(out, "reloaded sshd")
+	if sshdPlatform.reload() {
+		fmt.Fprintln(out, sshdPlatform.reloaded)
 		return
 	}
-	fmt.Fprintln(out, "reload sshd: sudo systemctl reload ssh")
+	fmt.Fprintln(out, sshdPlatform.reloadTip)
 }
 
 func updateSSHD(path string) ([]string, string, error) {
@@ -197,15 +221,6 @@ func ensureAcceptEnv(content string) (string, bool, string) {
 		base += "\n"
 	}
 	return base + line + "\n", true, ""
-}
-
-func reloadSSHD() bool {
-	for _, name := range []string{"ssh", "sshd"} {
-		if exec.Command("systemctl", "reload", name).Run() == nil {
-			return true
-		}
-	}
-	return false
 }
 
 // addBoxAuthorizedKeys returns the file contents and whether they changed.

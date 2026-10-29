@@ -27,8 +27,8 @@ box 把你自己的机器放在同一个 SSH 入口后面。计算机是一整�
 
 ### 要求
 
-- 一台跑服务器的 Linux，以及每台计算机一台 Linux
-- 你用来连接的机器上有 OpenSSH，每台计算机上有 sshd
+- 服务器用一台 Linux；每台计算机可以是 Linux 或 Windows（Windows 需 10 1809 及以上）
+- 你用来连接的机器上有 OpenSSH，每台计算机上有 sshd（Windows 计算机用系统自带的 OpenSSH Server 可选功能）
 
 服务器和计算机可以是同一台机器。代理不需要 root。
 
@@ -52,6 +52,16 @@ box serve --domain box.example.com
 第一次启动会打印一次性密码。
 
 计算机安装会运行 `box join <域名>`，并可以加上 `box agent` 的 systemd 用户单元。在服务器上批准它打印的验证码。
+
+Windows 计算机没有安装脚本。从发布页下载 windows-amd64 的 zip，把 box.exe 放进 PATH，然后在管理员 PowerShell 里：
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Set-Service sshd -StartupType Automatic
+Start-Service sshd
+```
+
+然后运行 `box join <域名>`，再用启动文件夹（`shell:startup` 里指向 `box agent` 的快捷方式）或计划任务让 agent 随登录运行。注意：管理员组的账号走 `C:\ProgramData\ssh\administrators_authorized_keys` 认证，`~/.ssh` 里的钥匙对它们无效；join 时会打印这条提示。
 
 版本号是日历版本，例如 `2026.924.0`。见 [docs/release.md](docs/release.md)。
 

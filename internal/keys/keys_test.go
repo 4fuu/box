@@ -3,6 +3,7 @@ package keys
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,7 +27,7 @@ func TestGenerateReuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %o", fi.Mode().Perm())
 	}
 	if !strings.Contains(a, "ssh-ed25519") || !strings.HasSuffix(a, "\n") {

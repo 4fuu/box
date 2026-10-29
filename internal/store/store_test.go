@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,14 +35,14 @@ func TestPermissionsAndPasswordNotStored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("db mode %o", fi.Mode().Perm())
 	}
 	df, err := os.Stat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if df.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && df.Mode().Perm() != 0o700 {
 		t.Fatalf("dir mode %o", df.Mode().Perm())
 	}
 	pw, err := secret.ClientPassword()

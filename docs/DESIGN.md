@@ -100,13 +100,13 @@ Because the splice ends at a normal sshd, `scp`, `rsync`, SFTP, VS Code Remote-S
 
 The agent runs as a regular user and never needs root. The login user is whoever ran `box join`, unless `--user <name>` names another existing account. `ssh home@box.example.com` opens a shell as that account on the computer registered as `home`; the two names need not match.
 
-The agent manages one file, `~/.ssh/box_authorized_keys`, kept in sync with the server's bound keys. The user's own `authorized_keys` is untouched. `box join` adds the file to sshd's `AuthorizedKeysFile` when it can write the config, prints each change, and reloads sshd when it can; otherwise it prints the lines and the reload command.
+The agent manages one file, `~/.ssh/box_authorized_keys`, kept in sync with the server's bound keys. The user's own `authorized_keys` is untouched. `box join` adds the file to sshd's `AuthorizedKeysFile` when it can write the config, prints each change, and reloads sshd when it can; otherwise it prints the lines and the reload command. On Windows the config is `C:\ProgramData\ssh\sshd_config` (OpenSSH Server is an optional capability; when it is missing `box join` prints the install command and still succeeds), editing the config and restarting the service need an elevated PowerShell — there is no reload — and the default `Match Group administrators` block sends administrator accounts to `administrators_authorized_keys` instead of `~/.ssh`; box prints that note whenever the block is present.
 
 `env set` values live on the server only. Each splice session receives the current set as SSH env requests, so values exist on the computer only in that session's memory. sshd drops names outside `AcceptEnv`, so `box join` adds `AcceptEnv *` when no global `AcceptEnv` line exists and says so; existing lines are left alone. `env ls` prints names, never values.
 
 The agent writes the box skill to `~/.agents/skills/box/SKILL.md`. It holds no credentials.
 
-On a computer, `box` is the guest CLI on the agent socket `~/.box/agent.sock`:
+On a computer, `box` is the guest CLI on the agent socket `~/.box/agent.sock` (an AF_UNIX socket; Windows 10 1809 or newer):
 
 ```
 box domain
@@ -225,7 +225,7 @@ The SSH command is the control plane. Non-interactive sessions (`ssh box.example
 | `ssh <name>` | Open a shell on that computer |
 | `rm <name>` | Delete the computer and revoke its token. Asks for the name again |
 | `rename <name> <new>` | Rename. Portals stay claimed; the SSH username changes |
-| `stat <name>` | Live load from the agent: cpu, memory, disk, uptime |
+| `stat <name>` | Live load from the agent: cpu, memory, disk, uptime. Windows reports memory, disk, and uptime from the system APIs; there is no load average, so cpu stays unset |
 | `pending` | Computers waiting for approval |
 | `approve <code>` | Approve a pending join |
 | `pair` | Print a one-time password for another client |
@@ -258,11 +258,11 @@ On the server machine, `box` with no arguments opens the same TUI over the local
 | Server | `box serve` | SSH, HTTP, QUIC, and a localhost socket |
 | Computer | `box join`, then `box agent` | nothing public; a unix socket in `~/.box` |
 
-`box agent` reads `~/.box/computer.json` and reconnects. It is meant to run under a systemd user unit.
+`box agent` reads `~/.box/computer.json` and reconnects. It is meant to run under a systemd user unit, or on Windows as a scheduled task at logon.
 
 ## Data
 
-One SQLite file in the data directory (default `/var/lib/box`, `--data-dir`). It is the secret store and is not world-readable. The file runs in WAL journal mode with `synchronous=NORMAL`.
+One SQLite file in the data directory (default `/var/lib/box`, `%ProgramData%\box` on Windows, `--data-dir`). It is the secret store and is not world-readable. The file runs in WAL journal mode with `synchronous=NORMAL`.
 
 - `keys`: public key, comment, bound at
 - `pairings`: hash of a one-time password, expiry, used at, failed attempts
@@ -282,6 +282,7 @@ One release archive per OS and architecture holds the `box` binary. `scripts/ins
 
 - **Server**: install, optionally a systemd unit, run `box serve --domain box.example.com`, open the three ports. The first start prints the one-time password.
 - **Computer**: install, run `box join <domain>`, approve the code at the server, optionally install a systemd user unit for `box agent`.
+- **Windows computer**: no installer. Download the `windows-amd64` zip, put `box.exe` on PATH, install the OpenSSH Server capability, run `box join <domain>`, and keep `box agent` running with a scheduled task at logon.
 
 ## Not in the first version
 
@@ -298,9 +299,9 @@ One release archive per OS and architecture holds the `box` binary. `scripts/ins
 
 | Piece | Choice | Why |
 | --- | --- | --- |
-| Client | OpenSSH, already installed | No client to ship |
+| Client | OpenSSH, already installed | No client to ship; Windows 10+ includes the client |
 | Control SSH | charmbracelet/wish | An sshd we can branch on username and auth method |
 | TUI | bubbletea + lipgloss | wish's companion; one framework for REPL and dashboard |
 | Tunnel | quic-go | Independent streams, one TLS stack, NAT rebinding, connection stats |
 | Server state | SQLite | One file, enough for a private deployment |
-| Computer SSH | the machine's openssh-server | A normal sshd, so scp and Remote-SSH work |
+| Computer SSH | the machine's openssh-server | A normal sshd, so scp and Remote-SSH work; on Windows the OpenSSH Server optional capability |

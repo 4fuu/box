@@ -23,8 +23,9 @@ before the GitHub release is created.
 The workflow:
 
 - tests the module
-- publishes `box-<version>-linux-amd64.tar.gz` and `box-<version>-linux-arm64.tar.gz`, plus `SHA256SUMS`
+- publishes `box-<version>-linux-amd64.tar.gz`, `box-<version>-linux-arm64.tar.gz`, and `box-<version>-windows-amd64.zip`, plus `SHA256SUMS`
 
 There is no container image. A Linux server or computer installs from the
 release with [`scripts/install.sh`](../scripts/install.sh). The script asks
-whether the machine is a server or a computer, in English or Chinese.
+whether the machine is a server or a computer, in English or Chinese. A
+Windows computer installs from the zip; see the README.

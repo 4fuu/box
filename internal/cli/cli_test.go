@@ -147,7 +147,8 @@ func TestCheckLoginUser(t *testing.T) {
 		}
 		return
 	}
-	t.Fatal("no other local account to reject")
+	// A single-account Windows machine has no second account to reject.
+	t.Skip("no other local account to reject")
 }
 
 func TestSanitizeComputerName(t *testing.T) {

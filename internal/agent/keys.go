@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const accessFileName = "access.json"
@@ -21,7 +22,14 @@ func authorizedKeysPath() (string, error) {
 	return filepath.Join(home, ".ssh", "box_authorized_keys"), nil
 }
 
+// keysFileMu serializes writes to the shared keys file. Two agents in one
+// process rename the same target; Windows refuses the rename while another
+// handle to the file is open.
+var keysFileMu sync.Mutex
+
 func writeAuthorizedKeys(keys []string) error {
+	keysFileMu.Lock()
+	defer keysFileMu.Unlock()
 	path, err := authorizedKeysPath()
 	if err != nil {
 		return err
@@ -127,7 +135,8 @@ func saveAccess(dir string, keys []string) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	f, err := os.Open(tmp)
+	// Reopened for fsync: the handle needs write access on Windows.
+	f, err := os.OpenFile(tmp, os.O_WRONLY, 0o600)
 	if err != nil {
 		_ = os.Remove(tmp)
 		return err

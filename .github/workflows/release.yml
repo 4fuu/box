@@ -66,9 +66,14 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-24.04
+            goos: linux
             arch: amd64
           - runner: ubuntu-24.04-arm
+            goos: linux
             arch: arm64
+          - runner: ubuntu-24.04
+            goos: windows
+            arch: amd64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -81,20 +86,31 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.validate.outputs.version }}
+          GOOS: ${{ matrix.goos }}
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -o "$RUNNER_TEMP/box" .
+          bin="$RUNNER_TEMP/box"
+          if [ "$GOOS" = windows ]; then
+            bin="$RUNNER_TEMP/box.exe"
+          fi
+          CGO_ENABLED=0 go build -trimpath -o "$bin" .
           stage="$RUNNER_TEMP/stage"
           mkdir -p "$stage"
-          cp "$RUNNER_TEMP/box" README.md LICENSE "$stage/"
-          chmod 0755 "$stage/box"
-          tar -czf "box-$VERSION-linux-$ARCH.tar.gz" -C "$stage" box README.md LICENSE
+          if [ "$GOOS" = windows ]; then
+            cp "$bin" README.md LICENSE "$stage/"
+            (cd "$stage" && zip -q "box-$VERSION-$GOOS-$ARCH.zip" box.exe README.md LICENSE)
+            mv "$stage/box-$VERSION-$GOOS-$ARCH.zip" "box-$VERSION-$GOOS-$ARCH.zip"
+          else
+            cp "$bin" README.md LICENSE "$stage/"
+            chmod 0755 "$stage/box"
+            tar -czf "box-$VERSION-$GOOS-$ARCH.tar.gz" -C "$stage" box README.md LICENSE
+          fi
       - name: Upload release archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: box-linux-${{ matrix.arch }}
-          path: box-${{ needs.validate.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+          name: box-${{ matrix.goos }}-${{ matrix.arch }}
+          path: box-${{ needs.validate.outputs.version }}-${{ matrix.goos }}-${{ matrix.arch }}.*
           if-no-files-found: error
           retention-days: 7
 
@@ -112,7 +128,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: release
-          pattern: box-linux-*
+          pattern: box-*
           merge-multiple: true
       - name: Publish the GitHub release
         shell: bash
@@ -133,7 +149,10 @@ jobs:
           Install a Linux server or computer with \`scripts/install.sh\`.
 
           On the server: \`box serve --domain <domain>\`.
-          On a computer: \`box join <domain>\`, then \`box agent\`.
+          On a Linux computer: \`box join <domain>\`, then \`box agent\`.
+          On a Windows computer: extract the windows-amd64 zip, put box.exe on
+          PATH, install the OpenSSH Server capability, then \`box join <domain>\`
+          and \`box agent\`.
           EOF
           tag="v$VERSION"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

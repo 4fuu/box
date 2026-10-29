@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -61,15 +62,24 @@ func TestJoin(t *testing.T) {
 	if len(code) != 6 {
 		t.Fatalf("code %q", code)
 	}
-	for _, line := range []string{
+	lines := []string{
 		"approval code: " + code,
 		`enter this code at the server to approve "home"`,
 		"waiting\u2026",
 		"approved. tunnel up as home.box.example.com",
-		"sshd_config is not writable. Add these lines, then reload sshd:",
-		sshdKeysLine,
-		"AcceptEnv *",
-	} {
+	}
+	if runtime.GOOS == "windows" {
+		// The temp sshd_config does not exist, so join prints the
+		// install hint instead of the config lines.
+		lines = append(lines, "OpenSSH Server is not installed.")
+	} else {
+		lines = append(lines,
+			"sshd_config is not writable. Add these lines, then reload sshd:",
+			sshdKeysLine,
+			"AcceptEnv *",
+		)
+	}
+	for _, line := range lines {
 		if !strings.Contains(text, line) {
 			t.Fatalf("missing %q in %q", line, text)
 		}
@@ -108,14 +118,14 @@ func TestJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %o", fi.Mode().Perm())
 	}
 	di, err := os.Stat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if di.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && di.Mode().Perm() != 0o700 {
 		t.Fatalf("dir mode %o", di.Mode().Perm())
 	}
 }
@@ -262,14 +272,14 @@ func TestRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if kfi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && kfi.Mode().Perm() != 0o600 {
 		t.Fatalf("keys mode %o", kfi.Mode().Perm())
 	}
 	sfi, err := os.Stat(filepath.Join(dir, ".ssh"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sfi.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && sfi.Mode().Perm() != 0o700 {
 		t.Fatalf(".ssh mode %o", sfi.Mode().Perm())
 	}
 
@@ -367,7 +377,7 @@ func TestRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if afi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && afi.Mode().Perm() != 0o600 {
 		t.Fatalf("access mode %o", afi.Mode().Perm())
 	}
 
@@ -631,7 +641,7 @@ func TestAccessKeepsBothSets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("access mode %o", fi.Mode().Perm())
 	}
 }
@@ -738,7 +748,7 @@ func TestSSHDConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o644 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o644 {
 		t.Fatalf("mode %o", fi.Mode().Perm())
 	}
 	matches, err := filepath.Glob(filepath.Join(dir, ".sshd-config-*"))
@@ -800,6 +810,20 @@ func setHome(t *testing.T, dir string) {
 		}
 		_ = os.Unsetenv("HOME")
 	})
+	// Windows UserHomeDir reads USERPROFILE, not HOME.
+	if runtime.GOOS == "windows" {
+		prevP, okP := os.LookupEnv("USERPROFILE")
+		if err := os.Setenv("USERPROFILE", dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if okP {
+				_ = os.Setenv("USERPROFILE", prevP)
+				return
+			}
+			_ = os.Unsetenv("USERPROFILE")
+		})
+	}
 }
 
 func approvalCode(t *testing.T, out string) string {

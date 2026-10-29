@@ -134,6 +134,10 @@ done
 游标要存进 64 位整数。正文编码规则、去重键等细节见
 [DESIGN.md](docs/DESIGN.md#events)（英文）。
 
+大文件不走事件。`event.<domain>` 上的 `POST /api/blobs` 最多存 64 MiB，保留
+7 天 —— 默认在磁盘上，也可以选任何兼容 S3 的存储服务（OSS、R2、MinIO）——
+事件正文里写 `blob:<id>` 来引用这些字节。
+
 `env set NAME <value>` 保存变量并推送到在线的计算机。`env ls` 只打印名字，不打印值。访问令牌不是环境变量：`token ls` 会打印令牌。
 
 ## 文档

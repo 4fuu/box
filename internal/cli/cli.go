@@ -120,6 +120,8 @@ func socketPresent(path string) bool {
 const hostUsage = `usage:
   box
   box serve --domain <domain> [--ssh-addr addr] [--http-addr addr] [--quic-addr addr]
+      blob backend: [--blob-store disk|s3] [--blob-dir dir] [--blob-s3-endpoint host]
+      [--blob-s3-bucket name] [--blob-s3-region region] [--blob-s3-pathstyle]
   box join <host> [--name name] [--user name]
   box agent
   box pair
@@ -133,11 +135,16 @@ const hostUsage = `usage:
 
 func serve(o Options) error {
 	domain, sshAddr, httpAddr, quicAddr := "", "", "", ""
+	blobCfg := server.BlobConfig{}
 	args := o.Args[1:]
 	for i := 0; i < len(args); i++ {
 		flag := args[i]
 		switch flag {
-		case "--domain", "--ssh-addr", "--http-addr", "--quic-addr":
+		case "--blob-s3-pathstyle":
+			blobCfg.S3PathStyle = true
+		case "--domain", "--ssh-addr", "--http-addr", "--quic-addr",
+			"--blob-store", "--blob-dir",
+			"--blob-s3-endpoint", "--blob-s3-bucket", "--blob-s3-region":
 			if i+1 >= len(args) {
 				fmt.Fprint(o.Stderr, hostUsage)
 				return errUsage
@@ -152,6 +159,16 @@ func serve(o Options) error {
 				httpAddr = args[i]
 			case "--quic-addr":
 				quicAddr = args[i]
+			case "--blob-store":
+				blobCfg.Store = args[i]
+			case "--blob-dir":
+				blobCfg.Dir = args[i]
+			case "--blob-s3-endpoint":
+				blobCfg.S3Endpoint = args[i]
+			case "--blob-s3-bucket":
+				blobCfg.S3Bucket = args[i]
+			case "--blob-s3-region":
+				blobCfg.S3Region = args[i]
 			}
 		default:
 			fmt.Fprint(o.Stderr, hostUsage)
@@ -162,6 +179,7 @@ func serve(o Options) error {
 		Domain: domain, DataDir: o.DataDir, Stdout: o.Stdout,
 		SSHAddr: sshAddr, HTTPAddr: httpAddr, QUICAddr: quicAddr,
 		SocketPath: o.ServerSocket,
+		Blob:       blobCfg,
 	})
 	if err != nil {
 		fmt.Fprintln(o.Stderr, err.Error())

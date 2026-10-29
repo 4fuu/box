@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/4fuu/box/internal/approve"
+	"github.com/4fuu/box/internal/blob"
 	"github.com/4fuu/box/internal/control"
 	"github.com/4fuu/box/internal/event"
 	"github.com/4fuu/box/internal/ident"
@@ -41,7 +42,22 @@ type Config struct {
 	HTTPAddr   string
 	QUICAddr   string
 	SocketPath string
+	Blob       BlobConfig
 	Stdout     io.Writer
+}
+
+// BlobConfig picks the blob backend. Store is "disk" or "s3"; empty is
+// disk. S3Key and S3Secret fall back to BOX_BLOB_S3_KEY and
+// BOX_BLOB_S3_SECRET so the secret stays out of process listings.
+type BlobConfig struct {
+	Store       string
+	Dir         string
+	S3Endpoint  string
+	S3Bucket    string
+	S3Region    string
+	S3PathStyle bool
+	S3Key       string
+	S3Secret    string
 }
 
 // Server is a running box serve.
@@ -49,6 +65,8 @@ type Server struct {
 	cfg         Config
 	store       *store.Store
 	svc         *control.Service
+	blobs       blob.Backend
+	spoolDir    string
 	httpLn      net.Listener
 	sshLn       net.Listener
 	sockLn      net.Listener
@@ -99,6 +117,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	cfg.SSHAddr, cfg.HTTPAddr, cfg.QUICAddr = sshAddr, httpAddr, quicAddr
 
+	blobs, spoolDir, err := openBlobBackend(cfg)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+
 	splicePath := filepath.Join(cfg.DataDir, "splice_ed25519")
 	spliceLine, err := keys.Generate(splicePath, "box-splice")
 	if err != nil {
@@ -141,6 +165,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		cfg:         cfg,
 		store:       st,
 		svc:         svc,
+		blobs:       blobs,
+		spoolDir:    spoolDir,
 		splice:      signer,
 		fingerprint: fp,
 		waiters:     map[string]*joinWaiter{},

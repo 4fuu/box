@@ -28,7 +28,7 @@ Set at first start and stored in the database; later starts reuse the stored val
 | Port | Transport | Flag | Default | Use |
 | --- | --- | --- | --- | --- |
 | SSH | TCP | `--ssh-addr` | `:22` | Client entry, computer bootstrap, REPL |
-| HTTP | TCP | `--http-addr` | `:80` | Portals, the event API, the sign-in page. Plain HTTP |
+| HTTP | TCP | `--http-addr` | `:80` | Portals, the event API, blobs, the sign-in page. Plain HTTP |
 | QUIC | UDP | `--quic-addr` | `:7443` | Computer tunnels |
 
 The firewall must allow all three. A computer only ever types the SSH address; it learns the QUIC endpoint during the handshake.
@@ -172,9 +172,9 @@ A body that is valid UTF-8 is a JSON string in `body`; any other bytes are base6
 
 - `POST /api/events` with JSON `{"topic","body","key"?}`. Binary bodies use `"body_b64"` instead of `"body"`; sending both is 400. A `from` field is ignored. Answers `201 {"id":n}`; a dedup hit answers `200 {"id":n,"duplicate":true}`.
 - `POST /api/events/<topic>` with any body and any content type: the request bytes are stored verbatim. This is the one-line path for tiny devices. The key rides `Idempotency-Key` or `?key=`. Same answers.
-- A body over 1 MiB is 413. A bad topic, key, or filter value is 400 with a one-line reason.
+- A body over 1 MiB is 413. A bad topic, key, or filter value is 400 with a one-line reason. Larger payloads belong in a blob, named in the body; see Blobs below.
 
-`event.<domain>` answers only `/api/events` and `/api/events/...` and never redirects to sign-in. Computers use `box event`, not the HTTP API.
+`event.<domain>` answers only `/api/events`, `/api/events/...`, `/api/blobs`, and `/api/blobs/...`, and never redirects to sign-in. Computers use `box event`, not the HTTP API.
 
 ### Small devices
 
@@ -192,6 +192,24 @@ done
 ```
 
 On a computer, `box event get --follow` runs that loop and prints one line per event; `box event get --since 0` replays what is retained.
+
+## Blobs
+
+Big payloads do not go through events. A device stores the bytes as a blob, then publishes an event whose body names it: `blob:<id>`. No event field exists for this; it is a convention.
+
+- `POST /api/blobs` on `event.<domain>`, access token required. The request bytes are stored verbatim; the `Content-Type` rides along. Answers `201 {"id":n,"size":s}`. `from` is the token's comment, as with events.
+- `GET /api/blobs/<id>` on `event.<domain>`. Answers the bytes with the stored type. No listing, no ranges, no delete: retention is the only removal.
+
+A blob is at most 64 MiB, answered 413 over. All blobs together are at most 4 GiB, and none is older than 7 days; pruning runs on the write path, oldest first, and `from`, size, and type live in the server's SQLite file while the bytes live in the configured backend. Constants, not flags. The event that names a blob can outlive it: a fetch that arrives too late is a 404, not a publisher error.
+
+Backends, chosen at `box serve`:
+
+| Backend | Flags |
+| --- | --- |
+| `disk`, the default | `--blob-dir <path>`, default `<data>/blobs` |
+| `s3`, any S3-compatible service: OSS, R2, MinIO, B2, S3 | `--blob-s3-endpoint <host>`, `--blob-s3-bucket <name>`, `--blob-s3-region <region>`, and `--blob-s3-pathstyle` for MinIO and on-prem |
+
+S3 credentials are environment variables, not flags, so they stay out of process listings: `BOX_BLOB_S3_KEY` and `BOX_BLOB_S3_SECRET`. Each row records which backend holds its bytes: after a switch, the old backend's blobs answer 410, and their objects are left for manual cleanup.
 
 ## Access tokens
 
@@ -253,6 +271,7 @@ One SQLite file in the data directory (default `/var/lib/box`, `--data-dir`). It
 - `tokens`: access token, comment, expiry, created at. The value is stored so it can be copied again
 - `env`: name, value. List commands never return the value
 - `events`: id (AUTOINCREMENT, int64), topic, body (any bytes), from label, token id, dedup key, created at. Indexed on (topic, id) and (from, id); a partial unique index on (from, dedup key) makes dedup race-free. At most 100000 rows, none older than 7 days
+- `blobs`: id (AUTOINCREMENT, int64), size, content type, from label, token id, backend, created at. Indexed on created_at. At most 4 GiB together, none older than 7 days; the bytes live in the backend, not in this file
 - `meta`: domain, the three listen addresses, server keys, schema version
 
 Pending joins and TUI counters live in memory only. The agent keeps `~/.box/computer.json`: token, QUIC endpoint, server fingerprint, name, login user.

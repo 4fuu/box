@@ -70,8 +70,15 @@ func (s *Server) serveEvent(w http.ResponseWriter, r *http.Request) {
 		s.eventPostJSON(w, r, from, tokenID)
 	case strings.HasPrefix(r.URL.Path, "/api/events/") && r.Method == http.MethodPost:
 		s.eventPostRaw(w, r, from, tokenID)
+	case r.URL.Path == "/api/blobs" && r.Method == http.MethodPost:
+		s.blobPost(w, r, from, tokenID)
+	case strings.HasPrefix(r.URL.Path, "/api/blobs/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		s.blobGet(w, r)
 	case r.URL.Path == "/api/events" || strings.HasPrefix(r.URL.Path, "/api/events/"):
 		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method\n", http.StatusMethodNotAllowed)
+	case r.URL.Path == "/api/blobs" || strings.HasPrefix(r.URL.Path, "/api/blobs/"):
+		w.Header().Set("Allow", "GET, HEAD, POST")
 		http.Error(w, "method\n", http.StatusMethodNotAllowed)
 	default:
 		http.NotFound(w, r)

@@ -32,6 +32,13 @@ const (
 	eventPruneEvery = 64
 )
 
+// Blob retention, the same way: at most blobMaxTotal bytes together and
+// nothing older than blobMaxAge. Tests shrink the copies on the Store.
+const (
+	blobMaxTotal = 4 << 30
+	blobMaxAge   = 7 * 24 * time.Hour
+)
+
 var (
 	ErrNotFound = errors.New("not found")
 	ErrExists   = errors.New("exists")
@@ -61,6 +68,10 @@ type Store struct {
 	eventAge       time.Duration
 	eventPruneStep int64
 	pruneCount     atomic.Int64
+
+	// Blob retention state, the same way.
+	blobAge   time.Duration
+	blobTotal int64
 }
 
 // Key is a bound client public key. The splice key is not a row.
@@ -116,6 +127,7 @@ func Open(path string) (*Store, error) {
 	s := &Store{
 		db: db, path: path, nowfn: func() time.Time { return time.Now().UTC() },
 		eventRows: eventMaxRows, eventAge: eventMaxAge, eventPruneStep: eventPruneEvery,
+		blobAge: blobMaxAge, blobTotal: blobMaxTotal,
 	}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -226,6 +238,16 @@ CREATE INDEX IF NOT EXISTS events_from ON events(from_label, id);
 CREATE INDEX IF NOT EXISTS events_created ON events(created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS events_dedup
   ON events(from_label, dedup_key) WHERE dedup_key IS NOT NULL;
+CREATE TABLE IF NOT EXISTS blobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  size INTEGER NOT NULL,
+  content_type TEXT NOT NULL DEFAULT '',
+  from_label TEXT NOT NULL,
+  token_id INTEGER,
+  store TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS blobs_created ON blobs(created_at);
 `
 
 func (s *Store) Meta(key string) (string, bool, error) {

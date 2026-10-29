@@ -184,6 +184,10 @@ assigned. Ids are 64-bit — keep the cursor in a 64-bit integer. The details,
 including the body encoding rule and dedup keys, are in
 [DESIGN.md](docs/DESIGN.md#events).
 
+Big payloads skip events. `POST /api/blobs` on `event.<domain>` stores up
+to 64 MiB for 7 days — on disk by default, or in any S3-compatible service
+(OSS, R2, MinIO) — and the event body names the bytes: `blob:<id>`.
+
 `env set NAME <value>` stores a variable and pushes it to online computers.
 `env ls` prints names, never values. Access tokens are not env values:
 `token ls` prints them.

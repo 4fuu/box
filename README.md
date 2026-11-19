@@ -134,12 +134,13 @@ can, points sshd at that file and adds `AcceptEnv *`, so per-session env
 variables set on the server reach their shells. It prints
 each change. The account's own `authorized_keys` is left alone.
 
-`box sshd enable` is the switch for ssh. Until it succeeds the server lists
-that computer's ssh as disabled, and a connection to it says how to enable
-ssh. The command edits sshd's config, reloads or restarts sshd when it can,
-then checks that the host public key parses and that sshd answers with an SSH
-identification line. Only when both checks pass does the agent reconnect so
-the server learns the key. A failed check leaves ssh disabled.
+`box sshd enable` is the switch for ssh on a computer that joined without a
+working sshd. Until it succeeds the server lists that computer's ssh as
+disabled, and a connection to it says how to enable ssh. The command edits
+sshd's config, reloads or restarts sshd when it can, then checks that the
+host public key parses and that sshd answers with an SSH identification
+line. Only when both checks pass does the agent reconnect so the server
+learns the key. A failed check leaves ssh disabled.
 
 ### Claim a hostname
 

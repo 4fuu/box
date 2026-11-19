@@ -84,7 +84,7 @@ box agent
 
 `box join` 会写这个账号的 `~/.ssh/box_authorized_keys`。能写 sshd 配置时，它会把这个文件加进 `AuthorizedKeysFile`，并添加 `AcceptEnv *`（让服务器上设置的会话环境变量能进入 shell），每一处修改都会打印出来。账号自己的 `authorized_keys` 不动。环境变量的值只保存在服务器上，不落盘到计算机。
 
-`box sshd enable` 是 ssh 的开关。在它成功之前，服务器会把这台计算机的 ssh 列显示为 `disabled`，连接失败时也会提示怎么开启。这个命令会修改 sshd 配置，能重载或重启 sshd 时就会去做，然后检查主机公钥能否解析，以及 sshd 是否返回 SSH 标识行。两项都通过，代理才会重连，把主机公钥交给服务器。检查失败时 ssh 保持禁用。
+`box sshd enable` 是 ssh 的开关，用于 join 时还没有可用 sshd 的计算机。在它成功之前，服务器会把这台计算机的 ssh 列显示为 `disabled`，连接失败时也会提示怎么开启。这个命令会修改 sshd 配置，能重载或重启 sshd 时就会去做，然后检查主机公钥能否解析，以及 sshd 是否返回 SSH 标识行。两项都通过，代理才会重连，把主机公钥交给服务器。检查失败时 ssh 保持禁用。
 
 ### 声明主机名
 

@@ -7,24 +7,32 @@ import (
 )
 
 func TestRoundTrip(t *testing.T) {
+	const op = "round_trip"
+	type request struct {
+		Name string `json:"name"`
+		Ref  string `json:"ref"`
+	}
+	type response struct {
+		Name string `json:"name"`
+	}
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- Serve(b, func(op string, body json.RawMessage) (any, error) {
-			if op != OpPull {
+		done <- Serve(b, func(gotOp string, body json.RawMessage) (any, error) {
+			if gotOp != op {
 				return nil, errString("bad op")
 			}
-			var req PullBody
+			var req request
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, err
 			}
-			return NameBody{Name: req.Name}, nil
+			return response{Name: req.Name}, nil
 		})
 	}()
-	var got NameBody
-	if err := Call(a, OpPull, PullBody{Name: "base", Ref: "reg/base:latest"}, &got); err != nil {
+	var got response
+	if err := Call(a, op, request{Name: "base", Ref: "reg/base:latest"}, &got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Name != "base" {

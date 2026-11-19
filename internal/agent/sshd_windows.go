@@ -27,7 +27,7 @@ var sshdPlatform = sshdBehavior{
 			"  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0\n"+
 			"  Set-Service sshd -StartupType Automatic\n"+
 			"  Start-Service sshd\n"+
-			"then run box join again. The config lives in %s.\n",
+			"then run box sshd enable. The config lives in %s.\n",
 			filepath.Join(programData, "ssh", "sshd_config"))
 	},
 	// Windows sshd's default config ends with a Match Group administrators

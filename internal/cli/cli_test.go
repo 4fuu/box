@@ -83,7 +83,7 @@ func TestServeIgnoresAgentSocket(t *testing.T) {
 
 func TestGuestCommandsNeedAgentSocket(t *testing.T) {
 	dir := t.TempDir()
-	for _, args := range [][]string{{"domain"}, {"portal", "ls"}} {
+	for _, args := range [][]string{{"domain"}, {"portal", "ls"}, {"sshd", "enable"}} {
 		var stderr bytes.Buffer
 		err := Run(Options{
 			Args:         args,

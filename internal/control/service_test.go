@@ -277,3 +277,60 @@ func TestRemoveMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestComputersRenderSSHState(t *testing.T) {
+	svc := newSvc(t)
+	if err := svc.Store.CreateComputer("nokey", secret.Hash("t1"), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Store.CreateComputer("keyed", secret.Hash("t2"), "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Store.SetComputerInfo("keyed", "bob", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake home"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := svc.ListComputers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	views := map[string]ComputerView{}
+	for _, v := range list {
+		views[v.Name] = v
+	}
+	if !views["nokey"].SSHDisabled {
+		t.Fatalf("nokey %+v", views["nokey"])
+	}
+	if views["keyed"].SSHDisabled {
+		t.Fatalf("keyed %+v", views["keyed"])
+	}
+	raw, err := json.Marshal(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"ssh_disabled":true`) {
+		t.Fatalf("json %s", raw)
+	}
+	text, err := FormatComputers(list, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var noKeyLine, keyedLine string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "nokey") {
+			noKeyLine = line
+		}
+		if strings.HasPrefix(line, "keyed") {
+			keyedLine = line
+		}
+	}
+	if !strings.Contains(text, "SSH") || !strings.Contains(noKeyLine, "disabled") || !strings.Contains(keyedLine, "enabled") {
+		t.Fatalf("table\n%s", text)
+	}
+	// A live hello with a key is enough, even when the stored row is empty.
+	if sshDisabled("ssh-ed25519 AAAAlive home", "") {
+		t.Fatal("live host key ignored")
+	}
+	if !sshDisabled("", "") {
+		t.Fatal("no host key was not disabled")
+	}
+}

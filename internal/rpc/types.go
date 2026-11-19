@@ -126,6 +126,18 @@ type DomainBody struct {
 	Domain string `json:"domain"`
 }
 
+// SSHDEnableResult reports what box sshd enable did. Output is the
+// ensureSSHD text for the guest to print. Enabled is false with Error set
+// when the probe failed; ssh stays disabled in that case. Reconnecting is
+// set when the agent closed its tunnel so the next hello carries the host
+// key.
+type SSHDEnableResult struct {
+	Output       string `json:"output,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	Reconnecting bool   `json:"reconnecting,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
 const (
 	OpCreate   = "create"
 	OpDelete   = "delete"
@@ -144,6 +156,7 @@ const (
 	OpPortalRm    = "portal_rm"
 	OpEventPub    = "event_pub"
 	OpEventGet    = "event_get"
+	OpSSHDEnable  = "sshd_enable"
 )
 
 // ErrNoCapacity is the text a node returns when a computer does not fit.

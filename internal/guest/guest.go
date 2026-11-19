@@ -40,6 +40,8 @@ func Run(ctx context.Context, socket string, args []string, stdin io.Reader, std
 		return nil
 	case "portal":
 		return portal(socket, args[1:], stdout)
+	case "sshd":
+		return sshd(socket, args[1:], stdout)
 	case "event":
 		return eventCmd(ctx, socket, args[1:], stdin, stdout, stderr)
 	case "serve", "node":
@@ -121,6 +123,36 @@ func portal(socket string, args []string, stdout io.Writer) error {
 }
 
 const eventUsage = "usage: box event pub <topic> [text...] [--key k] | box event get [--since n] [--topic t]... [--from f]... [--limit n] [--wait s] [--json] [--follow]"
+
+// sshd enables ssh access after the operator installed or repaired sshd.
+// The agent edits the config, probes the host key and port, and reconnects
+// the tunnel only when both checks pass.
+func sshd(socket string, args []string, stdout io.Writer) error {
+	if len(args) != 1 || args[0] != "enable" {
+		return fmt.Errorf("usage: box sshd enable")
+	}
+	var out rpc.SSHDEnableResult
+	if err := call(context.Background(), socket, rpc.OpSSHDEnable, nil, &out); err != nil {
+		return err
+	}
+	if out.Output != "" {
+		if _, err := fmt.Fprint(stdout, out.Output); err != nil {
+			return err
+		}
+	}
+	if !out.Enabled {
+		if out.Error == "" {
+			return fmt.Errorf("ssh is still disabled")
+		}
+		return fmt.Errorf("ssh is still disabled: %s", out.Error)
+	}
+	if out.Reconnecting {
+		fmt.Fprintln(stdout, "ssh enabled; reconnecting the tunnel so the server learns the host key")
+		return nil
+	}
+	fmt.Fprintln(stdout, "ssh enabled; the tunnel is down, so the server learns the host key when it reconnects")
+	return nil
+}
 
 func eventCmd(ctx context.Context, socket string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {

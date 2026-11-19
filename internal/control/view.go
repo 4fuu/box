@@ -28,13 +28,17 @@ func FormatComputers(list []ComputerView, asJSON bool) (string, error) {
 	}
 	var b bytes.Buffer
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tONLINE\tUSER\tADDRESS\tAGENT\tPORTALS")
+	fmt.Fprintln(w, "NAME\tONLINE\tSSH\tUSER\tADDRESS\tAGENT\tPORTALS")
 	for _, c := range list {
 		online := "no"
 		if c.Online {
 			online = "yes"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", c.Name, online, c.User, c.Address, c.AgentVersion, strings.Join(c.Portals, ","))
+		sshState := "enabled"
+		if c.SSHDisabled {
+			sshState = "disabled"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Name, online, sshState, c.User, c.Address, c.AgentVersion, strings.Join(c.Portals, ","))
 	}
 	if err := w.Flush(); err != nil {
 		return "", err

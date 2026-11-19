@@ -257,10 +257,18 @@ func (s *Service) IsComputer(name string) bool {
 type ComputerView struct {
 	Name         string   `json:"name"`
 	Online       bool     `json:"online"`
+	SSHDisabled  bool     `json:"ssh_disabled"`
 	User         string   `json:"user"`
 	Address      string   `json:"address"`
 	AgentVersion string   `json:"agent_version"`
 	Portals      []string `json:"portals"`
+}
+
+// sshDisabled reports whether neither the live hello nor the stored record
+// has an sshd host key. A computer in that state has no ssh to splice to
+// until box sshd enable probes sshd successfully.
+func sshDisabled(liveKey, storedKey string) bool {
+	return strings.TrimSpace(liveKey) == "" && strings.TrimSpace(storedKey) == ""
 }
 
 func (s *Service) ListComputers() ([]ComputerView, error) {
@@ -281,13 +289,16 @@ func (s *Service) ListComputers() ([]ComputerView, error) {
 		view := ComputerView{
 			Name: c.Name, User: c.LoginUser, Portals: labels,
 		}
+		liveKey := ""
 		if conn := s.liveGet(c.Name); conn != nil {
 			view.Online = true
 			view.AgentVersion = conn.Identity().AgentVersion
+			liveKey = conn.Identity().HostKey
 			if addr := conn.RemoteAddr(); addr != nil {
 				view.Address = addr.String()
 			}
 		}
+		view.SSHDisabled = sshDisabled(liveKey, c.HostKey)
 		out = append(out, view)
 	}
 	return out, nil

@@ -53,8 +53,9 @@ deployment, not a hosted service.
 - a Linux machine for the server, and a Linux or Windows machine for each
   computer
 - OpenSSH on the machine you connect from, and sshd on each computer. On
-  Windows, the OpenSSH Server optional capability provides sshd, and the
-  agent socket needs Windows 10 1809 or newer
+  Windows, the OpenSSH Server optional capability provides sshd; it can be
+  installed after `box join`, and the computer shows ssh disabled until
+  `box sshd enable` succeeds. The agent socket needs Windows 10 1809 or newer
 
 The server and a computer can be the same machine. The agent does not need root.
 
@@ -84,7 +85,9 @@ A computer install runs `box join <domain>` and can add a systemd user unit
 for `box agent`. Approve the printed code at the server.
 
 On Windows there is no installer. Download the `windows-amd64` zip from the
-releases, put `box.exe` on PATH, and in an elevated PowerShell:
+releases, put `box.exe` on PATH, and run `box join <domain>`. Join succeeds
+even before sshd exists, but the computer's ssh stays disabled. In an elevated
+PowerShell install the OpenSSH Server capability:
 
 ```powershell
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
@@ -92,10 +95,12 @@ Set-Service sshd -StartupType Automatic
 Start-Service sshd
 ```
 
-Then run `box join <domain>`, and keep `box agent` running at logon from the
-Startup folder (`shell:startup`) or a Task Scheduler job that runs `box.exe
-agent` when you log on. Windows sshd reads keys for administrator accounts
-from `C:\ProgramData\ssh\administrators_authorized_keys`, not `~/.ssh`; box
+Then run `box sshd enable` on the computer. It checks the host key and that
+sshd answers, then reconnects the agent so the server learns the key. Keep
+`box agent` running at logon from the Startup folder (`shell:startup`) or a
+Task Scheduler job that runs `box.exe agent` when you log on. Windows sshd
+reads keys for administrator accounts from
+`C:\ProgramData\ssh\administrators_authorized_keys`, not `~/.ssh`; box
 prints that note at join time.
 
 Releases use a calendar version such as `2026.924.0`. See
@@ -128,6 +133,13 @@ name registered on the server. The shell runs as the account that ran
 can, points sshd at that file and adds `AcceptEnv *`, so per-session env
 variables set on the server reach their shells. It prints
 each change. The account's own `authorized_keys` is left alone.
+
+`box sshd enable` is the switch for ssh. Until it succeeds the server lists
+that computer's ssh as disabled, and a connection to it says how to enable
+ssh. The command edits sshd's config, reloads or restarts sshd when it can,
+then checks that the host public key parses and that sshd answers with an SSH
+identification line. Only when both checks pass does the agent reconnect so
+the server learns the key. A failed check leaves ssh disabled.
 
 ### Claim a hostname
 

@@ -1,10 +1,10 @@
 # box
 
-Persistent Linux computers on hardware the operator owns. A computer is a machine, not a container. The client is stock `ssh`. One `box` binary is the server, the agent, and the guest CLI. [DESIGN.md](docs/DESIGN.md) is the spec. [README.md](README.md) is the short version. When they disagree, follow DESIGN.md.
+Persistent Linux computers on hardware the operator owns. A computer is a machine, not a container. The client is stock `ssh`. One `box` binary is the server, the agent, and the guest CLI. The [docs/](docs/) folder describes the system. [README.md](README.md) is the short version.
 
 ## Status
 
-The Go module implements the server, the computer agent, and the guest commands in one `box` binary. Do not invent commands, flags, or packages that DESIGN.md does not name. `go test` does not need Podman or frp. There is no base image.
+The Go module implements the server, the computer agent, and the guest commands in one `box` binary. Do not invent commands, flags, or packages that the docs do not name. `go test` does not need Podman or frp. There is no base image.
 
 Build and test with:
 
@@ -55,7 +55,7 @@ The first version leaves these out. Do not start them:
 
 | Path | What it is |
 | --- | --- |
-| `docs/DESIGN.md` | Spec |
+| `docs/` | Behavior documentation: architecture, install, computers, control, portals, events |
 | `internal/agent/skill/SKILL.md` | Skill embedded into the agent and written on the computer. No credentials |
 | `.agents/setup` | Orb toolchain install |
 | `.agents/resume` | Checks that Go is still present. Does not install anything |

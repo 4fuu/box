@@ -1,6 +1,6 @@
 # Refactor plan
 
-This document maps the current container-based implementation onto the design in [DESIGN.md](DESIGN.md) (node-is-computer, QUIC tunnel, SSH bootstrap, approval codes, TUI). It is a working plan, not a spec: DESIGN.md wins when they disagree. Everything here is a breaking change; the project has no released state to migrate, so schemas and commands are replaced, not migrated.
+Historical plan, kept for reference: the refactor it describes is complete. It mapped the old container-based implementation onto the machine design now described in [architecture](architecture.md) and the rest of docs/ (node-is-computer, QUIC tunnel, SSH bootstrap, approval codes, TUI). The docs win when they disagree. Everything here was a breaking change; the project had no released state to migrate, so schemas and commands were replaced, not migrated.
 
 ## What goes away
 
@@ -21,7 +21,7 @@ This document maps the current container-based implementation onto the design in
 
 ## What stays
 
-- `internal/store` — slimmed to the schema in DESIGN.md (keys, pairings with attempt counters, computers, portals, env, meta)
+- `internal/store` — slimmed to the schema in [architecture](architecture.md#data) (keys, pairings with attempt counters, computers, portals, env, meta)
 - `internal/rpc` — the newline-JSON frame format, reused on the control stream
 - `internal/keys`, `internal/ident`, `internal/secret` — unchanged in purpose; `secret` gains the 6-character mixed-case code
 - `internal/server` — kept as a package, heavily reworked (see below)
@@ -57,7 +57,7 @@ This document maps the current container-based implementation onto the design in
 
 ## Work order
 
-1. `docs/DESIGN.md` rewrite (done, this change) and this plan
+1. docs rewrite (done) and this plan
 2. `internal/store` slim-down, new schema, tests
 3. `internal/tunnel` with loopback tests: stream types, bad token, wrong version, reconnect
 4. `internal/server`: config persistence, SSH branching, approval queue, portal routing, splice

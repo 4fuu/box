@@ -6,54 +6,37 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-box 把你自己的机器放在同一个 SSH 入口后面。计算机是一整台机器：工作站、家用服务器或虚拟机，不是容器。客户端就是到处都有的 `ssh`。服务器是唯一的公共入口。计算机主动向外连接，所以可以放在 NAT 后面。
+box 把你自己的机器放在同一个 SSH 入口后面。计算机是一整台机器：工作站、家用服务器或虚拟机，不是容器。客户端就是到处都有的 `ssh`。计算机主动向外连接，所以可以放在 NAT 后面。
 
-`ssh box.example.com` 打开控制 REPL。`ssh web@box.example.com` 在名为 `web` 的计算机上打开 shell，终点是那台机器自己的 sshd。
-
-参照是 [exe.dev](https://exe.dev)：机器有名字，状态会留下，机器上的网站有主机名。这是私人部署，不是托管服务。
+`ssh box.example.com` 打开控制 REPL。`ssh web@box.example.com` 在名为 `web` 的计算机上打开 shell，终点是那台机器自己的 sshd —— 所以 `scp`、rsync、SFTP、VS Code Remote-SSH 也都能用。机器上的网站有主机名：`box portal add web 3000` 声明 `web.<域名>`。
 
 > [!WARNING]
-> 这不是多租户主机。HTTP 端口提供门户、事件接口和登录页，而且是明文 HTTP。如果需要 TLS，由你放在这个端口前面的边缘来终结。本项目不签发证书。私有门户检查令牌，并不加密这条连接。拦截 UDP 的网络无法运行计算机。
+> 这不是多租户主机。HTTP 端口是明文 HTTP；如果需要 TLS，由你放在前面的边缘来终结。box 不签发证书。私有门户检查令牌，并不加密这条连接。拦截 UDP 的网络无法运行计算机。
 
-## 为什么用 box
+## 安装
 
-- **它就是那台机器。** `scp`、rsync、SFTP、VS Code Remote-SSH 和 `ssh -L` 能用，是因为它们到达的是普通 sshd。连接断开不会停掉计算机上的进程。
-- **客户端是系统里的 OpenSSH。** 没有账号，也不需要另装客户端。服务器初始化时打印的一次性密码，由第一个出示它的 SSH 连接绑定。之后的客户端向已绑定的客户端要密码，或在服务器本机运行 `box pair`。其余时间未知密钥一律直接拒绝，不出现密码提示。
-- **一个二进制。** 服务器运行 `box serve`。计算机先 `box join`，再 `box agent`。在计算机上，`box domain`、`box portal` 和 `box event` 跟代理说话。没有 Podman，没有 frp，也没有节点。
-- **一个端口对应一个主机名。** `box portal add web 3000` 在服务器启动时配置的域名下声明 `web`。服务器按这个 `Host` 把请求转到该计算机的 `127.0.0.1:3000`。加上 `private` 后，访问必须带令牌。未知的 `Host` 得到 421。`event.<域名>` 和 `auth.<域名>` 属于服务器。
-- **机器是你的。** 计算机用一个短的、一次性的批准码加入。它主动向外连接，所以可以放在 NAT 后面。
+服务器和计算机可以是同一台机器。代理不需要 root。完整步骤见[安装与部署](docs/install.md)（英文）。
 
-## 快速开始
-
-### 要求
-
-- 服务器用一台 Linux；每台计算机可以是 Linux 或 Windows（Windows 需 10 1809 及以上）
-- 你用来连接的机器上有 OpenSSH，每台计算机上有 sshd（Windows 计算机用系统自带的 OpenSSH Server 可选功能；它可以在 `box join` 之后再安装，`box sshd enable` 成功前该计算机的 ssh 显示为已禁用）
-
-服务器和计算机可以是同一台机器。代理不需要 root。
-
-### 安装
-
-下载安装脚本，在终端里运行。它会询问 English 或中文，然后询问这台机器是服务器还是计算机。
+<details>
+<summary>Linux 服务器或计算机</summary>
 
 ```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/4fuu/box/main/scripts/install.sh
 sh install.sh
 ```
 
-脚本安装 `box` 二进制。它不安装容器运行时，也不安装 frp。
+安装脚本会询问 English 或中文，然后询问这台机器是服务器还是计算机，并安装 `box` 二进制。
 
-服务器安装可以加上 systemd 单元。放行三个端口：SSH（默认 `:22`）、HTTP（默认 `:80`）和 QUIC（默认 `:7443`）。然后：
+服务器安装可以加上 systemd 单元。放行 SSH（`:22`）、HTTP（`:80`）和 QUIC（`:7443`，UDP），然后运行 `box serve --domain box.example.com`。第一次启动会打印一次性密码；第一个出示它的 SSH 客户端绑定自己的密钥。
 
-```bash
-box serve --domain box.example.com
-```
+计算机安装会运行 `box join <域名>`。在服务器上批准它打印的验证码，并让 `box agent` 保持运行（systemd 用户单元）。
 
-第一次启动会打印一次性密码。
+</details>
 
-计算机安装会运行 `box join <域名>`，并可以加上 `box agent` 的 systemd 用户单元。在服务器上批准它打印的验证码。
+<details>
+<summary>Windows 计算机</summary>
 
-Windows 计算机没有安装脚本。从发布页下载 windows-amd64 的 zip，把 box.exe 放进 PATH，先运行 `box join <域名>`：即使还没装 OpenSSH Server，join 也会成功，但这台计算机的 ssh 会显示为已禁用。然后在管理员 PowerShell 里：
+从[发布页](https://github.com/4fuu/box/releases)下载 `windows-amd64` 的 zip，把 `box.exe` 放进 PATH，运行 `box join <域名>`。即使还没装 sshd，join 也会成功；在管理员 PowerShell 里安装 OpenSSH Server 可选功能之前，这台计算机的 ssh 保持禁用：
 
 ```powershell
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
@@ -61,106 +44,35 @@ Set-Service sshd -StartupType Automatic
 Start-Service sshd
 ```
 
-接着在计算机上运行 `box sshd enable`。它会检查 sshd 的主机公钥，并确认 sshd 能应答，然后让代理重连，服务器才会拿到这把钥匙。再用启动文件夹（`shell:startup` 里指向 `box agent` 的快捷方式）或计划任务让 agent 随登录运行。注意：管理员组的账号走 `C:\ProgramData\ssh\administrators_authorized_keys` 认证，`~/.ssh` 里的钥匙对它们无效；join 时会打印这条提示。
+然后在计算机上运行 `box sshd enable`，并让 `box agent` 随登录运行（启动文件夹或计划任务）。
 
-版本号是日历版本，例如 `2026.924.0`。见 [docs/release.md](docs/release.md)。
+</details>
 
-### 第一次会话
+版本号是日历版本，例如 `2026.924.0`，见 [Release](docs/release.md)（英文）。
 
-```bash
-ssh box.example.com
-```
+## Agent 技能
 
-出示服务器初始化时的一次性密码。在计算机上：
+box 技能教 coding agent 在计算机上声明门户、发布事件。box 代理会自动把它写到 `~/.agents/skills/box/SKILL.md`。也可以自己加给任何 agent：
 
 ```bash
-box join box.example.com
-box agent
+npx skills add 4fuu/box --skill box
 ```
 
-`box join` 会打印批准码。在服务器 TUI 里输入，或从已绑定的客户端运行 `approve <code>`。登录用户是运行 `box join` 的用户，除非 `--user` 指定了这台机器上的另一个账户。
-
-`ssh home@box.example.com` 到达的是那台计算机的 sshd。SSH 用户名是登记在服务器上的名字。进去之后的账号是这台机器上运行 `box join` 的账号，两个名字可以不同。
-
-`box join` 会写这个账号的 `~/.ssh/box_authorized_keys`。能写 sshd 配置时，它会把这个文件加进 `AuthorizedKeysFile`，并添加 `AcceptEnv *`（让服务器上设置的会话环境变量能进入 shell），每一处修改都会打印出来。账号自己的 `authorized_keys` 不动。环境变量的值只保存在服务器上，不落盘到计算机。
-
-`box sshd enable` 是 ssh 的开关，用于 join 时还没有可用 sshd 的计算机。在它成功之前，服务器会把这台计算机的 ssh 列显示为 `disabled`，连接失败时也会提示怎么开启。这个命令会修改 sshd 配置，能重载或重启 sshd 时就会去做，然后检查主机公钥能否解析，以及 sshd 是否返回 SSH 标识行。两项都通过，代理才会重连，把主机公钥交给服务器。检查失败时 ssh 保持禁用。
-
-### 声明主机名
-
-在计算机上：
-
-```bash
-box domain
-box portal check web
-box portal add web 3000
-```
-
-`box domain` 打印父域名，例如 `box.example.com`。`web` 变成 `web.box.example.com`，并转到该机器 `127.0.0.1` 的 3000 端口。标签不能包含点。`event` 和 `auth` 是保留标签。`check` 不声明。标签已被占用时，`add` 会拒绝。打印出来的 URL 不带端口。
-
-```bash
-box portal add lock 3000 private
-```
-
-`private` 表示访问必须带令牌。浏览器会被转到 `auth.<域名>`，输入令牌后，服务器把令牌放进父域名的 Cookie。其他客户端发送 `X-Box-Token` 或 `Authorization: Bearer`。公开的门户不检查。一把令牌在有效期内打开所有私有门户。
-
-在服务器上：
-
-```bash
-box token add door
-box token ls
-box token rm 1
-```
-
-`token add` 打印令牌。`token ls` 和 TUI 会再次打印它，所以可以反复复制。默认没有有效期，需要时再用 `--for`（`box token add --for 12h door`）。
-
-事件是服务器 SQLite 文件里的一份持久日志：最多 100000 条，最多保留 7 天。不是计算机的设备用令牌走 HTTP。计算机用 `box event`。已绑定的 SSH 客户端用 `event pub` 和 `event get`。
-
-```bash
-box event pub door open
-box event pub door --key door-1   # 去重：重试返回同一个 id
-box event get --since 0
-box event get --follow --topic door
-```
-
-每个设备发一个自己的令牌，备注写设备名 —— 备注会成为事件的 `from`：
-
-```bash
-box token add door-sensor
-```
-
-```bash
-# 小设备一行搞定；请求体按原样存储
-curl -H "X-Box-Token: $TOKEN" -H "Idempotency-Key: door-1" \
-  -d 'open' http://event.box.example.com/api/events/kitchen/door
-
-# 长轮询循环
-while true; do
-  curl -s -H "X-Box-Token: $TOKEN" \
-    "http://event.box.example.com/api/events?since=$SINCE&topic=kitchen/%23&wait=25"
-done
-```
-
-每次读取都会返回 `{"events":[...],"oldest":n,"latest":n,"more":b}`：
-`oldest` 是仍保留的最小 id，`latest` 是分配过的最大 id。id 是 64 位 ——
-游标要存进 64 位整数。正文编码规则、去重键等细节见
-[DESIGN.md](docs/DESIGN.md#events)（英文）。
-
-大文件不走事件。`event.<domain>` 上的 `POST /api/blobs` 最多存 64 MiB，保留
-7 天 —— 默认在磁盘上，也可以选任何兼容 S3 的存储服务（OSS、R2、MinIO）——
-事件正文里写 `blob:<id>` 来引用这些字节。
-
-`env set NAME <value>` 保存变量并推送到在线的计算机。`env ls` 只打印名字，不打印值。访问令牌不是环境变量：`token ls` 会打印令牌。
+它只是一份简短的用法指导；完整语法由 `box help` 说明。源码：[internal/agent/skill/SKILL.md](internal/agent/skill/SKILL.md)。
 
 ## 文档
 
-| 目的 | 文档 |
+| 主题 | 文档 |
 | --- | --- |
-| 读规格：绑定、隧道、REPL、门户，以及第一版不做的事 | [DESIGN.md](docs/DESIGN.md) |
-| 按日期发版 | [Release](docs/release.md) |
-| 看计算机上的代理会读到什么 | [internal/agent/skill/SKILL.md](internal/agent/skill/SKILL.md) |
+| 架构：端口、隧道、SSH 路由、数据 | [architecture](docs/architecture.md) |
+| 安装与部署 | [install](docs/install.md) |
+| 计算机：join、代理、sshd、env、guest CLI | [computers](docs/computers.md) |
+| 控制：绑定、REPL、TUI | [control](docs/control.md) |
+| 门户与访问令牌 | [portals](docs/portals.md) |
+| 事件与 blob | [events](docs/events.md) |
+| 按日期发版 | [release](docs/release.md) |
 
-与本页不一致时，以 [DESIGN.md](docs/DESIGN.md) 为准。
+文档均为英文。
 
 ## 开发
 
@@ -175,6 +87,4 @@ go build -o box .
 
 ## 许可证
 
-AGPL-3.0-only，全文见 [LICENSE](LICENSE)。版权所有 2026 4fuu 及 box 贡献者。
-如果你运行修改版 box 并让用户通过网络访问它，就必须向这些用户提供你那
-个版本的源代码。
+AGPL-3.0-only，全文见 [LICENSE](LICENSE)。版权所有 2026 4fuu 及 box 贡献者。如果你运行修改版 box 并让用户通过网络访问它，就必须向这些用户提供你那个版本的源代码。

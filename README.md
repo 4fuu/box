@@ -7,87 +7,55 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 box puts machines you own behind one SSH entry. A computer is a whole
-machine — a workstation, a home server, a VM — not a container. The client is
-the `ssh` already installed everywhere. The server is the only public entry.
-Computers dial out, so they can sit behind NAT.
+machine — a workstation, a home server, a VM — not a container. The client
+is the `ssh` already installed everywhere. Computers dial out, so they can
+sit behind NAT.
 
 `ssh box.example.com` opens the control REPL. `ssh web@box.example.com`
-opens a shell on the computer named `web`, at that machine's own sshd.
-
-The reference is [exe.dev](https://exe.dev): machines get names, state
-survives, and a site on a machine gets a hostname. This is a private
-deployment, not a hosted service.
+opens a shell on the computer named `web`, at that machine's own sshd — so
+`scp`, rsync, SFTP, and VS Code Remote-SSH work too. A site on a machine
+gets a hostname: `box portal add web 3000` claims `web.<domain>`.
 
 > [!WARNING]
-> This is not a multi-tenant host. The HTTP port serves portals, the event
-> API, and a sign-in page, in plain HTTP. TLS, if any, is terminated by an
-> edge you run in front of it. This project does not issue certificates. A
-> private portal checks a token; it does not encrypt the connection.
-> Networks that block UDP cannot run a computer.
+> This is not a multi-tenant host. The HTTP port is plain HTTP; TLS, if
+> any, is terminated by an edge you run in front of it. box issues no
+> certificates. A private portal checks a token; it does not encrypt the
+> connection. Networks that block UDP cannot run a computer.
 
-## Why box
+## Install
 
-- **It is the machine.** `scp`, rsync, SFTP, VS Code Remote-SSH, and `ssh -L`
-  work because they arrive at a normal sshd. A disconnect does not stop
-  anything on the computer.
-- **The client is stock OpenSSH.** There is no account and no client to
-  install. The first SSH connection that presents the one-time password from
-  server init is bound. Later clients get a password from a bound client, or
-  from `box pair` on the server. At any other time an unknown key is refused
-  with no password prompt.
-- **One binary.** `box serve` is the server. `box join`, then `box agent`, is
-  the computer. On the computer, `box domain`, `box portal`, and `box event`
-  talk to the agent. There is no Podman, no frp, and no node.
-- **A hostname for one port.** `box portal add web 3000` claims `web` under
-  the domain set when the server starts. The server routes that `Host` to
-  `127.0.0.1:3000` on that computer. Add `private` when the portal should
-  require a token. An unknown `Host` gets 421. `event.<domain>` and
-  `auth.<domain>` belong to the server.
-- **Your machines.** A computer joins with a short, single-use approval code.
-  It dials out, so it can sit behind NAT.
+The server and a computer can be the same machine. The agent does not need
+root. Full steps: [Install and deploy](docs/install.md).
 
-## Quick start
-
-### Requirements
-
-- a Linux machine for the server, and a Linux or Windows machine for each
-  computer
-- OpenSSH on the machine you connect from, and sshd on each computer. On
-  Windows, the OpenSSH Server optional capability provides sshd; it can be
-  installed after `box join`, and the computer shows ssh disabled until
-  `box sshd enable` succeeds. The agent socket needs Windows 10 1809 or newer
-
-The server and a computer can be the same machine. The agent does not need root.
-
-### Install
-
-Download the installer and run it in a terminal. It asks for English or
-Chinese, then whether this machine is the server or a computer.
+<details>
+<summary>Linux server or computer</summary>
 
 ```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/4fuu/box/main/scripts/install.sh
 sh install.sh
 ```
 
-The script installs the `box` binary. It does not install a container runtime
-or frp.
+The installer asks for English or Chinese, then server or computer, and
+installs the `box` binary.
 
-A server install can add a systemd unit. Open three ports: SSH (default
-`:22`), HTTP (default `:80`), and QUIC (default `:7443`). Then:
+A server install can add a systemd unit. Open SSH (`:22`), HTTP (`:80`),
+and QUIC (`:7443`, UDP), then run `box serve --domain box.example.com`.
+The first start prints a one-time password; the first SSH client to
+present it binds its key.
 
-```bash
-box serve --domain box.example.com
-```
+A computer install runs `box join <domain>`. Approve the printed code at
+the server, and keep `box agent` running (systemd user unit).
 
-The first start prints a one-time password.
+</details>
 
-A computer install runs `box join <domain>` and can add a systemd user unit
-for `box agent`. Approve the printed code at the server.
+<details>
+<summary>Windows computer</summary>
 
-On Windows there is no installer. Download the `windows-amd64` zip from the
-releases, put `box.exe` on PATH, and run `box join <domain>`. Join succeeds
-even before sshd exists, but the computer's ssh stays disabled. In an elevated
-PowerShell install the OpenSSH Server capability:
+Download the `windows-amd64` zip from the
+[releases](https://github.com/4fuu/box/releases), put `box.exe` on PATH,
+and run `box join <domain>`. Join succeeds even before sshd exists; the
+computer's ssh stays disabled until you install the OpenSSH Server
+capability in an elevated PowerShell:
 
 ```powershell
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
@@ -95,143 +63,39 @@ Set-Service sshd -StartupType Automatic
 Start-Service sshd
 ```
 
-Then run `box sshd enable` on the computer. It checks the host key and that
-sshd answers, then reconnects the agent so the server learns the key. Keep
-`box agent` running at logon from the Startup folder (`shell:startup`) or a
-Task Scheduler job that runs `box.exe agent` when you log on. Windows sshd
-reads keys for administrator accounts from
-`C:\ProgramData\ssh\administrators_authorized_keys`, not `~/.ssh`; box
-prints that note at join time.
+Then run `box sshd enable` on the computer, and keep `box agent` running
+at logon (Startup folder or a scheduled task).
 
-Releases use a calendar version such as `2026.924.0`. See
-[docs/release.md](docs/release.md).
+</details>
 
-### Start the first session
+Releases use a calendar version such as `2026.924.0`; see
+[Release](docs/release.md).
 
-```bash
-ssh box.example.com
-```
+## Agent skill
 
-Present the one-time password from server init. On the computer:
+The box skill teaches a coding agent how to claim portals and publish
+events on a computer. The box agent writes it to
+`~/.agents/skills/box/SKILL.md` automatically. To add it to any agent
+yourself:
 
 ```bash
-box join box.example.com
-box agent
+npx skills add 4fuu/box --skill box
 ```
 
-`box join` prints an approval code. Enter it in the server TUI (screen 3,
-pending), or run `approve <code>` from a bound client. The TUI opens on a
-summary of every computer's tunnel, load, and traffic, and works down to a
-30-column terminal. The login user is whoever ran
-`box join`, unless `--user` names another account on that machine.
-
-`ssh home@box.example.com` is that computer's sshd. The SSH username is the
-name registered on the server. The shell runs as the account that ran
-`box join` on that machine. The two names do not have to match.
-
-`box join` writes that account's `~/.ssh/box_authorized_keys` and, when it
-can, points sshd at that file and adds `AcceptEnv *`, so per-session env
-variables set on the server reach their shells. It prints
-each change. The account's own `authorized_keys` is left alone.
-
-`box sshd enable` is the switch for ssh on a computer that joined without a
-working sshd. Until it succeeds the server lists that computer's ssh as
-disabled, and a connection to it says how to enable ssh. The command edits
-sshd's config, reloads or restarts sshd when it can, then checks that the
-host public key parses and that sshd answers with an SSH identification
-line. Only when both checks pass does the agent reconnect so the server
-learns the key. A failed check leaves ssh disabled.
-
-### Claim a hostname
-
-On the computer:
-
-```bash
-box domain
-box portal check web
-box portal add web 3000
-```
-
-`box domain` prints the parent domain, for example `box.example.com`. `web`
-becomes `web.box.example.com` and routes to port 3000 on `127.0.0.1`. A label
-cannot contain a dot. `event` and `auth` are reserved. `check` does not claim.
-`add` refuses when the label is taken. The printed URL has no port.
-
-```bash
-box portal add lock 3000 private
-```
-
-`private` requires an access token. A browser is sent to `auth.<domain>`,
-which asks for the token and stores it in a cookie for the parent domain.
-Other clients send `X-Box-Token` or `Authorization: Bearer`. Public portals
-stay open. One token opens every private portal for as long as that token is valid.
-
-On the server:
-
-```bash
-box token add door
-box token ls
-box token rm 1
-```
-
-`token add` prints the token. `token ls` and the TUI print it again, so it
-can be copied later. A token does not expire unless `--for` is set
-(`box token add --for 12h door`).
-
-Events are a durable log in the server's SQLite file: at most 100000
-events, nothing older than 7 days. Devices that are not computers use HTTP
-with a token. Computers use `box event`. A bound SSH client uses
-`event pub` and `event get`.
-
-```bash
-box event pub door open
-box event pub door --key door-1   # dedup: a retry returns the same id
-box event get --since 0
-box event get --follow --topic door
-```
-
-Give each device its own token, with a comment naming it — the comment
-becomes the event's `from`:
-
-```bash
-box token add door-sensor
-```
-
-```bash
-# one line from a tiny device; the body is stored verbatim
-curl -H "X-Box-Token: $TOKEN" -H "Idempotency-Key: door-1" \
-  -d 'open' http://event.box.example.com/api/events/kitchen/door
-
-# long-poll loop
-while true; do
-  curl -s -H "X-Box-Token: $TOKEN" \
-    "http://event.box.example.com/api/events?since=$SINCE&topic=kitchen/%23&wait=25"
-done
-```
-
-Every read answers with `{"events":[...],"oldest":n,"latest":n,"more":b}`:
-`oldest` is the smallest id still retained, `latest` the largest id ever
-assigned. Ids are 64-bit — keep the cursor in a 64-bit integer. The details,
-including the body encoding rule and dedup keys, are in
-[DESIGN.md](docs/DESIGN.md#events).
-
-Big payloads skip events. `POST /api/blobs` on `event.<domain>` stores up
-to 64 MiB for 7 days — on disk by default, or in any S3-compatible service
-(OSS, R2, MinIO) — and the event body names the bytes: `blob:<id>`.
-
-`env set NAME <value>` stores a variable and pushes it to online computers.
-`env ls` prints names, never values. Access tokens are not env values:
-`token ls` prints them.
+It is a short usage guide; `box help` carries the full syntax. Source:
+[internal/agent/skill/SKILL.md](internal/agent/skill/SKILL.md).
 
 ## Documentation
 
-| Goal | Guide |
+| Topic | Doc |
 | --- | --- |
-| Read the spec: binding, the tunnel, the REPL, portals, and what the first version leaves out | [DESIGN.md](docs/DESIGN.md) |
-| Cut a dated release | [Release](docs/release.md) |
-| See what an agent on a computer is told | [internal/agent/skill/SKILL.md](internal/agent/skill/SKILL.md) |
-
-[DESIGN.md](docs/DESIGN.md) wins when it disagrees with this page.
+| Architecture: ports, the tunnel, SSH routing, data | [architecture](docs/architecture.md) |
+| Install and deploy | [install](docs/install.md) |
+| Computers: join, the agent, sshd, env, the guest CLI | [computers](docs/computers.md) |
+| Control: pairing, the REPL, the TUI | [control](docs/control.md) |
+| Portals and access tokens | [portals](docs/portals.md) |
+| Events and blobs | [events](docs/events.md) |
+| Cut a dated release | [release](docs/release.md) |
 
 ## Development
 

@@ -214,6 +214,44 @@ func TestSummaryShowsLiveState(t *testing.T) {
 	}
 }
 
+func TestSummaryMarksSSHDisabled(t *testing.T) {
+	m := richModel(120, 40)
+	m.snap.Computers[0].SSHDisabled = true // home, online
+	m.snap.Computers[1].SSHDisabled = true // work-laptop, offline
+	out := plain(m.View())
+	for _, want := range []string{"disabled · box sshd enable", "offline · ssh disabled"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary missing %q:\n%s", want, out)
+		}
+	}
+	// Without the flag the cards render as before.
+	m = richModel(120, 40)
+	out = plain(m.View())
+	if strings.Contains(out, "ssh disabled") || strings.Contains(out, "disabled · box sshd enable") {
+		t.Fatalf("enabled computers marked disabled:\n%s", out)
+	}
+	if !strings.Contains(out, "1 open · 5 total") {
+		t.Fatalf("ssh session count gone:\n%s", out)
+	}
+	// The marker fits every terminal size the layout test covers.
+	for _, w := range []int{minWidth, 36, 80, 120} {
+		for _, h := range []int{minHeight, 40} {
+			m := richModel(w, h)
+			m.snap.Computers[0].SSHDisabled = true
+			m.snap.Computers[1].SSHDisabled = true
+			lines := strings.Split(strings.TrimRight(m.View(), "\n"), "\n")
+			if len(lines) > h {
+				t.Errorf("%dx%d: %d lines", w, h, len(lines))
+			}
+			for _, l := range lines {
+				if lw := lipgloss.Width(l); lw > w {
+					t.Errorf("%dx%d: line %d cells: %q", w, h, lw, l)
+				}
+			}
+		}
+	}
+}
+
 func TestSummaryScrolls(t *testing.T) {
 	m := richModel(minWidth, minHeight)
 	total := len(m.summaryLines())

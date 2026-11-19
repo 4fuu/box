@@ -371,7 +371,11 @@ func (m *model) machineCard(c control.MachineLive) card {
 			if who == "" {
 				who = "—"
 			}
-			return []string{st.dim.Render(who), st.off.Render("offline")}
+			state := st.off.Render("offline")
+			if view.SSHDisabled {
+				state += st.dim.Render(" · ") + st.warn.Render("ssh disabled")
+			}
+			return []string{st.dim.Render(who), state}
 		}}
 	}
 	mh := m.machineHist(c.Name)
@@ -402,9 +406,15 @@ func (m *model) machineCard(c control.MachineLive) card {
 			}
 			lines = append(lines, meter("load", nil, st.warn.Render(why), iw, st))
 		}
+		// The tunnel can be up while ssh is disabled: a computer that
+		// joined before its sshd was installed has no host key yet.
+		sshVal := st.value.Render(fmt.Sprint(t.SSHOpen)) + st.dim.Render(fmt.Sprintf(" open · %d total", t.SSHTotal))
+		if view.SSHDisabled {
+			sshVal = st.warn.Render("disabled · box sshd enable")
+		}
 		lines = append(lines,
 			meter("net", func(w int) string { return spark(mh.rate, w, st.on, st.frame) }, st.value.Render("↓"+size(mh.down)+" ↑"+size(mh.up)), iw, st),
-			meter("ssh", nil, st.value.Render(fmt.Sprint(t.SSHOpen))+st.dim.Render(fmt.Sprintf(" open · %d total", t.SSHTotal)), iw, st),
+			meter("ssh", nil, sshVal, iw, st),
 			meter("http", nil, st.value.Render(fmt.Sprint(t.PortalOpen))+st.dim.Render(fmt.Sprintf(" open · %d total", t.PortalTotal)), iw, st),
 		)
 		tail := "tunnel " + dur(time.Since(t.Since))

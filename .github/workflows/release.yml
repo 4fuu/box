@@ -151,8 +151,10 @@ jobs:
           On the server: \`box serve --domain <domain>\`.
           On a Linux computer: \`box join <domain>\`, then \`box agent\`.
           On a Windows computer: extract the windows-amd64 zip, put box.exe on
-          PATH, install the OpenSSH Server capability, then \`box join <domain>\`
-          and \`box agent\`.
+          PATH, run \`box join <domain>\`, install the OpenSSH Server capability,
+          then \`box sshd enable\` and \`box agent\`. Join also succeeds before
+          the capability is installed; ssh stays disabled until \`box sshd
+          enable\` probes sshd successfully.
           EOF
           tag="v$VERSION"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -191,6 +193,8 @@ jobs:
           status=$?
           set -e
           [ "$status" -eq 2 ]
-          printf '%s\n' "$usage" | grep -F 'box serve'
-          printf '%s\n' "$usage" | grep -F 'box join'
+          printf '%s\n' "$usage" | grep -F 'usage: box'
+          printf '%s\n' "$usage" | grep -F 'serve'
+          printf '%s\n' "$usage" | grep -F 'join <host>'
+          box help > /dev/null
           command -v box

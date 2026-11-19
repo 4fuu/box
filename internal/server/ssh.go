@@ -409,9 +409,12 @@ func (h *sshServer) dial(ctx context.Context, computer string) (*gossh.Client, e
 	if user == "" {
 		return nil, errors.New("computer has no login user")
 	}
-	hostLine := live.Identity().HostKey
+	hostLine := strings.TrimSpace(live.Identity().HostKey)
 	if hostLine == "" {
-		hostLine = rec.HostKey
+		hostLine = strings.TrimSpace(rec.HostKey)
+	}
+	if hostLine == "" {
+		return nil, fmt.Errorf("ssh is disabled on %s; run box sshd enable on it", computer)
 	}
 	want, err := parseHostKey(hostLine)
 	if err != nil {

@@ -680,3 +680,48 @@ func TestTUIStatesOverPTY(t *testing.T) {
 	s.until(t, "hi", 10*time.Second)
 	_ = client.Close()
 }
+
+// TestSpliceDisabledWithoutHostKey covers a computer that joined before the
+// OpenSSH Server capability was installed: it has no host key, so the splice
+// must name the disabled state and the command that fixes it, not report a
+// host key mismatch.
+func TestSpliceDisabledWithoutHostKey(t *testing.T) {
+	srv, _, signer := e2eBind(t)
+	token := e2eJoin(t, srv, signer, "home")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sess, err := tunnel.Dial(ctx, srv.QUICAddr(), srv.QUICFingerprint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if _, err := sess.Hello(ctx, tunnel.Identity{
+		Name: "home", Token: token, User: "alice", AgentVersion: "e2e",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hello and attachment are separate steps on the server; retry until the
+	// computer is live, then require the disabled error.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, errOut, err := sshRun(t, srv.SSHAddr(), "home", signer, "echo")
+		if err != nil && strings.Contains(errOut, "ssh is disabled on home") &&
+			strings.Contains(errOut, "box sshd enable") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("splice: err %v, stderr %q", err, errOut)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	out, _, err := sshRun(t, srv.SSHAddr(), "box", signer, "ls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "SSH") || !strings.Contains(out, "disabled") {
+		t.Fatalf("ls does not show the disabled state:\n%s", out)
+	}
+}

@@ -317,3 +317,30 @@ func (f *fakeBackend) AddToken(context.Context, string) (control.TokenView, erro
 	return control.TokenView{}, nil
 }
 func (f *fakeBackend) RemoveToken(context.Context, int64) error { return nil }
+
+func TestComputersTableShowsSSHState(t *testing.T) {
+	m := &model{
+		width:  120,
+		screen: screenComputers,
+		snap: control.Snapshot{Computers: []control.ComputerView{
+			{Name: "nokey", Online: true, SSHDisabled: true},
+			{Name: "keyed", Online: true},
+		}},
+	}
+	out := plain(m.View())
+	if !strings.Contains(out, "SSH") {
+		t.Fatalf("no SSH column:\n%s", out)
+	}
+	var noKeyLine, keyedLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "nokey") {
+			noKeyLine = line
+		}
+		if strings.Contains(line, "keyed") {
+			keyedLine = line
+		}
+	}
+	if !strings.Contains(noKeyLine, "disabled") || !strings.Contains(keyedLine, "enabled") {
+		t.Fatalf("computer rows:\n%s", out)
+	}
+}

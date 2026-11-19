@@ -251,24 +251,33 @@ func (m *model) viewComputers() string {
 		if c.Online {
 			online = "yes"
 		}
+		sshState := "enabled"
+		if c.SSHDisabled {
+			sshState = "disabled"
+		}
 		rows = append(rows, []string{
-			c.Name, online, c.User, c.Address, c.AgentVersion, strings.Join(c.Portals, ","),
+			c.Name, online, sshState, c.User, c.Address, c.AgentVersion, strings.Join(c.Portals, ","),
 		})
 	}
-	onlineColor := func(col int, val string) (lipgloss.Style, bool) {
-		if col != 1 {
-			return lipgloss.Style{}, false
+	rowColor := func(col int, val string) (lipgloss.Style, bool) {
+		switch col {
+		case 1:
+			if val == "yes" {
+				return m.styles.on, true
+			}
+			return m.styles.off, true
+		case 2:
+			if val == "disabled" {
+				return m.styles.warn, true
+			}
 		}
-		if val == "yes" {
-			return m.styles.on, true
-		}
-		return m.styles.off, true
+		return lipgloss.Style{}, false
 	}
 	return m.table(
-		[]column{{"NAME", 0}, {"ONLINE", 1}, {"USER", 3}, {"ADDRESS", 4}, {"AGENT", 5}, {"PORTALS", 2}},
+		[]column{{"NAME", 0}, {"ONLINE", 1}, {"SSH", 1}, {"USER", 3}, {"ADDRESS", 4}, {"AGENT", 5}, {"PORTALS", 2}},
 		rows,
 		"no computers yet - press p to pair one",
-		onlineColor,
+		rowColor,
 	)
 }
 

@@ -100,7 +100,9 @@ Because the splice ends at a normal sshd, `scp`, `rsync`, SFTP, VS Code Remote-S
 
 The agent runs as a regular user and never needs root. The login user is whoever ran `box join`, unless `--user <name>` names another existing account. `ssh home@box.example.com` opens a shell as that account on the computer registered as `home`; the two names need not match.
 
-The agent manages one file, `~/.ssh/box_authorized_keys`, kept in sync with the server's bound keys. The user's own `authorized_keys` is untouched. `box join` adds the file to sshd's `AuthorizedKeysFile` when it can write the config, prints each change, and reloads sshd when it can; otherwise it prints the lines and the reload command. On Windows the config is `C:\ProgramData\ssh\sshd_config` (OpenSSH Server is an optional capability; when it is missing `box join` prints the install command and still succeeds), editing the config and restarting the service need an elevated PowerShell — there is no reload — and the default `Match Group administrators` block sends administrator accounts to `administrators_authorized_keys` instead of `~/.ssh`; box prints that note whenever the block is present.
+The agent manages one file, `~/.ssh/box_authorized_keys`, kept in sync with the server's bound keys. The user's own `authorized_keys` is untouched. `box join` adds the file to sshd's `AuthorizedKeysFile` when it can write the config, prints each change, and reloads sshd when it can; otherwise it prints the lines and the reload command. On Windows the config is `C:\ProgramData\ssh\sshd_config` (OpenSSH Server is an optional capability; when it is missing `box join` prints the install command and still succeeds, and the computer shows ssh disabled), editing the config and restarting the service need an elevated PowerShell — there is no reload — and the default `Match Group administrators` block sends administrator accounts to `administrators_authorized_keys` instead of `~/.ssh`; box prints that note whenever the block is present.
+
+Until sshd is installed, configured, and answering, the server shows that computer's ssh as disabled and a splice fails with that state. `box sshd enable` runs the same config edit, then checks that the sshd host public key reads and parses as an authorized key and that sshd answers on its local address with an SSH identification line. Only when both pass does it close the current tunnel so the next hello carries the host key; a failed probe leaves ssh disabled. When the tunnel is already down, a passing probe still stands and the key reaches the server at the next reconnect.
 
 `env set` values live on the server only. Each splice session receives the current set as SSH env requests, so values exist on the computer only in that session's memory. sshd drops names outside `AcceptEnv`, so `box join` adds `AcceptEnv *` when no global `AcceptEnv` line exists and says so; existing lines are left alone. `env ls` prints names, never values.
 
@@ -119,6 +121,8 @@ box portal add lock 3000 private
 box event pub door open
 box event get --since 0
 box event get --follow --topic door
+box sshd enable
+box help
 ```
 
 ## Portals
@@ -221,7 +225,7 @@ The SSH command is the control plane. Non-interactive sessions (`ssh box.example
 
 | Command | Effect |
 | --- | --- |
-| `ls` | Computers: name, online, user, address, agent version, portals |
+| `ls` | Computers: name, online, ssh, user, address, agent version, portals |
 | `ssh <name>` | Open a shell on that computer |
 | `rm <name>` | Delete the computer and revoke its token. Asks for the name again |
 | `rename <name> <new>` | Rename. Portals stay claimed; the SSH username changes |
@@ -282,7 +286,7 @@ One release archive per OS and architecture holds the `box` binary. `scripts/ins
 
 - **Server**: install, optionally a systemd unit, run `box serve --domain box.example.com`, open the three ports. The first start prints the one-time password.
 - **Computer**: install, run `box join <domain>`, approve the code at the server, optionally install a systemd user unit for `box agent`.
-- **Windows computer**: no installer. Download the `windows-amd64` zip, put `box.exe` on PATH, install the OpenSSH Server capability, run `box join <domain>`, and keep `box agent` running with a scheduled task at logon.
+- **Windows computer**: no installer. Download the `windows-amd64` zip, put `box.exe` on PATH, run `box join <domain>` (it succeeds before OpenSSH Server is installed), install the OpenSSH Server capability, then run `box sshd enable` and keep `box agent` running with a scheduled task at logon.
 
 ## Not in the first version
 

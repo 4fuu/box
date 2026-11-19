@@ -28,7 +28,7 @@ box 把你自己的机器放在同一个 SSH 入口后面。计算机是一整�
 ### 要求
 
 - 服务器用一台 Linux；每台计算机可以是 Linux 或 Windows（Windows 需 10 1809 及以上）
-- 你用来连接的机器上有 OpenSSH，每台计算机上有 sshd（Windows 计算机用系统自带的 OpenSSH Server 可选功能）
+- 你用来连接的机器上有 OpenSSH，每台计算机上有 sshd（Windows 计算机用系统自带的 OpenSSH Server 可选功能；它可以在 `box join` 之后再安装，`box sshd enable` 成功前该计算机的 ssh 显示为已禁用）
 
 服务器和计算机可以是同一台机器。代理不需要 root。
 
@@ -53,7 +53,7 @@ box serve --domain box.example.com
 
 计算机安装会运行 `box join <域名>`，并可以加上 `box agent` 的 systemd 用户单元。在服务器上批准它打印的验证码。
 
-Windows 计算机没有安装脚本。从发布页下载 windows-amd64 的 zip，把 box.exe 放进 PATH，然后在管理员 PowerShell 里：
+Windows 计算机没有安装脚本。从发布页下载 windows-amd64 的 zip，把 box.exe 放进 PATH，先运行 `box join <域名>`：即使还没装 OpenSSH Server，join 也会成功，但这台计算机的 ssh 会显示为已禁用。然后在管理员 PowerShell 里：
 
 ```powershell
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
@@ -61,7 +61,7 @@ Set-Service sshd -StartupType Automatic
 Start-Service sshd
 ```
 
-然后运行 `box join <域名>`，再用启动文件夹（`shell:startup` 里指向 `box agent` 的快捷方式）或计划任务让 agent 随登录运行。注意：管理员组的账号走 `C:\ProgramData\ssh\administrators_authorized_keys` 认证，`~/.ssh` 里的钥匙对它们无效；join 时会打印这条提示。
+接着在计算机上运行 `box sshd enable`。它会检查 sshd 的主机公钥，并确认 sshd 能应答，然后让代理重连，服务器才会拿到这把钥匙。再用启动文件夹（`shell:startup` 里指向 `box agent` 的快捷方式）或计划任务让 agent 随登录运行。注意：管理员组的账号走 `C:\ProgramData\ssh\administrators_authorized_keys` 认证，`~/.ssh` 里的钥匙对它们无效；join 时会打印这条提示。
 
 版本号是日历版本，例如 `2026.924.0`。见 [docs/release.md](docs/release.md)。
 
@@ -83,6 +83,8 @@ box agent
 `ssh home@box.example.com` 到达的是那台计算机的 sshd。SSH 用户名是登记在服务器上的名字。进去之后的账号是这台机器上运行 `box join` 的账号，两个名字可以不同。
 
 `box join` 会写这个账号的 `~/.ssh/box_authorized_keys`。能写 sshd 配置时，它会把这个文件加进 `AuthorizedKeysFile`，并添加 `AcceptEnv *`（让服务器上设置的会话环境变量能进入 shell），每一处修改都会打印出来。账号自己的 `authorized_keys` 不动。环境变量的值只保存在服务器上，不落盘到计算机。
+
+`box sshd enable` 是 ssh 的开关。在它成功之前，服务器会把这台计算机的 ssh 列显示为 `disabled`，连接失败时也会提示怎么开启。这个命令会修改 sshd 配置，能重载或重启 sshd 时就会去做，然后检查主机公钥能否解析，以及 sshd 是否返回 SSH 标识行。两项都通过，代理才会重连，把主机公钥交给服务器。检查失败时 ssh 保持禁用。
 
 ### 声明主机名
 

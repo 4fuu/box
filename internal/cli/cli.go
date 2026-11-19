@@ -83,6 +83,8 @@ func Run(o Options) error {
 		return runAgent(o)
 	case "domain", "portal":
 		return runGuest(o)
+	case "sshd":
+		return runGuest(o)
 	case "pair":
 		return localPair(o, "pair", "client")
 	case "key":

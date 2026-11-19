@@ -86,7 +86,7 @@ func TestJoin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		// The temp sshd_config does not exist, so join prints the
 		// install hint instead of the config lines.
-		lines = append(lines, "OpenSSH Server is not installed.")
+		lines = append(lines, "OpenSSH Server is not installed.", "box sshd enable")
 	} else {
 		lines = append(lines,
 			"sshd_config is not writable. Add these lines, then reload sshd:",

@@ -125,6 +125,8 @@ func (a *agent) handleGuest(op string, body json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return resp, nil
+	case rpc.OpSSHDEnable:
+		return a.enableSSHD(), nil
 	default:
 		return nil, errors.New("unsupported")
 	}

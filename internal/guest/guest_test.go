@@ -23,6 +23,7 @@ type fakeAgent struct {
 	mu      sync.Mutex
 	lastPub rpc.EventPublish
 	lastGet rpc.EventQuery
+	sshRes  rpc.SSHDEnableResult
 	// publishErr makes the next publish fail once.
 	publishErr error
 }
@@ -85,6 +86,8 @@ func (fa *fakeAgent) handle(op string, body json.RawMessage) (any, error) {
 			},
 			Oldest: 1, Latest: 2,
 		}, nil
+	case rpc.OpSSHDEnable:
+		return fa.sshRes, nil
 	default:
 		return nil, errors.New("unsupported")
 	}
@@ -229,6 +232,41 @@ func TestGuestEventGetFlags(t *testing.T) {
 	} {
 		if _, _, err := run(t, fa, "", bad...); err == nil {
 			t.Fatalf("accepted %v", bad)
+		}
+	}
+}
+
+func TestGuestSSHDEnable(t *testing.T) {
+	fa := startAgent(t)
+	fa.sshRes = rpc.SSHDEnableResult{
+		Output:       "updated /etc/ssh/sshd_config:\n  AuthorizedKeysFile includes .ssh/box_authorized_keys\n",
+		Enabled:      true,
+		Reconnecting: true,
+	}
+	out, _, err := run(t, fa, "", "sshd", "enable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "updated /etc/ssh/sshd_config") ||
+		!strings.HasSuffix(out, "ssh enabled; reconnecting the tunnel so the server learns the host key\n") {
+		t.Fatalf("output %q", out)
+	}
+
+	fa.sshRes = rpc.SSHDEnableResult{
+		Output: "OpenSSH Server is not installed.\n",
+		Error:  "sshd is not reachable on 127.0.0.1:22: connection refused",
+	}
+	out, _, err = run(t, fa, "", "sshd", "enable")
+	if err == nil || !strings.Contains(err.Error(), "ssh is still disabled: sshd is not reachable") {
+		t.Fatalf("err %v", err)
+	}
+	if out != "OpenSSH Server is not installed.\n" {
+		t.Fatalf("instructions were dropped: %q", out)
+	}
+
+	for _, bad := range [][]string{{"sshd"}, {"sshd", "disable"}, {"sshd", "enable", "now"}} {
+		if _, _, err := run(t, fa, "", bad...); err == nil || !strings.Contains(err.Error(), "usage: box sshd enable") {
+			t.Fatalf("%v: err %v", bad, err)
 		}
 	}
 }

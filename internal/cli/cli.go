@@ -192,7 +192,7 @@ help:
   help, --help, -h   this help; on a computer it prints the guest help instead
 
 box with no command opens the tui when a server runs on this machine.
-on a computer, box with no command prints the guest help on its agent socket.
+on a computer, box with no command prints the guest help.
 `
 
 func serve(o Options) error {

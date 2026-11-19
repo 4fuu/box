@@ -85,7 +85,8 @@ usage: box <command> [args]
       when the probe succeeds
   help   this help, also printed by bare box
 
-serve, join, pair, key, env, and token run on the server machine.
+serve, pair, key, env, and token run on the server machine.
+join and agent also run on this computer, without the agent socket.
 `
 
 func portal(socket string, args []string, stdout io.Writer) error {

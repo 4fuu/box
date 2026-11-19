@@ -113,6 +113,31 @@ func run(t *testing.T, fa *fakeAgent, stdin string, args ...string) (string, str
 	return out.String(), errb.String(), err
 }
 
+func TestGuestHelpNeedsNoAgent(t *testing.T) {
+	var out, errb strings.Builder
+	socket := filepath.Join(t.TempDir(), "absent.sock")
+	err := guest.Run(context.Background(), socket, []string{"help"}, nil, &out, &errb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"domain", "portal check", "portal add", "portal ls", "portal rm",
+		"event pub", "event get", "--since", "--topic", "--from", "--limit",
+		"--wait", "--json", "--follow", "sshd enable",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("guest help missing %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "help") {
+		t.Fatalf("guest help does not mention itself:\n%s", got)
+	}
+	if errb.Len() != 0 {
+		t.Fatalf("stderr %q", errb.String())
+	}
+}
+
 func TestGuestEventPubBodyAndKey(t *testing.T) {
 	fa := startAgent(t)
 	out, _, err := run(t, fa, "", "event", "pub", "door", "open", "slowly")

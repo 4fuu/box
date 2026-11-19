@@ -347,7 +347,7 @@ func parseArgv(argv []string) (pos []string, flags map[string]string, asJSON boo
 		if strings.HasPrefix(a, "--") {
 			name := strings.TrimPrefix(a, "--")
 			if !known[name] {
-				return nil, nil, false, fmt.Errorf("unknown flag --%s", name)
+				return nil, nil, false, fmt.Errorf("unknown flag --%s — run help flags", name)
 			}
 			if i+1 >= len(argv) {
 				return nil, nil, false, fmt.Errorf("missing value for --%s", name)
@@ -465,6 +465,19 @@ var helpHelp = []helpEntry{
 		},
 	},
 	{
+		name: "Flags",
+		subs: []helpEntry{
+			{name: "--json", usage: "--json", short: "Print lists as JSON; it may come before or after the command"},
+			{name: "--since", usage: "--since <id>", short: "event get: only events with a greater id; default 0"},
+			{name: "--topic", usage: "--topic <filter>", short: "event get: an exact topic or a prefix ending in /#; repeatable"},
+			{name: "--from", usage: "--from <label>", short: "event get: publisher label such as ssh or a computer; repeatable"},
+			{name: "--limit", usage: "--limit <n>", short: "event get: at most n events, 1-1000; default 100"},
+			{name: "--wait", usage: "--wait <s>", short: "event get: long poll up to 25 seconds for a new event"},
+			{name: "--for", usage: "--for <duration>", short: "token add: lifetime such as 12h or 30d; without it the token never expires"},
+			{name: "--key", usage: "--key <k>", short: "event pub: dedup key; the same from and key returns the original event"},
+		},
+	},
+	{
 		name: "Help",
 		subs: []helpEntry{
 			{name: "help", usage: "help [all | <command>]", short: "This help; help key covers every key subcommand"},
@@ -494,12 +507,14 @@ func (r *REPL) printHelpOverview() {
 		{"Keys & secrets", "pair  key†  env†  token†  whoami"},
 		{"Events", "event†"},
 		{"Session", "clear  exit"},
+		{"Flags", "--json  --since  --topic  --from  --limit  --wait  --for  --key"},
 		{"Help", "help"},
 	}
 	for _, row := range rows {
 		fmt.Fprintf(r.Out, "%-16s%s\n", row.group, row.cmds)
 	}
 	fmt.Fprintf(r.Out, "\n† marks a command with subcommands.\n")
+	fmt.Fprintf(r.Out, "--json prints lists as JSON. Run help flags for every flag and what it means.\n")
 	fmt.Fprintf(r.Out, "Run help all for a list of all commands, help <command> for more detail.\n")
 }
 
@@ -535,6 +550,14 @@ func (r *REPL) printHelpAll() {
 func (r *REPL) printHelpFor(name string) error {
 	name = strings.ToLower(name)
 	for _, group := range helpHelp {
+		if strings.ToLower(group.name) == name {
+			fmt.Fprintf(r.Out, "%s:\n", group.name)
+			for _, e := range group.subs {
+				helpLine(r.Out, e.usage, e.short)
+			}
+			fmt.Fprintln(r.Out)
+			return nil
+		}
 		for _, e := range group.subs {
 			if e.name == name {
 				helpLine(r.Out, e.usage, e.short)

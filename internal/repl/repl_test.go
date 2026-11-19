@@ -46,7 +46,7 @@ func TestExecHelp(t *testing.T) {
 		t.Fatal(err)
 	}
 	overview := buf.String()
-	for _, want := range []string{"Common commands:", "† marks a command with subcommands.", "help all"} {
+	for _, want := range []string{"Common commands:", "† marks a command with subcommands.", "help all", "Flags", "--json", "help flags"} {
 		if !strings.Contains(overview, want) {
 			t.Fatalf("help overview missing %q:\n%s", want, overview)
 		}
@@ -57,7 +57,11 @@ func TestExecHelp(t *testing.T) {
 		t.Fatal(err)
 	}
 	all := buf.String()
-	for _, want := range []string{"Computers:", "env set <name> <value>", "approve <code>"} {
+	for _, want := range []string{
+		"Computers:", "env set <name> <value>", "approve <code>",
+		"Flags:", "--json", "--since <id>", "--from <label>", "--limit <n>",
+		"--wait <s>", "--for <duration>",
+	} {
 		if !strings.Contains(all, want) {
 			t.Fatalf("help all missing %q:\n%s", want, all)
 		}
@@ -75,12 +79,34 @@ func TestExecHelp(t *testing.T) {
 		t.Fatalf("help key printed the wrong set:\n%s", key)
 	}
 
+	// A group name, case-insensitive, lists that group.
+	buf.Reset()
+	if err := r.Exec([]string{"help", "COMPUTERS"}); err != nil {
+		t.Fatal(err)
+	}
+	computers := buf.String()
+	if !strings.Contains(computers, "Computers:") || !strings.Contains(computers, "approve <code>") || strings.Contains(computers, "env set") {
+		t.Fatalf("help COMPUTERS printed the wrong set:\n%s", computers)
+	}
+
+	buf.Reset()
+	if err := r.Exec([]string{"help", "flags"}); err != nil {
+		t.Fatal(err)
+	}
+	flags := buf.String()
+	if !strings.Contains(flags, "--json") || !strings.Contains(flags, "--for <duration>") || strings.Contains(flags, "approve") {
+		t.Fatalf("help flags printed the wrong set:\n%s", flags)
+	}
+
 	buf.Reset()
 	if err := r.Exec([]string{"bogus"}); err == nil || !strings.Contains(err.Error(), `unknown command "bogus"`) {
 		t.Fatalf("bogus: err = %v, want unknown command", err)
 	}
 	if err := r.Exec([]string{"key"}); err == nil || !strings.Contains(err.Error(), "needs a subcommand") {
 		t.Fatalf("bare key: err = %v, want needs-a-subcommand", err)
+	}
+	if err := r.Exec([]string{"ls", "--nope"}); err == nil || !strings.Contains(err.Error(), "unknown flag --nope") || !strings.Contains(err.Error(), "help") {
+		t.Fatalf("unknown flag: err = %v, want a pointer at help", err)
 	}
 	if !strings.Contains(all, "token add") || !strings.Contains(all, "event pub") {
 		t.Fatalf("help all missing token or event:\n%s", all)

@@ -64,12 +64,17 @@ func Run(o Options) error {
 	}
 	if len(o.Args) == 0 {
 		if !socketUp(o.ServerSocket) {
-			fmt.Fprint(o.Stderr, hostUsage)
+			if socketPresent(o.GuestSocket) {
+				return guest.Help(o.Stdout)
+			}
+			fmt.Fprint(o.Stderr, hostHelp)
 			return errUsage
 		}
 		return dashboard(o)
 	}
 	switch o.Args[0] {
+	case "help", "--help", "-h":
+		return help(o)
 	case "serve":
 		return serve(o)
 	case "join":
@@ -89,9 +94,17 @@ func Run(o Options) error {
 	case "event":
 		return runEvent(o)
 	default:
-		fmt.Fprint(o.Stderr, hostUsage)
+		fmt.Fprintf(o.Stderr, "unknown command %q — run box help\n", o.Args[0])
 		return errUsage
 	}
+}
+
+func help(o Options) error {
+	if socketPresent(o.GuestSocket) {
+		return guest.Help(o.Stdout)
+	}
+	_, err := io.WriteString(o.Stdout, hostHelp)
+	return err
 }
 
 func runGuest(o Options) error {
@@ -117,20 +130,69 @@ func socketPresent(path string) bool {
 	return err == nil && fi.Mode()&os.ModeSocket != 0
 }
 
-const hostUsage = `usage:
-  box
-  box serve --domain <domain> [--ssh-addr addr] [--http-addr addr] [--quic-addr addr]
-      blob backend: [--blob-store disk|s3] [--blob-dir dir] [--blob-s3-endpoint host]
-      [--blob-s3-bucket name] [--blob-s3-region region] [--blob-s3-pathstyle]
-  box join <host> [--name name] [--user name]
-  box agent
-  box pair
-  box key ls|rm
-  box env ls|set|rm
-  box token add|ls|rm
-  box event pub|get
-  box domain
-  box portal check|add|ls|rm
+const hostHelp = `box: persistent linux computers on hardware you own
+
+usage: box <command> [args]
+
+server: run on the machine clients reach
+  serve   run the ssh entry, http portals, event api, quic tunnels, and the tui
+    --domain <domain>          this server's domain; required on the first start,
+                               and later starts reuse the stored value
+    --ssh-addr <addr>          ssh listen address, default :22; stored at first start
+    --http-addr <addr>         http listen address, default :80; stored at first start
+    --quic-addr <addr>         quic listen address, default :7443; stored at first start
+    --blob-store <kind>        blob backend: disk (default) or s3
+    --blob-dir <dir>           disk backend directory, default <data>/blobs
+    --blob-s3-endpoint <host>  s3-compatible endpoint such as oss, r2, or minio
+    --blob-s3-bucket <name>    s3 bucket
+    --blob-s3-region <region>  s3 region
+    --blob-s3-pathstyle        path-style requests, needed by minio and on-prem
+  pair    print a one-time password that adds another client's ssh key
+  key ls  list paired ssh keys
+  key rm <fingerprint>   revoke an ssh key
+  env ls  list env names; values are never printed
+  env set <name> <value>   store a variable; new sessions receive it
+  env rm <name>   remove a variable; existing sessions keep the old value
+  token add [--for 12h] [comment]   create an access token; it never expires
+                                    unless --for is set
+  token ls   list access tokens, secret included, so one can be copied again
+  token rm <id>   revoke an access token
+
+computer: run on the machine that joins a server
+  after join, domain, portal, event, and sshd talk to the agent socket
+  join <host> [--name name] [--user name]   join this machine to a server and
+                                            print an approval code
+    --name <name>   computer name, default this hostname
+    --user <name>   session account, default whoever runs join
+  join --prepare-sshd   edit sshd config only, without joining
+  agent   run the tunnel after join; no root needed
+  sshd enable   configure sshd, probe it, and enable ssh for this computer only
+                when the probe succeeds
+  domain   print the server's domain; portal labels join it
+  portal check <label>   report whether a portal label is free or who holds it
+  portal add <label> <port> [public|private]   claim a label for a loopback port;
+      public needs nothing, private needs an access token, and claiming again
+      changes the access
+  portal ls   list this computer's portals and their access
+  portal rm <label>   release a portal
+  event pub <topic> [text...] [--key k]   publish an event as this computer;
+      with no text the body is stdin; --key dedups, so the same from and key
+      returns the original event
+  event get [--since n] [--topic t]... [--from f]... [--limit n] [--wait s]
+      [--json] [--follow]   print stored events, or follow new ones
+    --since n   id cursor: events after n, default 0
+    --topic t   exact topic or a prefix ending in /#, repeatable
+    --from f    publisher label such as a computer or token comment, repeatable
+    --limit n   at most n events, 1-1000, default 100
+    --wait s    long poll up to 25 seconds for a new event
+    --json      print the window and bodies as json
+    --follow    keep printing new events until interrupted
+
+help:
+  help, --help, -h   this help; on a computer it prints the guest help instead
+
+box with no command opens the tui when a server runs on this machine.
+on a computer, box with no command prints the guest help on its agent socket.
 `
 
 func serve(o Options) error {
@@ -146,7 +208,7 @@ func serve(o Options) error {
 			"--blob-store", "--blob-dir",
 			"--blob-s3-endpoint", "--blob-s3-bucket", "--blob-s3-region":
 			if i+1 >= len(args) {
-				fmt.Fprint(o.Stderr, hostUsage)
+				fmt.Fprint(o.Stderr, hostHelp)
 				return errUsage
 			}
 			i++
@@ -171,7 +233,7 @@ func serve(o Options) error {
 				blobCfg.S3Region = args[i]
 			}
 		default:
-			fmt.Fprint(o.Stderr, hostUsage)
+			fmt.Fprint(o.Stderr, hostHelp)
 			return errUsage
 		}
 	}
@@ -196,7 +258,7 @@ func join(o Options) error {
 	}
 	host, name, userName, ok := parseJoinArgs(o.Args[1:])
 	if !ok {
-		fmt.Fprint(o.Stderr, hostUsage)
+		fmt.Fprint(o.Stderr, hostHelp)
 		return errUsage
 	}
 	if name == "" {
@@ -311,7 +373,7 @@ func sanitizeComputerName(host string) string {
 
 func runAgent(o Options) error {
 	if len(o.Args) != 1 {
-		fmt.Fprint(o.Stderr, hostUsage)
+		fmt.Fprint(o.Stderr, hostHelp)
 		return errUsage
 	}
 	dir, err := stateDir()
@@ -359,7 +421,7 @@ func localPair(o Options, op, kind string) error {
 
 func localKey(o Options) error {
 	if len(o.Args) < 2 {
-		fmt.Fprint(o.Stderr, hostUsage)
+		fmt.Fprint(o.Stderr, hostHelp)
 		return errUsage
 	}
 	switch o.Args[1] {
@@ -389,14 +451,14 @@ func localKey(o Options) error {
 		fmt.Fprintln(o.Stderr, "key copy is gone")
 		return errFail
 	default:
-		fmt.Fprint(o.Stderr, hostUsage)
+		fmt.Fprint(o.Stderr, hostHelp)
 		return errUsage
 	}
 }
 
 func localEnv(o Options) error {
 	if len(o.Args) < 2 {
-		fmt.Fprint(o.Stderr, hostUsage)
+		fmt.Fprint(o.Stderr, hostHelp)
 		return errUsage
 	}
 	switch o.Args[1] {
@@ -440,7 +502,7 @@ func localEnv(o Options) error {
 		}
 		return nil
 	default:
-		fmt.Fprint(o.Stderr, hostUsage)
+		fmt.Fprint(o.Stderr, hostHelp)
 		return errUsage
 	}
 }
@@ -643,7 +705,7 @@ func stdinIsTerminal(r io.Reader) bool {
 
 func localToken(o Options) error {
 	if len(o.Args) < 2 {
-		fmt.Fprint(o.Stderr, hostUsage)
+		fmt.Fprint(o.Stderr, hostHelp)
 		return errUsage
 	}
 	switch o.Args[1] {
@@ -689,7 +751,7 @@ func localToken(o Options) error {
 		}
 		return nil
 	default:
-		fmt.Fprint(o.Stderr, hostUsage)
+		fmt.Fprint(o.Stderr, hostHelp)
 		return errUsage
 	}
 }

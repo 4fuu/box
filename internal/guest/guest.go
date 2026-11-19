@@ -28,6 +28,8 @@ func Run(ctx context.Context, socket string, args []string, stdin io.Reader, std
 		return fmt.Errorf("usage: box domain | box portal check|add|ls|rm | box event pub|get")
 	}
 	switch args[0] {
+	case "help", "--help", "-h":
+		return Help(stdout)
 	case "domain":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: box domain")
@@ -48,6 +50,43 @@ func Run(ctx context.Context, socket string, args []string, stdin io.Reader, std
 		return fmt.Errorf("box %s is not available in a computer", args[0])
 	}
 }
+
+// Help writes the guest CLI help. It never touches the agent socket, so bare
+// box and box help work while the agent is stopped.
+func Help(w io.Writer) error {
+	_, err := io.WriteString(w, helpText)
+	return err
+}
+
+const helpText = `box on a computer: guest commands, over the agent socket
+
+usage: box <command> [args]
+
+  domain   print the server's domain; portal labels join it
+  portal check <label>   report whether a portal label is free or who holds it
+  portal add <label> <port> [public|private]   claim a label for a loopback
+      port; public needs nothing, private needs an access token, and claiming
+      again changes the access
+  portal ls   list this computer's portals and their access
+  portal rm <label>   release a portal
+  event pub <topic> [text...] [--key k]   publish an event as this computer;
+      with no text the body is stdin; --key dedups, so the same from and key
+      returns the original event
+  event get [--since n] [--topic t]... [--from f]... [--limit n] [--wait s]
+      [--json] [--follow]   print stored events, or follow new ones
+    --since n   id cursor: events after n, default 0
+    --topic t   exact topic or a prefix ending in /#, repeatable
+    --from f    publisher label such as a computer or token comment, repeatable
+    --limit n   at most n events, 1-1000, default 100
+    --wait s    long poll up to 25 seconds for a new event
+    --json      print the window and bodies as json
+    --follow    keep printing new events until interrupted
+  sshd enable   configure sshd, probe it, and enable ssh for this computer only
+      when the probe succeeds
+  help   this help, also printed by bare box
+
+serve, join, pair, key, env, and token run on the server machine.
+`
 
 func portal(socket string, args []string, stdout io.Writer) error {
 	if len(args) == 0 {

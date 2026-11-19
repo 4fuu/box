@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestNoArgsWithoutServerPrintsUsage(t *testing.T) {
+func TestNoArgsWithoutServerPrintsHelp(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	err := Run(Options{
@@ -23,11 +23,109 @@ func TestNoArgsWithoutServerPrintsUsage(t *testing.T) {
 	if ExitCode(err) != 2 {
 		t.Fatalf("exit %d, err %v", ExitCode(err), err)
 	}
-	if !strings.Contains(stderr.String(), "box serve") || !strings.Contains(stderr.String(), "box join") || !strings.Contains(stderr.String(), "box agent") {
-		t.Fatalf("usage missing: %q", stderr.String())
+	if stderr.String() != hostHelp {
+		t.Fatalf("stderr:\n%s\nwant the host help", stderr.String())
 	}
-	if strings.Contains(stderr.String(), "box node") {
-		t.Fatalf("node still in usage: %q", stderr.String())
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+}
+
+func TestHelpPathsPrintHostHelpToStdout(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}} {
+		var stdout, stderr bytes.Buffer
+		err := Run(Options{
+			Args:         args,
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			DataDir:      dir,
+			GuestSocket:  filepath.Join(dir, "no-guest.sock"),
+			ServerSocket: filepath.Join(dir, "no-server.sock"),
+		})
+		if ExitCode(err) != 0 {
+			t.Fatalf("%v: exit %d, err %v", args, ExitCode(err), err)
+		}
+		if stdout.String() != hostHelp {
+			t.Fatalf("%v: stdout:\n%s\nwant the host help", args, stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("%v: stderr %q", args, stderr.String())
+		}
+	}
+	for _, want := range []string{
+		"serve", "--domain", "--ssh-addr", "--http-addr", "--quic-addr",
+		"--blob-store", "--blob-dir", "--blob-s3-endpoint", "--blob-s3-bucket",
+		"--blob-s3-region", "--blob-s3-pathstyle",
+		"join", "--name", "--user", "--prepare-sshd", "agent", "pair",
+		"key ls", "key rm", "env ls", "env set", "env rm",
+		"token add", "--for", "token ls", "token rm",
+		"event pub", "event get", "--since", "--topic", "--from", "--limit",
+		"--wait", "--json", "--follow", "domain",
+		"portal check", "portal add", "portal ls", "portal rm", "public", "private",
+		"sshd enable",
+	} {
+		if !strings.Contains(hostHelp, want) {
+			t.Errorf("host help does not mention %q", want)
+		}
+	}
+}
+
+func TestHelpOnComputerPrintsGuestHelp(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "agent.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	for _, args := range [][]string{nil, {"help"}, {"--help"}, {"-h"}} {
+		var stdout, stderr bytes.Buffer
+		err := Run(Options{
+			Args:         args,
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			DataDir:      dir,
+			GuestSocket:  sock,
+			ServerSocket: filepath.Join(dir, "no-server.sock"),
+		})
+		if ExitCode(err) != 0 {
+			t.Fatalf("%v: exit %d, err %v", args, ExitCode(err), err)
+		}
+		got := stdout.String()
+		for _, want := range []string{"domain", "portal add", "event get", "--follow", "sshd enable", "help"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%v: guest help missing %q:\n%s", args, want, got)
+			}
+		}
+		if strings.Contains(got, "box serve") {
+			t.Fatalf("%v: guest help lists server commands:\n%s", args, got)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("%v: stderr %q", args, stderr.String())
+		}
+	}
+}
+
+func TestUnknownCommandPointsAtHelp(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	err := Run(Options{
+		Args:         []string{"bogus"},
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		DataDir:      dir,
+		GuestSocket:  filepath.Join(dir, "no-guest.sock"),
+		ServerSocket: filepath.Join(dir, "no-server.sock"),
+	})
+	if ExitCode(err) != 2 {
+		t.Fatalf("exit %d, err %v", ExitCode(err), err)
+	}
+	if !strings.Contains(stderr.String(), `unknown command "bogus"`) || !strings.Contains(stderr.String(), "box help") {
+		t.Fatalf("stderr %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "usage:") {
+		t.Fatalf("unknown command dumped the help: %q", stderr.String())
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout %q", stdout.String())
@@ -48,8 +146,8 @@ func TestNodeIsGone(t *testing.T) {
 	if ExitCode(err) != 2 {
 		t.Fatalf("exit %d", ExitCode(err))
 	}
-	if strings.Contains(stderr.String(), "node join") {
-		t.Fatalf("usage %q", stderr.String())
+	if !strings.Contains(stderr.String(), `unknown command "node"`) || strings.Contains(stderr.String(), "box node") {
+		t.Fatalf("stderr %q", stderr.String())
 	}
 }
 

@@ -439,6 +439,19 @@ func TestQUICConfig(t *testing.T) {
 	if cfg.KeepAlivePeriod >= cfg.MaxIdleTimeout/2 {
 		t.Fatalf("keepalive %s idle %s", cfg.KeepAlivePeriod, cfg.MaxIdleTimeout)
 	}
+	// A 1500-byte path minus IPv4 and UDP headers. Below this the first
+	// packets, and the congestion window they size, stay undersized.
+	if cfg.InitialPacketSize < 1452 {
+		t.Fatalf("initial packet size %d", cfg.InitialPacketSize)
+	}
+	// A 40ms path needs a window this wide to carry 50 MB/s on one stream.
+	if cfg.InitialStreamReceiveWindow < 4<<20 || cfg.MaxStreamReceiveWindow < cfg.InitialStreamReceiveWindow {
+		t.Fatalf("stream windows %d %d", cfg.InitialStreamReceiveWindow, cfg.MaxStreamReceiveWindow)
+	}
+	if cfg.InitialConnectionReceiveWindow < cfg.InitialStreamReceiveWindow ||
+		cfg.MaxConnectionReceiveWindow < cfg.InitialConnectionReceiveWindow {
+		t.Fatalf("connection windows %d %d", cfg.InitialConnectionReceiveWindow, cfg.MaxConnectionReceiveWindow)
+	}
 }
 
 func TestCloseDuringHello(t *testing.T) {

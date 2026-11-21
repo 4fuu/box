@@ -23,10 +23,29 @@ const appRefused quic.ApplicationErrorCode = 1
 // timeout and sends no keep-alive, so a quiet tunnel is closed. The effective
 // idle timeout is the minimum of both peers, so Listen and Dial share this.
 // Keep-alives are under half the idle timeout; quic-go clamps them to that.
+//
+// The congestion window is quic-go's own, Cubic or Reno in slow start. It
+// starts at 32 packets of 1280 bytes and only grows by a full datagram per
+// ACK once path MTU discovery has raised the datagram size. Starting at a
+// normal 1500-byte MTU keeps that growth in proportion.
+//
+// The receive windows are the throughput limit on a long path. quic-go opens
+// them at 512 KB and only grows them when its auto-tuning notices a stream
+// drained too fast, so a large stream on a 40ms path sits near 12 MB/s. Here
+// they open at the size quic-go would otherwise tune up to: one stream gets
+// 6 MB, about 100 MB/s at 40ms, and the connection gets 16 MB so a portal
+// response and an SSH session do not hold each other back. The connection
+// window may still grow under that load, and never past this.
 func quicConfig() *quic.Config {
 	return &quic.Config{
-		MaxIdleTimeout:  2 * time.Minute,
-		KeepAlivePeriod: 10 * time.Second,
+		MaxIdleTimeout:    2 * time.Minute,
+		KeepAlivePeriod:   10 * time.Second,
+		InitialPacketSize: 1452,
+
+		InitialStreamReceiveWindow:     6 << 20,
+		MaxStreamReceiveWindow:         6 << 20,
+		InitialConnectionReceiveWindow: 16 << 20,
+		MaxConnectionReceiveWindow:     16 << 20,
 	}
 }
 

@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"net"
+	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNoArgsWithoutServerPrintsHelp(t *testing.T) {
@@ -176,6 +179,42 @@ func TestServeIgnoresAgentSocket(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "domain") {
 		t.Fatalf("stderr %q", stderr.String())
+	}
+}
+
+func TestServeDataDirFlagMovesStateAndSocket(t *testing.T) {
+	dir := t.TempDir()
+	data := filepath.Join(dir, "data")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	var stderr bytes.Buffer
+	go func() {
+		done <- Run(Options{
+			Context: ctx,
+			Args: []string{"serve", "--domain", "box.example.com", "--data-dir", data,
+				"--ssh-addr", "127.0.0.1:0", "--http-addr", "127.0.0.1:0", "--quic-addr", "127.0.0.1:0"},
+			Stdout: &bytes.Buffer{},
+			Stderr: &stderr,
+		})
+	}()
+	sock := filepath.Join(data, "box.sock")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no socket at %s; stderr %q", sock, stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(data, "box.db")); err != nil {
+		t.Fatalf("database not in the flag's directory: %v", err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

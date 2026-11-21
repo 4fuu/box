@@ -140,6 +140,7 @@ server: run on the machine clients reach
   serve   run the ssh entry, http portals, event api, quic tunnels, and the tui
     --domain <domain>          this server's domain; required on the first start,
                                and later starts reuse the stored value
+    --data-dir <dir>           state directory, default /var/lib/box
     --ssh-addr <addr>          ssh listen address, default :22; stored at first start
     --http-addr <addr>         http listen address, default :80; stored at first start
     --quic-addr <addr>         quic listen address, default :7443; stored at first start
@@ -201,12 +202,15 @@ func serve(o Options) error {
 	domain, sshAddr, httpAddr, quicAddr := "", "", "", ""
 	blobCfg := server.BlobConfig{}
 	args := o.Args[1:]
+	// Run names the localhost socket after the data directory before the
+	// flags are read, so --data-dir has to move a socket still at the default.
+	defaultSocket := filepath.Join(o.DataDir, "box.sock")
 	for i := 0; i < len(args); i++ {
 		flag := args[i]
 		switch flag {
 		case "--blob-s3-pathstyle":
 			blobCfg.S3PathStyle = true
-		case "--domain", "--ssh-addr", "--http-addr", "--quic-addr",
+		case "--domain", "--ssh-addr", "--http-addr", "--quic-addr", "--data-dir",
 			"--blob-store", "--blob-dir",
 			"--blob-s3-endpoint", "--blob-s3-bucket", "--blob-s3-region":
 			if i+1 >= len(args) {
@@ -223,6 +227,11 @@ func serve(o Options) error {
 				httpAddr = args[i]
 			case "--quic-addr":
 				quicAddr = args[i]
+			case "--data-dir":
+				o.DataDir = args[i]
+				if o.ServerSocket == defaultSocket {
+					o.ServerSocket = filepath.Join(o.DataDir, "box.sock")
+				}
 			case "--blob-store":
 				blobCfg.Store = args[i]
 			case "--blob-dir":

@@ -674,7 +674,7 @@ func TestReadBatchesSmallReads(t *testing.T) {
 	payload := make([]byte, 256<<10)
 	chunk := len(payload) / 3
 	for off := 0; off < len(payload); off += chunk {
-		if _, err := peer.Write(payload[off : min(off+chunk, len(payload))]); err != nil {
+		if _, err := peer.Write(payload[off:min(off+chunk, len(payload))]); err != nil {
 			t.Fatal(err)
 		}
 	}

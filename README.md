@@ -108,6 +108,14 @@ go build -o box .
 
 `go test` does not need Podman or frp.
 
+The tunnel has a benchmark that runs real QUIC connections through a proxy adding one-way delay and random loss, then reports handshake latency, echo round-trip percentiles, and throughput across parallel streams:
+
+```bash
+BOX_BENCH=1 go test ./internal/tunnel -run TestBench -v -args -bench-delay=20ms -bench-loss=1%
+```
+
+It prints a report per transport configuration. `-bench-compare` adds quic-go's defaults next to the current one, which is how the receive-window and packet-size changes were measured.
+
 ## License
 
 AGPL-3.0-only. The full text is in [LICENSE](LICENSE). Copyright 2026 4fuu

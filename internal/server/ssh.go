@@ -45,6 +45,12 @@ func newSSH(s *Server, hostKey string) (*sshServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Three keys per connection is enough for a bound key and a mistake, and
+	// it keeps one connection from offering a dictionary. Failures past this
+	// cost the client a new handshake, which the limiter then refuses.
+	srv.ServerConfigCallback = func(ssh.Context) *gossh.ServerConfig {
+		return &gossh.ServerConfig{MaxAuthTries: 3}
+	}
 	srv.Handler = h.session
 	srv.ChannelHandlers = map[string]ssh.ChannelHandler{
 		"session":      ssh.DefaultSessionHandler,
@@ -75,9 +81,14 @@ func (h *sshServer) publicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 	if key == nil {
 		return false
 	}
+	g := h.guesserFor(ctx)
+	if g.banned() {
+		return false
+	}
 	bound := false
 	ok, err := h.s.svc.HasKey(key)
 	if err != nil {
+		g.failed()
 		return false
 	}
 	bound = ok
@@ -85,6 +96,7 @@ func (h *sshServer) publicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 	if class == classREPL && !bound {
 		ok, err := h.s.store.HasLivePairing()
 		if err != nil {
+			g.failed()
 			return false
 		}
 		live = ok
@@ -92,7 +104,14 @@ func (h *sshServer) publicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 	computer := class == classOther && h.s.svc.IsComputer(user)
 	accept, route := publicKeyDecision(class, bound, live, computer)
 	if !accept {
+		g.failed()
 		return false
+	}
+	if route != routeBind && route != routePair {
+		// An address that authenticated is not held by its earlier guesses.
+		// The pairing password is checked after the session opens, so those
+		// routes keep their failures.
+		g.connected()
 	}
 	ctx.SetValue(routeKey, route)
 	return true
@@ -136,9 +155,11 @@ func (h *sshServer) finishPair(sess ssh.Session) bool {
 	}
 	if err := h.s.svc.ConsumeClient(rest); err != nil {
 		fmt.Fprintln(errOut, err.Error())
+		h.guesserFor(sess.Context()).failed()
 		_ = sess.Exit(1)
 		return false
 	}
+	h.guesserFor(sess.Context()).connected()
 	if sess.PublicKey() == nil {
 		fmt.Fprintln(errOut, "no key")
 		_ = sess.Exit(1)
@@ -321,17 +342,27 @@ func (h *sshServer) readPassword(sess ssh.Session) bool {
 		_ = sess.Exit(1)
 		return false
 	}
+	g := h.guesserFor(sess.Context())
+	if g.banned() {
+		_ = sess.Exit(1)
+		return false
+	}
 	fmt.Fprint(out, "password: ")
 	line, err := repl.ReadSecret(bufio.NewReader(sess), out, pty)
 	if err != nil {
+		// A session that never finishes the prompt is as good as a guess:
+		// it opened with an unbound key.
+		g.failed()
 		_ = sess.Exit(1)
 		return false
 	}
 	if err := h.s.svc.ConsumeClient(line); err != nil {
 		fmt.Fprintln(errOut, err.Error())
+		g.failed()
 		_ = sess.Exit(1)
 		return false
 	}
+	g.connected()
 	if sess.PublicKey() == nil {
 		fmt.Fprintln(errOut, "no key")
 		_ = sess.Exit(1)

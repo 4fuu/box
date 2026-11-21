@@ -65,6 +65,8 @@ The server speaks SSH with [charmbracelet/wish](https://github.com/charmbracelet
 
 Outside those pairing flows an unbound key is rejected at auth. A computer name cannot be `box`, `pair`, or `join`, and cannot contain `+` or `.`. Names are globally unique.
 
+A connection may offer three keys and no more. A client address that fails five times in five minutes is refused for five minutes, and each further ban doubles up to thirty. A refused address is dropped when it connects, before the key exchange, so a guessing client costs an accept and a close and nothing is written about it: failures are not logged, which keeps a flood from filling the disk.
+
 Because the splice ends at a normal sshd, `scp`, `rsync`, SFTP, VS Code Remote-SSH, and `ssh -L` work. A disconnect stops nothing on the computer.
 
 ## Processes

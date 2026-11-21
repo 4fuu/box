@@ -26,6 +26,7 @@ import (
 	"github.com/4fuu/box/internal/ident"
 	"github.com/4fuu/box/internal/keys"
 	"github.com/4fuu/box/internal/paths"
+	"github.com/4fuu/box/internal/ratelimit"
 	"github.com/4fuu/box/internal/rpc"
 	"github.com/4fuu/box/internal/store"
 	"github.com/4fuu/box/internal/tunnel"
@@ -65,6 +66,7 @@ type Server struct {
 	cfg         Config
 	store       *store.Store
 	svc         *control.Service
+	limits      *ratelimit.Limiter
 	blobs       blob.Backend
 	spoolDir    string
 	httpLn      net.Listener
@@ -165,6 +167,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		cfg:         cfg,
 		store:       st,
 		svc:         svc,
+		limits:      ratelimit.New(),
 		blobs:       blobs,
 		spoolDir:    spoolDir,
 		splice:      signer,
@@ -301,7 +304,7 @@ func (s *Server) listen(ctx context.Context, hostKey string, cert tls.Certificat
 	}
 	s.sshLn = sshLn
 	s.sshSrv = sshSrv
-	go sshSrv.serve(sshLn)
+	go sshSrv.serve(limitedListener{Listener: sshLn, limits: s.limits})
 	go func() {
 		<-ctx.Done()
 		s.Close()

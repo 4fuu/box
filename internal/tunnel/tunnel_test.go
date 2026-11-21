@@ -641,6 +641,53 @@ func TestCloseWrite(t *testing.T) {
 	}
 }
 
+func TestReadBatchesSmallReads(t *testing.T) {
+	srv, fp := newTestServer(t, "secret")
+	acc := acceptAsync(srv)
+	sess := dial(t, srv.Addr(), fp)
+	helloOK(t, sess, testID())
+	got := <-acc
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	conn := got.c
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ssh, err := conn.OpenSSH(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ssh.Close()
+	_, _, peer, err := sess.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	_ = peer.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Three writes, as a stream delivers it. A stream only credits flow
+	// control for the bytes a Read returns, so one Read into a buffer larger
+	// than a batch must take more than the first frame, or the payload sits
+	// unacknowledged.
+	payload := make([]byte, 256<<10)
+	chunk := len(payload) / 3
+	for off := 0; off < len(payload); off += chunk {
+		if _, err := peer.Write(payload[off : min(off+chunk, len(payload))]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	buf := make([]byte, 128<<10)
+	n, err := ssh.Read(buf)
+	if err != nil || n < minReadBatch {
+		t.Fatalf("batch read n=%d err=%v", n, err)
+	}
+	if _, err := io.ReadFull(ssh, buf[:len(payload)-n]); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBodyShape(t *testing.T) {
 	raw, err := json.Marshal(HelloBody{
 		Version: 1, Name: "home", Token: "t", User: "alice",

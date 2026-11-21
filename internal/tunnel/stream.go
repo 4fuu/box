@@ -18,6 +18,12 @@ var errBadHeader = errors.New("bad header")
 
 var _ net.Conn = (*streamConn)(nil)
 
+// minReadBatch is the most one stream Read takes back from the stream, and
+// the least a larger Read gets before it can return. net.Conn callers such as
+// io.Copy pass 32 KB, a few packets; batching them lets flow control credit a
+// wider window per round trip.
+const minReadBatch = 64 << 10
+
 // streamConn is a QUIC stream as a net.Conn. Deadlines are the stream's.
 type streamConn struct {
 	str    *quic.Stream
@@ -27,16 +33,47 @@ type streamConn struct {
 	// onClose runs once, on the first Close. Conn uses it to count open streams.
 	onClose   func()
 	closeOnce sync.Once
+	readBuf   []byte // only when r is the stream itself
 }
 
 func newStreamConn(st *quic.Stream, r io.Reader, local, remote net.Addr) net.Conn {
+	c := &streamConn{str: st, local: local, remote: remote}
 	if r == nil {
-		r = st
+		c.readBuf = make([]byte, minReadBatch)
+	} else {
+		c.r = r
 	}
-	return &streamConn{str: st, r: r, local: local, remote: remote}
+	return c
 }
 
-func (c *streamConn) Read(p []byte) (int, error)  { return c.r.Read(p) }
+// Read reads at least minReadBatch bytes per call when the caller offers a
+// larger buffer. A stream only credits receive flow control with the bytes a
+// Read hands back, so reading one small buffer at a time holds the sender to
+// that much per round trip no matter how wide the window is. If the stream
+// has no more queued when the batch is short, the read returns what it has
+// rather than waiting for a datagram.
+func (c *streamConn) Read(p []byte) (int, error) {
+	if c.readBuf == nil || len(p) <= len(c.readBuf) {
+		return c.reader().Read(p)
+	}
+	var n int
+	for n < len(p) {
+		k, err := c.str.Read(p[n:min(len(p), n+len(c.readBuf))])
+		n += k
+		if err != nil || k < len(c.readBuf) {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+func (c *streamConn) reader() io.Reader {
+	if c.r != nil {
+		return c.r
+	}
+	return c.str
+}
+
 func (c *streamConn) Write(p []byte) (int, error) { return c.str.Write(p) }
 
 func (c *streamConn) Close() error {

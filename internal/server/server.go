@@ -11,12 +11,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/4fuu/box/internal/approve"
@@ -88,7 +90,13 @@ type Server struct {
 	closeErr error
 
 	proxyMu sync.Mutex
-	proxies map[string]*httputil.ReverseProxy
+	proxies map[string]portalForwarder
+}
+
+type portalForwarder struct {
+	computer string
+	port     int
+	proxy    *httputil.ReverseProxy
 }
 
 // Start opens the database, prints a one-time password on first init, and listens.
@@ -176,7 +184,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		splice:      signer,
 		fingerprint: fp,
 		waiters:     map[string]*joinWaiter{},
-		proxies:     map[string]*httputil.ReverseProxy{},
+		proxies:     map[string]portalForwarder{},
 		done:        make(chan struct{}),
 	}
 	svc.Grant = s.grant
@@ -509,8 +517,8 @@ func (s *Server) Close() error {
 			s.sockLn.Close()
 		}
 		s.proxyMu.Lock()
-		for _, rp := range s.proxies {
-			rp.Transport.(*http.Transport).CloseIdleConnections()
+		for _, f := range s.proxies {
+			f.proxy.Transport.(*http.Transport).CloseIdleConnections()
 		}
 		s.proxyMu.Unlock()
 		if s.store != nil {
@@ -529,6 +537,22 @@ const dialWait = 3 * time.Second
 
 var errPortalOffline = errors.New("computer offline")
 
+type portalConn struct {
+	net.Conn
+	blockWrites atomic.Bool
+}
+
+func (c *portalConn) Write(p []byte) (int, error) {
+	if c.blockWrites.Load() {
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *portalConn) CloseWrite() error {
+	return c.Conn.(interface{ CloseWrite() error }).CloseWrite()
+}
+
 // portalDial opens the tunnel for one portal request. A computer that
 // reconnects during the gap keeps the request: nothing has been written
 // yet, so retrying is safe for every method.
@@ -540,7 +564,7 @@ func portalDial(live *control.Live, computer string, port int) func(context.Cont
 			if conn := live.Get(computer); conn != nil {
 				var c net.Conn
 				if c, err = conn.OpenPortal(ctx, port); err == nil {
-					return c, nil
+					return &portalConn{Conn: c}, nil
 				}
 				// The stream limit or a closed tunnel will not clear in
 				// 20ms. The dial now fails at once, so the proxy reports the
@@ -588,17 +612,18 @@ func (s *Server) portalProxy(p store.Portal) *httputil.ReverseProxy {
 // computer may keep it open far longer; this is the server's side.
 const portalIdle = 30 * time.Second
 
-// portalProxyFor returns the forwarder for host, building it on first use.
-// A reclaimed portal is a new row, so callers drop the old forwarder and the
-// next request builds one with the current port and computer.
+// portalProxyFor pools connections only for the route this request resolved.
 func (s *Server) portalProxyFor(p store.Portal) *httputil.ReverseProxy {
 	s.proxyMu.Lock()
 	defer s.proxyMu.Unlock()
-	if rp := s.proxies[p.Hostname]; rp != nil {
-		return rp
+	if f, ok := s.proxies[p.Hostname]; ok {
+		if f.computer == p.Computer && f.port == p.Port {
+			return f.proxy
+		}
+		f.proxy.Transport.(*http.Transport).CloseIdleConnections()
 	}
 	rp := s.portalProxy(p)
-	s.proxies[p.Hostname] = rp
+	s.proxies[p.Hostname] = portalForwarder{computer: p.Computer, port: p.Port, proxy: rp}
 	return rp
 }
 
@@ -609,8 +634,8 @@ func (s *Server) portalProxyFor(p store.Portal) *httputil.ReverseProxy {
 func (s *Server) closePortalIdle(host string) {
 	s.proxyMu.Lock()
 	defer s.proxyMu.Unlock()
-	if rp := s.proxies[host]; rp != nil {
-		rp.Transport.(*http.Transport).CloseIdleConnections()
+	if f, ok := s.proxies[host]; ok {
+		f.proxy.Transport.(*http.Transport).CloseIdleConnections()
 		delete(s.proxies, host)
 	}
 }
@@ -633,7 +658,25 @@ func (s *Server) dropPortalIdle(computer string) {
 // computer never sent.
 func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Portal) {
 	s.stripGate(r)
-	s.portalProxyFor(p).ServeHTTP(w, r)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	var attempts int
+	trace := &httptrace.ClientTrace{
+		GetConn: func(string) {
+			attempts++
+			if attempts > 1 {
+				cancel()
+			}
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			// Transport can acquire a connection even after cancellation.
+			// Do not let its retry write any HTTP bytes to that connection.
+			if attempts > 1 {
+				info.Conn.(*portalConn).blockWrites.Store(true)
+			}
+		},
+	}
+	s.portalProxyFor(p).ServeHTTP(w, r.WithContext(httptrace.WithClientTrace(ctx, trace)))
 }
 
 func (s *Server) acceptSock(ctx context.Context, ln net.Listener) {

@@ -10,7 +10,7 @@ A portal is a hostname routed to one TCP port on one computer. The computer clai
 
 A request with a claimed `Host` opens a `portal` stream, which the agent connects to `127.0.0.1:<port>`, so the process only needs loopback. The route exists before anything listens. The printed URL carries no port; the edge decides the reachable one.
 
-The server forwards the request as the client sent it and answers with what the computer sends. When no stream can be opened, the request is aborted instead of answered, so the client sees the connection end and the server invents no status. A computer that reconnects within 3 seconds keeps the request that arrived in the gap.
+The server forwards the request as the client sent it and answers with what the computer sends. When no stream can be opened, the request is aborted instead of answered, so the client sees the connection end and the server invents no status. If the stream fails while forwarding a request, the server does not resend it; the client decides whether to try again. Before forwarding, the server waits up to 3 seconds if the computer has no live tunnel.
 
 A private portal checks the token before opening the stream. A browser navigation (`Accept` contains `text/html`) without one is redirected to `http://auth.<domain>/`, which sets an HttpOnly cookie on the parent domain once a valid token is submitted. Other clients send `X-Box-Token` or `Authorization: Bearer` and get 401 without it. The server strips that cookie, and a bearer token that is one of its access tokens, before forwarding. One token opens every private portal.
 

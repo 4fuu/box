@@ -171,6 +171,7 @@ func serveUpstream(t *testing.T, ctx context.Context, sess *tunnel.Session, up *
 					close(done)
 				}()
 				_, _ = io.Copy(conn, back)
+				_ = conn.(interface{ CloseWrite() error }).CloseWrite()
 				<-done
 			}()
 		}
@@ -211,6 +212,64 @@ func TestPortalReusesConnection(t *testing.T) {
 	}
 	if n := up.stillOpen(); n != 1 {
 		t.Fatalf("%d connections left open after five requests, want 1", n)
+	}
+}
+
+func TestPortalDoesNotReplayAfterResponseLoss(t *testing.T) {
+	srv, _, signer := e2eBind(t)
+	token := e2eJoin(t, srv, signer, "home")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var attempts atomic.Int32
+	up := countingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/action" && attempts.Add(1) == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack upstream: %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		fmt.Fprint(w, "pong")
+	}))
+	sess := bareAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
+	serveUpstream(t, ctx, sess, up)
+	var add tunnel.PortalAddResponse
+	if err := sess.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: up.port()}, &add); err != nil {
+		t.Fatal(err)
+	}
+
+	const host = "web.box.example.com"
+	if body, status := get(t, srv.HTTPAddr(), host); status != 200 || body != "pong" {
+		t.Fatalf("warm-up: %d %q", status, body)
+	}
+	// Fresh downstream connections prevent client-side retries from masking a box retry.
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	req := portalRequest(t, srv.HTTPAddr(), host)
+	req.URL.Path = "/action"
+	resp, err := client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("box answered %s after upstream dropped the response; upstream saw %d attempts", resp.Status, attempts.Load())
+	}
+	if !strings.Contains(err.Error(), "EOF") || attempts.Load() != 1 {
+		t.Fatalf("want EOF after one attempt, got %v after %d attempts", err, attempts.Load())
+	}
+
+	retry := portalRequest(t, srv.HTTPAddr(), host)
+	retry.URL.Path = "/action"
+	resp, err = client.Do(retry)
+	if err != nil {
+		t.Fatalf("explicit retry: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != 200 || string(body) != "pong" || attempts.Load() != 2 {
+		t.Fatalf("explicit retry: %d %q, %v; %d attempts total", resp.StatusCode, body, err, attempts.Load())
 	}
 }
 
@@ -410,5 +469,32 @@ func TestPortalPortChange(t *testing.T) {
 	}
 	if body, _ := get(t, srv.HTTPAddr(), "web.box.example.com"); body != "B" {
 		t.Fatalf("after the port change: %q, want B (the forwarder kept the old port)", body)
+	}
+}
+
+func TestPortalSurvivesComputerRename(t *testing.T) {
+	srv, _, signer := e2eBind(t)
+	token := e2eJoin(t, srv, signer, "home")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	up := countingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		fmt.Fprint(w, "pong")
+	}))
+	sess := bareAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
+	serveUpstream(t, ctx, sess, up)
+	var add tunnel.PortalAddResponse
+	if err := sess.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: up.port()}, &add); err != nil {
+		t.Fatal(err)
+	}
+	const host = "web.box.example.com"
+	if body, status := get(t, srv.HTTPAddr(), host); status != 200 || body != "pong" {
+		t.Fatalf("before rename: %d %q", status, body)
+	}
+	if _, stderr, err := sshRun(t, srv.SSHAddr(), "box", signer, "rename home house"); err != nil {
+		t.Fatalf("rename: %v %s", err, stderr)
+	}
+	if body, status := get(t, srv.HTTPAddr(), host); status != 200 || body != "pong" {
+		t.Fatalf("after rename: %d %q", status, body)
 	}
 }

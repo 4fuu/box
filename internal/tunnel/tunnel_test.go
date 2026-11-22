@@ -689,7 +689,7 @@ func TestReadBatchesSmallReads(t *testing.T) {
 	if err != nil || n < minReadBatch {
 		t.Fatalf("batch read n=%d err=%v", n, err)
 	}
-	if _, err := io.ReadFull(ssh, buf[:len(payload)-n]); err != nil {
+	if _, err := io.CopyN(io.Discard, ssh, int64(len(payload)-n)); err != nil {
 		t.Fatal(err)
 	}
 }

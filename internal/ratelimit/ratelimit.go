@@ -14,8 +14,11 @@ import (
 )
 
 const (
-	// Burst is how many failures one address may have inside Window.
-	Burst = 5
+	// Burst is how many failures one address may have inside Window. Every
+	// unbound key offered counts, so an agent with many keys, or a home
+	// behind one shared address, spends the burst faster than one person
+	// would; a small burst bans them for trying to sign in.
+	Burst = 20
 	// Window is how long Burst failures are counted.
 	Window = 5 * time.Minute
 	// MaxBan caps a ban. The next failure after it ends bans again, so an

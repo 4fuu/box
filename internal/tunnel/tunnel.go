@@ -24,6 +24,12 @@ const appRefused quic.ApplicationErrorCode = 1
 // idle timeout is the minimum of both peers, so Listen and Dial share this.
 // Keep-alives are under half the idle timeout; quic-go clamps them to that.
 //
+// The idle timeout is how long a tunnel that died without a close packet
+// still looks open. During that window the server keeps forwarding to it
+// and every request waits out its client's timeout. A keep-alive every 10s
+// holds a live tunnel open well past 30s, and a dead one is noticed within
+// 30s instead of 2 minutes.
+//
 // The first packets stay at quic-go's 1280 bytes. Starting at a full
 // 1500-byte MTU saved a little slow start on clean paths, but a path whose
 // MTU is smaller drops the Initial packet, the handshake never happens, and
@@ -37,10 +43,16 @@ const appRefused quic.ApplicationErrorCode = 1
 // 6 MB, about 100 MB/s at 40ms, and the connection gets 16 MB so a portal
 // response and an SSH session do not hold each other back. The connection
 // window may still grow under that load, and never past this.
+//
+// The stream limit is how many streams the peer may have open at once. It
+// starts at quic-go's 100 and grows only when a stream finishes, so a burst
+// of requests past 100 finds the limit reached. 512 keeps the burst waiting
+// on nothing.
 func quicConfig() *quic.Config {
 	return &quic.Config{
-		MaxIdleTimeout:  2 * time.Minute,
-		KeepAlivePeriod: 10 * time.Second,
+		MaxIdleTimeout:     30 * time.Second,
+		KeepAlivePeriod:    10 * time.Second,
+		MaxIncomingStreams: 512,
 
 		InitialStreamReceiveWindow:     6 << 20,
 		MaxStreamReceiveWindow:         6 << 20,
@@ -380,8 +392,11 @@ func (c *Conn) OpenPortal(ctx context.Context, port int) (net.Conn, error) {
 	return c.open(ctx, KindPortal, port)
 }
 
+// open starts a stream for kind. It does not wait for the peer's stream
+// limit: a request that would wait has to fail at once so the caller can
+// retry, because quic-go's wait does not end when the connection closes.
 func (c *Conn) open(ctx context.Context, kind string, port int) (net.Conn, error) {
-	st, err := c.ctrl.qconn.OpenStreamSync(ctx)
+	st, err := c.ctrl.qconn.OpenStream()
 	if err != nil {
 		return nil, err
 	}

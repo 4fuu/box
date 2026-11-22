@@ -508,13 +508,46 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Portal) {
-	conn := s.svc.Live.Get(p.Computer)
-	if conn == nil {
-		s.svc.Metrics.Failed()
-		http.Error(w, "computer offline\n", http.StatusBadGateway)
-		return
+// dialWait is how long a portal request waits for its computer's tunnel to
+// come back. A reconnect takes a few seconds; a longer wait only holds the
+// client's socket open on a computer that is not coming back.
+const dialWait = 3 * time.Second
+
+var errPortalOffline = errors.New("computer offline")
+
+// portalDial opens the tunnel for one portal request. A computer that
+// reconnects during the gap keeps the request: nothing has been written
+// yet, so retrying is safe for every method.
+func portalDial(live *control.Live, computer string, port int) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, _, _ string) (net.Conn, error) {
+		deadline := time.Now().Add(dialWait)
+		for {
+			var err error
+			if conn := live.Get(computer); conn != nil {
+				var c net.Conn
+				if c, err = conn.OpenPortal(ctx, port); err == nil {
+					return c, nil
+				}
+			} else {
+				err = errPortalOffline
+			}
+			if time.Now().After(deadline) {
+				return nil, err
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
 	}
+}
+
+// proxyPortal forwards the request as the client sent it. When no tunnel
+// can be opened the request is aborted, not answered: the response ends at
+// the edge with whatever it writes, and box does not invent a status the
+// computer never sent.
+func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Portal) {
 	host := p.Hostname
 	s.stripGate(r)
 	rp := &httputil.ReverseProxy{
@@ -523,14 +556,11 @@ func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Por
 			req.URL.Host = host
 		},
 		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return conn.OpenPortal(ctx, p.Port)
-			},
-			DisableKeepAlives: true,
+			DialContext: portalDial(s.svc.Live, p.Computer, p.Port),
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, _ error) {
 			s.svc.Metrics.Failed()
-			http.Error(w, "bad gateway\n", http.StatusBadGateway)
+			panic(http.ErrAbortHandler)
 		},
 		FlushInterval: -1,
 	}

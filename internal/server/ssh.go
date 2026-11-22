@@ -45,11 +45,12 @@ func newSSH(s *Server, hostKey string) (*sshServer, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Three keys per connection is enough for a bound key and a mistake, and
-	// it keeps one connection from offering a dictionary. Failures past this
-	// cost the client a new handshake, which the limiter then refuses.
+	// Six keys per connection is sshd's own default: an agent with several
+	// keys offers them all on one connection, and a key that is refused
+	// before the bound one would otherwise cost the client a new handshake.
+	// Failures past this still cost one, which the limiter then refuses.
 	srv.ServerConfigCallback = func(ssh.Context) *gossh.ServerConfig {
-		return &gossh.ServerConfig{MaxAuthTries: 3}
+		return &gossh.ServerConfig{MaxAuthTries: 6}
 	}
 	srv.Handler = h.session
 	srv.ChannelHandlers = map[string]ssh.ChannelHandler{
@@ -85,10 +86,12 @@ func (h *sshServer) publicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 	if g.banned() {
 		return false
 	}
+	// A lookup that failed says nothing about the key, so it is refused
+	// without counting as a guess: a database hiccup must not ban an
+	// operator who is only trying to sign in.
 	bound := false
 	ok, err := h.s.svc.HasKey(key)
 	if err != nil {
-		g.failed()
 		return false
 	}
 	bound = ok
@@ -96,7 +99,6 @@ func (h *sshServer) publicKey(ctx ssh.Context, key ssh.PublicKey) bool {
 	if class == classREPL && !bound {
 		ok, err := h.s.store.HasLivePairing()
 		if err != nil {
-			g.failed()
 			return false
 		}
 		live = ok

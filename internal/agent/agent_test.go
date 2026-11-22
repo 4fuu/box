@@ -569,6 +569,89 @@ func TestRunKeepsStateOnNetworkError(t *testing.T) {
 	}
 }
 
+// TestRunResetsBackoffAfterATunnel serves a tunnel, then lets the server go
+// away before the next try fails. The delay after that failed try must be
+// the first step, not the step the earlier outage had grown to.
+func TestRunResetsBackoffAfterATunnel(t *testing.T) {
+	dir := t.TempDir()
+	setHome(t, dir)
+	var mu sync.Mutex
+	var waits []int
+	stop := errors.New("stop")
+	prev := waitBackoff
+	waitBackoff = func(ctx context.Context, attempt int) error {
+		mu.Lock()
+		waits = append(waits, attempt)
+		n := len(waits)
+		mu.Unlock()
+		// The first wait follows the first try, which runs before the
+		// tunnel is up. The second follows the try that had it.
+		if n == 2 {
+			return stop
+		}
+		return nil
+	}
+	t.Cleanup(func() { waitBackoff = prev })
+
+	cert, fp, err := tunnel.NewCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := tunnel.Listen("127.0.0.1:0", cert, func(tunnel.Identity) (tunnel.HelloResult, error) {
+		return tunnel.HelloResult{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	// One tunnel comes up and the server then leaves, so the next try fails
+	// before hello.
+	go func() {
+		c, err := srv.Accept(context.Background())
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+		_ = srv.Close()
+	}()
+	sshAddr := startSSH(t, func(user, credential string) (string, error) {
+		raw, err := json.Marshal(map[string]any{
+			"quic":        srv.Addr(),
+			"fingerprint": fp,
+			"domain":      "box.example.com",
+		})
+		return string(raw), err
+	})
+	if err := writeComputer(dir, computer{
+		Name: "home", Token: "tok", QUIC: srv.Addr(), Fingerprint: fp,
+		User: "alice", SSH: sshAddr,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setSSHDial(t, freeLocal(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := Run(ctx, dir); !errors.Is(err, stop) {
+		t.Fatalf("run: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(waits) != 2 || waits[1] > 1 {
+		t.Fatalf("waits %v, want no growth after the tunnel", waits)
+	}
+}
+
+func freeLocal(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
 func TestFormatKeyLine(t *testing.T) {
 	if formatKeyLine("ssh-ed25519 AAAA comment") != "ssh-ed25519 AAAA comment" {
 		t.Fatal("plain line changed")

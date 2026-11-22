@@ -114,12 +114,16 @@ func Run(ctx context.Context, stateDir string) error {
 	}
 	defer a.stopListen()
 
+	// attempt is the wait before the next try. It grows while the server
+	// cannot be reached and starts over after each tunnel that came up, so
+	// a link that keeps dropping reconnects at once instead of waiting out
+	// the longest delay.
 	attempt := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := a.once(ctx)
+		up, err := a.once(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -128,6 +132,9 @@ func Run(ctx context.Context, stateDir string) error {
 			_ = wipeState(stateDir)
 			return ErrRejected
 		}
+		if up {
+			attempt = 0
+		}
 		if err := waitBackoff(ctx, attempt); err != nil {
 			return err
 		}
@@ -135,16 +142,18 @@ func Run(ctx context.Context, stateDir string) error {
 	}
 }
 
-func (a *agent) once(ctx context.Context) error {
+// once bootstraps, dials, and serves until the tunnel drops. up reports
+// whether the tunnel was up, even if it dropped right after.
+func (a *agent) once(ctx context.Context) (up bool, err error) {
 	if err := a.bootstrap(ctx); err != nil {
-		return err
+		return false, err
 	}
 	a.mu.Lock()
 	comp := a.comp
 	a.mu.Unlock()
 	sess, err := tunnel.Dial(ctx, comp.QUIC, comp.Fingerprint)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer sess.Close()
 	sess.Handle(a.onControl)
@@ -161,12 +170,12 @@ func (a *agent) once(ctx context.Context) error {
 	if err != nil {
 		_ = sess.Close()
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 		if tokenRefused(err) {
-			return fmt.Errorf("%w", ErrRejected)
+			return false, fmt.Errorf("%w", ErrRejected)
 		}
-		return err
+		return false, err
 	}
 	a.mu.Lock()
 	a.sess = sess
@@ -178,17 +187,18 @@ func (a *agent) once(ctx context.Context) error {
 		}
 		a.mu.Unlock()
 	}()
+	up = true
 	if err := a.noteHello(res); err != nil {
-		return err
+		return up, err
 	}
 
 	for {
 		kind, port, conn, err := sess.Accept(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return up, ctx.Err()
 			}
-			return err
+			return up, err
 		}
 		go proxyStream(ctx, kind, port, conn)
 	}

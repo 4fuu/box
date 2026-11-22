@@ -13,6 +13,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -106,6 +107,13 @@ func e2eJoin(t *testing.T, srv *server.Server, signer gossh.Signer, name string)
 func e2eAgent(t *testing.T, ctx context.Context, addr, fingerprint, token string, extraHosts ...gossh.Signer) *tunnel.Session {
 	t.Helper()
 	hostKey, hostLine := newKey(t)
+	return e2eAgentKey(t, ctx, addr, fingerprint, token, hostKey, hostLine, extraHosts...)
+}
+
+// e2eAgentKey is e2eAgent with a host key the caller chose, so a reconnect
+// can present the same one the server registered.
+func e2eAgentKey(t *testing.T, ctx context.Context, addr, fingerprint, token string, hostKey gossh.Signer, hostLine string, extraHosts ...gossh.Signer) *tunnel.Session {
+	t.Helper()
 	sess, err := tunnel.Dial(ctx, addr, fingerprint)
 	if err != nil {
 		t.Fatal(err)
@@ -393,6 +401,52 @@ func TestTunnelLatency(t *testing.T) {
 	spliceOut, errOut, err := sshRun(t, srv.SSHAddr(), "home", signer, "echo")
 	if err != nil || spliceOut != "hi\n" {
 		t.Fatalf("splice through delay: %v %s %q", err, errOut, spliceOut)
+	}
+}
+
+// TestBootstrapFollowsManyKeys joins, then runs the agent's bootstrap on a
+// connection that offers six unbound keys before the computer's own. An
+// agent with a big key ring does that on every reconnect, and the last key
+// must still carry the boot exchange.
+func TestBootstrapFollowsManyKeys(t *testing.T) {
+	srv, _, signer := e2eBind(t)
+	token := e2eJoin(t, srv, signer, "home")
+
+	var auth []gossh.AuthMethod
+	for i := 0; i < 6; i++ {
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		other, err := gossh.NewSignerFromKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		auth = append(auth, gossh.PublicKeys(other))
+	}
+	auth = append(auth, gossh.PublicKeys(signer))
+	client, err := gossh.Dial("tcp", srv.SSHAddr(), &gossh.ClientConfig{
+		User:            "boot+home",
+		Auth:            auth,
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap after other keys: %v", err)
+	}
+	defer client.Close()
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	sess.Stdin = strings.NewReader(token + "\n")
+	out, err := sess.Output("boot")
+	if err != nil {
+		t.Fatalf("bootstrap after other keys: %v %s", err, out)
+	}
+	if !strings.Contains(string(out), `"quic"`) {
+		t.Fatalf("bootstrap reply %q", out)
 	}
 }
 

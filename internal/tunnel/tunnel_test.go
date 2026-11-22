@@ -430,14 +430,19 @@ func TestBackoff(t *testing.T) {
 
 func TestQUICConfig(t *testing.T) {
 	cfg := quicConfig()
+	// A keep-alive holds a live tunnel open; a dead one is noticed within
+	// the idle timeout, so it stays short.
+	if cfg.MaxIdleTimeout != 30*time.Second {
+		t.Fatalf("idle timeout %s", cfg.MaxIdleTimeout)
+	}
 	if cfg.KeepAlivePeriod <= 0 {
 		t.Fatal("keepalive disabled")
 	}
-	if cfg.MaxIdleTimeout <= 30*time.Second {
-		t.Fatalf("idle timeout %s", cfg.MaxIdleTimeout)
-	}
 	if cfg.KeepAlivePeriod >= cfg.MaxIdleTimeout/2 {
 		t.Fatalf("keepalive %s idle %s", cfg.KeepAlivePeriod, cfg.MaxIdleTimeout)
+	}
+	if cfg.MaxIncomingStreams < 512 {
+		t.Fatalf("incoming streams %d", cfg.MaxIncomingStreams)
 	}
 	// The first packets must fit any path a computer might sit behind. A
 	// larger starting size makes a handshake fail on a path with a smaller

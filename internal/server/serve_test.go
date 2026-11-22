@@ -369,16 +369,7 @@ func TestComputersTunnel(t *testing.T) {
 	}
 
 	_ = bad.Close()
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		if status := getHost(t, srv.HTTPAddr(), "web.box.example.com"); status == 502 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("online portal after disconnect")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitOffline(t, srv.HTTPAddr(), "web.box.example.com")
 	if _, errOut, err := sshRun(t, srv.SSHAddr(), "box", signer, "rm home"); err == nil || !strings.Contains(errOut, "asks for the name") {
 		t.Fatalf("rm without confirm: %v %s", err, errOut)
 	}
@@ -687,13 +678,21 @@ func tokenMustNotSplice(t *testing.T, addr, token string) error {
 	return nil
 }
 
+// httpPong answers one request like a small HTTP server and closes. It
+// reports whether the access gate's header or cookie came through.
 func httpPong(conn net.Conn) {
 	defer conn.Close()
 	br := bufio.NewReader(conn)
+	if _, err := br.ReadString('\n'); err != nil {
+		return
+	}
 	saw := false
 	for {
 		line, err := br.ReadString('\n')
-		if err != nil || line == "\r\n" {
+		if err != nil {
+			return
+		}
+		if line == "\r\n" {
 			break
 		}
 		low := strings.ToLower(line)

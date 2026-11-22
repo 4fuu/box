@@ -24,10 +24,11 @@ const appRefused quic.ApplicationErrorCode = 1
 // idle timeout is the minimum of both peers, so Listen and Dial share this.
 // Keep-alives are under half the idle timeout; quic-go clamps them to that.
 //
-// The congestion window is quic-go's own, Cubic or Reno in slow start. It
-// starts at 32 packets of 1280 bytes and only grows by a full datagram per
-// ACK once path MTU discovery has raised the datagram size. Starting at a
-// normal 1500-byte MTU keeps that growth in proportion.
+// The first packets stay at quic-go's 1280 bytes. Starting at a full
+// 1500-byte MTU saved a little slow start on clean paths, but a path whose
+// MTU is smaller drops the Initial packet, the handshake never happens, and
+// the computer cannot reconnect at all. Path MTU discovery raises the packet
+// size once the connection is up.
 //
 // The receive windows are the throughput limit on a long path. quic-go opens
 // them at 512 KB and only grows them when its auto-tuning notices a stream
@@ -38,9 +39,8 @@ const appRefused quic.ApplicationErrorCode = 1
 // window may still grow under that load, and never past this.
 func quicConfig() *quic.Config {
 	return &quic.Config{
-		MaxIdleTimeout:    2 * time.Minute,
-		KeepAlivePeriod:   10 * time.Second,
-		InitialPacketSize: 1452,
+		MaxIdleTimeout:  2 * time.Minute,
+		KeepAlivePeriod: 10 * time.Second,
 
 		InitialStreamReceiveWindow:     6 << 20,
 		MaxStreamReceiveWindow:         6 << 20,

@@ -439,9 +439,10 @@ func TestQUICConfig(t *testing.T) {
 	if cfg.KeepAlivePeriod >= cfg.MaxIdleTimeout/2 {
 		t.Fatalf("keepalive %s idle %s", cfg.KeepAlivePeriod, cfg.MaxIdleTimeout)
 	}
-	// A 1500-byte path minus IPv4 and UDP headers. Below this the first
-	// packets, and the congestion window they size, stay undersized.
-	if cfg.InitialPacketSize < 1452 {
+	// The first packets must fit any path a computer might sit behind. A
+	// larger starting size makes a handshake fail on a path with a smaller
+	// MTU, and then the computer never reconnects.
+	if cfg.InitialPacketSize > 1280 {
 		t.Fatalf("initial packet size %d", cfg.InitialPacketSize)
 	}
 	// A 40ms path needs a window this wide to carry 50 MB/s on one stream.

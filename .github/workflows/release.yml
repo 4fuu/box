@@ -42,6 +42,10 @@ jobs:
             }
             echo "Resuming release v$VERSION"
           fi
+          grep -q '[^[:space:]]' RELEASE_NOTES.md 2>/dev/null || {
+            echo "Write the changes since the last release in RELEASE_NOTES.md before dispatching" >&2
+            exit 1
+          }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
   test:
@@ -145,7 +149,9 @@ jobs:
           }
           (cd release && sha256sum box-* > SHA256SUMS)
           notes=$(mktemp)
-          cat > "$notes" <<EOF
+          cat RELEASE_NOTES.md > "$notes"
+          printf '\n' >> "$notes"
+          cat >> "$notes" <<EOF
           Install a Linux server or computer with \`scripts/install.sh\`.
 
           On the server: \`box serve --domain <domain>\`.
@@ -159,6 +165,7 @@ jobs:
           tag="v$VERSION"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" release/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$tag" --notes-file "$notes" --repo "$GITHUB_REPOSITORY"
           elif git rev-parse --verify --quiet "refs/tags/$tag"; then
             gh release create "$tag" release/* \
               --repo "$GITHUB_REPOSITORY" \

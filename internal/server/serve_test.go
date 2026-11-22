@@ -901,11 +901,20 @@ func sshCredentialRun(t *testing.T, addr, user, credential, cmd string) (string,
 
 func getHost(t *testing.T, addr, host string) int {
 	t.Helper()
-	_, status := get(t, addr, host)
-	return status
+	return getReq(t, addr, host, false).StatusCode
 }
 
 func get(t *testing.T, addr, host string) (string, int) {
+	t.Helper()
+	resp := getReq(t, addr, host, true)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body), resp.StatusCode
+}
+
+// getReq asks for the portal at host. fresh keeps the connection for this
+// request alone, so a test can see how many the proxy opens.
+func getReq(t *testing.T, addr, host string, fresh bool) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
 	if err != nil {
@@ -913,13 +922,14 @@ func get(t *testing.T, addr, host string) (string, int) {
 	}
 	req.Host = host
 	client := &http.Client{Timeout: 5 * time.Second}
+	if fresh {
+		client.Transport = &http.Transport{DisableKeepAlives: true}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	return resp
 }
 
 func walkNoSecret(t *testing.T, dir, secret string) {

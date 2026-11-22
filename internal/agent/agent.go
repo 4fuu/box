@@ -29,7 +29,13 @@ const agentVersion = "dev"
 // waitBackoff sleeps before another bootstrap. Tests replace it so a
 // reconnect does not wait out tunnel.Backoff.
 var waitBackoff = func(ctx context.Context, attempt int) error {
-	timer := time.NewTimer(tunnel.Backoff(attempt, rand.Float64()))
+	return pause(ctx, attempt, time.Second)
+}
+
+// pause waits the reconnect delay for attempt, grown from base. Tests use a
+// base of a few milliseconds so they can watch the delay grow.
+func pause(ctx context.Context, attempt int, base time.Duration) error {
+	timer := time.NewTimer(tunnel.BackoffFor(attempt, rand.Float64(), base))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -114,10 +120,6 @@ func Run(ctx context.Context, stateDir string) error {
 	}
 	defer a.stopListen()
 
-	// attempt is the wait before the next try. It grows while the server
-	// cannot be reached and starts over after each tunnel that came up, so
-	// a link that keeps dropping reconnects at once instead of waiting out
-	// the longest delay.
 	attempt := 0
 	for {
 		if err := ctx.Err(); err != nil {
@@ -143,7 +145,9 @@ func Run(ctx context.Context, stateDir string) error {
 }
 
 // once bootstraps, dials, and serves until the tunnel drops. up reports
-// whether the tunnel was up, even if it dropped right after.
+// whether the tunnel stayed up long enough to count as a reconnect, not a
+// flapping server: resetting the backoff for one that drops at once would
+// turn a broken server into a tight loop of SSH exchanges.
 func (a *agent) once(ctx context.Context) (up bool, err error) {
 	if err := a.bootstrap(ctx); err != nil {
 		return false, err
@@ -188,6 +192,7 @@ func (a *agent) once(ctx context.Context) (up bool, err error) {
 		a.mu.Unlock()
 	}()
 	up = true
+	start := time.Now()
 	if err := a.noteHello(res); err != nil {
 		return up, err
 	}
@@ -198,7 +203,7 @@ func (a *agent) once(ctx context.Context) (up bool, err error) {
 			if ctx.Err() != nil {
 				return up, ctx.Err()
 			}
-			return up, err
+			return up && time.Since(start) >= tunnel.Lived, err
 		}
 		go proxyStream(ctx, kind, port, conn)
 	}

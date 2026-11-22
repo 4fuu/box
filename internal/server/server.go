@@ -86,6 +86,9 @@ type Server struct {
 	done     chan struct{}
 	once     sync.Once
 	closeErr error
+
+	proxyMu sync.Mutex
+	proxies map[string]*httputil.ReverseProxy
 }
 
 // Start opens the database, prints a one-time password on first init, and listens.
@@ -173,6 +176,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		splice:      signer,
 		fingerprint: fp,
 		waiters:     map[string]*joinWaiter{},
+		proxies:     map[string]*httputil.ReverseProxy{},
 		done:        make(chan struct{}),
 	}
 	svc.Grant = s.grant
@@ -354,10 +358,12 @@ func (s *Server) attach(c *tunnel.Conn) {
 	if old != nil {
 		_ = old.Close()
 	}
+	s.dropPortalIdle(c.Name())
 	c.Handle(s.onControl(c))
 	go func() {
 		<-c.Done()
 		s.svc.Live.Forget(c)
+		s.dropPortalIdle(c.Name())
 	}()
 	go s.svc.PushAll(context.Background(), c)
 }
@@ -393,12 +399,15 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, errors.New("bad request")
 			}
+			// A new row may be a new port behind the same host.
+			s.dropPortalIdle(name)
 			return s.svc.AddPortal(name, req.Label, req.Port, req.Private)
 		case tunnel.OpPortalRm:
 			var req tunnel.PortalRmRequest
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, errors.New("bad request")
 			}
+			s.dropPortalIdle(name)
 			return nil, s.svc.RemovePortal(name, req.Label)
 		case tunnel.OpPortalLs:
 			return s.svc.ListPortals(name)
@@ -499,6 +508,11 @@ func (s *Server) Close() error {
 		if s.sockLn != nil {
 			s.sockLn.Close()
 		}
+		s.proxyMu.Lock()
+		for _, rp := range s.proxies {
+			rp.Transport.(*http.Transport).CloseIdleConnections()
+		}
+		s.proxyMu.Unlock()
 		if s.store != nil {
 			if err := s.store.Close(); err != nil && s.closeErr == nil {
 				s.closeErr = err
@@ -528,9 +542,12 @@ func portalDial(live *control.Live, computer string, port int) func(context.Cont
 				if c, err = conn.OpenPortal(ctx, port); err == nil {
 					return c, nil
 				}
-			} else {
-				err = errPortalOffline
+				// The stream limit or a closed tunnel will not clear in
+				// 20ms. The dial now fails at once, so the proxy reports the
+				// request instead of holding it for the full wait.
+				return nil, err
 			}
+			err = errPortalOffline
 			if time.Now().After(deadline) {
 				return nil, err
 			}
@@ -543,20 +560,21 @@ func portalDial(live *control.Live, computer string, port int) func(context.Cont
 	}
 }
 
-// proxyPortal forwards the request as the client sent it. When no tunnel
-// can be opened the request is aborted, not answered: the response ends at
-// the edge with whatever it writes, and box does not invent a status the
-// computer never sent.
-func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Portal) {
+// portalProxy is one portal host's forwarder. Its transport outlives a
+// request: a connection the computer keeps open serves the next request to
+// the same host, and one the computer does not keep is closed after
+// portalIdle. A fresh transport per request would pool connections nobody
+// reuses and nobody closes, and each of those is a tunnel stream.
+func (s *Server) portalProxy(p store.Portal) *httputil.ReverseProxy {
 	host := p.Hostname
-	s.stripGate(r)
-	rp := &httputil.ReverseProxy{
+	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
 			req.URL.Host = host
 		},
 		Transport: &http.Transport{
-			DialContext: portalDial(s.svc.Live, p.Computer, p.Port),
+			DialContext:     portalDial(s.svc.Live, p.Computer, p.Port),
+			IdleConnTimeout: portalIdle,
 		},
 		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, _ error) {
 			s.svc.Metrics.Failed()
@@ -564,7 +582,54 @@ func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Por
 		},
 		FlushInterval: -1,
 	}
-	rp.ServeHTTP(w, r)
+}
+
+// portalIdle is how long an unused connection to a computer is kept. The
+// computer may keep it open far longer; this is the server's side.
+const portalIdle = 30 * time.Second
+
+// portalProxies returns the forwarder for host, building it on first use.
+// A portal claimed again is a new row, so a port change gets a new
+// forwarder; callers close the old one's idle connections.
+func (s *Server) portalProxyFor(p store.Portal) *httputil.ReverseProxy {
+	s.proxyMu.Lock()
+	defer s.proxyMu.Unlock()
+	if rp := s.proxies[p.Hostname]; rp != nil {
+		return rp
+	}
+	rp := s.portalProxy(p)
+	s.proxies[p.Hostname] = rp
+	return rp
+}
+
+// closePortalIdle closes the idle connections behind one portal host.
+func (s *Server) closePortalIdle(host string) {
+	s.proxyMu.Lock()
+	defer s.proxyMu.Unlock()
+	if rp := s.proxies[host]; rp != nil {
+		rp.Transport.(*http.Transport).CloseIdleConnections()
+	}
+}
+
+// dropPortalIdle closes the idle connections of every portal on a computer.
+// The forwarder stays, so the next request dials the tunnel afresh.
+func (s *Server) dropPortalIdle(computer string) {
+	list, err := s.store.PortalsByComputer(computer)
+	if err != nil {
+		return
+	}
+	for _, p := range list {
+		s.closePortalIdle(p.Hostname)
+	}
+}
+
+// proxyPortal forwards the request as the client sent it. When no tunnel
+// can be opened the request is aborted, not answered: the response ends at
+// the edge with whatever it writes, and box does not invent a status the
+// computer never sent.
+func (s *Server) proxyPortal(w http.ResponseWriter, r *http.Request, p store.Portal) {
+	s.stripGate(r)
+	s.portalProxyFor(p).ServeHTTP(w, r)
 }
 
 func (s *Server) acceptSock(ctx context.Context, ln net.Listener) {

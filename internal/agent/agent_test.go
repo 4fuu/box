@@ -569,12 +569,14 @@ func TestRunKeepsStateOnNetworkError(t *testing.T) {
 	}
 }
 
-// TestRunResetsBackoffAfterATunnel serves a tunnel, then lets the server go
-// away before the next try fails. The delay after that failed try must be
-// the first step, not the step the earlier outage had grown to.
+// TestRunResetsBackoffAfterATunnel lets two failed tries grow the delay,
+// then serves a tunnel that stays up. The try after it must wait the first
+// step again, not the step the outage had grown to.
 func TestRunResetsBackoffAfterATunnel(t *testing.T) {
 	dir := t.TempDir()
 	setHome(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var mu sync.Mutex
 	var waits []int
 	stop := errors.New("stop")
@@ -584,9 +586,9 @@ func TestRunResetsBackoffAfterATunnel(t *testing.T) {
 		waits = append(waits, attempt)
 		n := len(waits)
 		mu.Unlock()
-		// The first wait follows the first try, which runs before the
-		// tunnel is up. The second follows the try that had it.
-		if n == 2 {
+		// The first two waits follow failed tries. The third follows the
+		// try that had the tunnel, and ends the test.
+		if n == 3 {
 			return stop
 		}
 		return nil
@@ -603,17 +605,20 @@ func TestRunResetsBackoffAfterATunnel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = srv.Close() })
-	// One tunnel comes up and the server then leaves, so the next try fails
-	// before hello.
+	// The tunnel comes up once and stays up until the test ends.
+	up := make(chan struct{})
 	go func() {
 		c, err := srv.Accept(context.Background())
 		if err != nil {
 			return
 		}
+		close(up)
+		<-ctx.Done()
 		_ = c.Close()
-		_ = srv.Close()
 	}()
+	// The server leaves with the test. Nothing else closes it, and a
+	// blocked accept would hang the test on exit.
+	t.Cleanup(func() { _ = srv.Close() })
 	sshAddr := startSSH(t, func(user, credential string) (string, error) {
 		raw, err := json.Marshal(map[string]any{
 			"quic":        srv.Addr(),
@@ -622,22 +627,52 @@ func TestRunResetsBackoffAfterATunnel(t *testing.T) {
 		})
 		return string(raw), err
 	})
+	// The first tries dial a closed port, so the delay grows before the
+	// tunnel exists.
 	if err := writeComputer(dir, computer{
-		Name: "home", Token: "tok", QUIC: srv.Addr(), Fingerprint: fp,
+		Name: "home", Token: "tok", QUIC: freeLocal(t), Fingerprint: fp,
 		User: "alice", SSH: sshAddr,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	setSSHDial(t, freeLocal(t))
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	// After the second wait, point the computer at the tunnel. The try that
+	// comes up is the one this test reads.
+	go func() {
+		mu.Lock()
+		for len(waits) < 2 {
+			mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+			mu.Lock()
+		}
+		mu.Unlock()
+		select {
+		case <-up:
+		case <-time.After(time.Minute):
+			t.Error("the tunnel never came up")
+			return
+		}
+		if err := writeComputer(dir, computer{
+			Name: "home", Token: "tok", QUIC: srv.Addr(), Fingerprint: fp,
+			User: "alice", SSH: sshAddr,
+		}); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	}()
 	if err := Run(ctx, dir); !errors.Is(err, stop) {
 		t.Fatalf("run: %v", err)
 	}
+	_ = srv.Close()
 	mu.Lock()
 	defer mu.Unlock()
-	if len(waits) != 2 || waits[1] > 1 {
-		t.Fatalf("waits %v, want no growth after the tunnel", waits)
+	if len(waits) != 3 {
+		t.Fatalf("waits %v", waits)
+	}
+	if waits[1] < 1 {
+		t.Fatalf("waits %v: the outage never grew the delay", waits)
+	}
+	if waits[2] != 0 {
+		t.Fatalf("waits %v: the try after a tunnel waited step %d, want 0", waits, waits[2])
 	}
 }
 

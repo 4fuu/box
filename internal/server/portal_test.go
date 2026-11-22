@@ -2,18 +2,33 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/4fuu/box/internal/tunnel"
 )
 
-// waitOffline polls the portal until its computer is gone: a request the
-// proxy could not forward ends without a reply, because box answers nothing
-// on the computer's behalf.
+// portalRequest builds a request for the portal at host.
+func portalRequest(t *testing.T, addr, host string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = host
+	return req
+}
+
+// waitOffline polls the portal until its computer is gone. Box answers
+// nothing for a computer it cannot reach, so the request ends without a
+// reply; a status of any kind would be one box made up.
 func waitOffline(t *testing.T, addr, host string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -23,15 +38,11 @@ func waitOffline(t *testing.T, addr, host string) {
 		if err == nil {
 			last = resp.Status
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusBadGateway {
-				return
-			}
+			t.Fatalf("offline portal answered %s", resp.Status)
 		}
-		if err != nil {
-			last = err.Error()
-			if strings.Contains(last, "EOF") {
-				return
-			}
+		last = err.Error()
+		if strings.Contains(last, "EOF") {
+			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("computer stayed online; last %s", last)
@@ -40,14 +51,166 @@ func waitOffline(t *testing.T, addr, host string) {
 	}
 }
 
-func portalRequest(t *testing.T, addr, host string) *http.Request {
+// fakeUpstream is a computer that serves HTTP/1.1 on one port with
+// keep-alive on. It counts the connections it accepted, so a test can see
+// whether the proxy reused one.
+type fakeUpstream struct {
+	ln      net.Listener
+	accepts atomic.Int32
+	mu      sync.Mutex
+	open    []net.Conn
+}
+
+// startUpstream serves "pong" on loopback with keep-alive on.
+func startUpstream(t *testing.T) *fakeUpstream {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+	return countingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "pong")
+	}))
+}
+
+// port is the loopback port the computer serves.
+func (u *fakeUpstream) port() int {
+	return u.ln.Addr().(*net.TCPAddr).Port
+}
+
+// stillOpen is how many accepted connections have not been closed.
+func (u *fakeUpstream) stillOpen() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return len(u.open)
+}
+
+type countingListener struct {
+	net.Listener
+	u *fakeUpstream
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.u.accepts.Add(1)
+	l.u.mu.Lock()
+	l.u.open = append(l.u.open, c)
+	l.u.mu.Unlock()
+	return &trackedConn{Conn: c, u: l.u}, nil
+}
+
+type trackedConn struct {
+	net.Conn
+	u    *fakeUpstream
+	once sync.Once
+}
+
+func (c *trackedConn) Close() error {
+	c.once.Do(func() {
+		c.u.mu.Lock()
+		for i, open := range c.u.open {
+			if open == c.Conn {
+				c.u.open = append(c.u.open[:i], c.u.open[i+1:]...)
+				break
+			}
+		}
+		c.u.mu.Unlock()
+	})
+	return c.Conn.Close()
+}
+
+// countingServer is an HTTP server on loopback that counts the
+// connections it accepts, so a test can see whether the proxy reused one.
+func countingServer(t *testing.T, handler http.Handler) *fakeUpstream {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Host = host
-	return req
+	u := &fakeUpstream{ln: ln}
+	// No idle timeout: the computer keeps the proxy's connection until the
+	// proxy closes it.
+	srv := &http.Server{Handler: handler}
+	go srv.Serve(&countingListener{Listener: ln, u: u})
+	t.Cleanup(func() {
+		_ = srv.Close()
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		for _, c := range u.open {
+			c.Close()
+		}
+	})
+	return u
+}
+
+// serveUpstream is a fake computer's stream handler: every portal stream
+// goes to the upstream, which keeps the connection until the proxy closes
+// it.
+func serveUpstream(t *testing.T, ctx context.Context, sess *tunnel.Session, up *fakeUpstream) {
+	t.Helper()
+	go func() {
+		for {
+			kind, _, conn, err := sess.Accept(ctx)
+			if err != nil {
+				return
+			}
+			if kind != tunnel.KindPortal {
+				conn.Close()
+				continue
+			}
+			go func() {
+				defer conn.Close()
+				back, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", up.port()))
+				if err != nil {
+					return
+				}
+				defer back.Close()
+				done := make(chan struct{})
+				go func() {
+					_, _ = io.Copy(back, conn)
+					close(done)
+				}()
+				_, _ = io.Copy(conn, back)
+				<-done
+			}()
+		}
+	}()
+}
+
+// TestPortalReusesConnection keeps a computer that serves keep-alive and
+// asks for five pages one after another. They must share one tunnel stream:
+// the forwarder is per host and outlives a request.
+func TestPortalReusesConnection(t *testing.T) {
+	srv, _, signer := e2eBind(t)
+	token := e2eJoin(t, srv, signer, "home")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	up := startUpstream(t)
+	sess := e2eAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
+	serveUpstream(t, ctx, sess, up)
+	var add tunnel.PortalAddResponse
+	if err := sess.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: up.port()}, &add); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	for i := 0; i < 5; i++ {
+		resp, err := client.Do(portalRequest(t, srv.HTTPAddr(), "web.box.example.com"))
+		if err != nil {
+			t.Fatalf("request %d: %v", i+1, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || string(body) != "pong" {
+			t.Fatalf("request %d: %d %q", i+1, resp.StatusCode, body)
+		}
+	}
+	if n := up.accepts.Load(); n != 1 {
+		t.Fatalf("five requests opened %d connections to the computer, want 1", n)
+	}
+	if n := up.stillOpen(); n != 1 {
+		t.Fatalf("%d connections left open after five requests, want 1", n)
+	}
 }
 
 // TestPortalWaitsForReconnect kills a computer's tunnel and brings a new
@@ -59,10 +222,12 @@ func TestPortalWaitsForReconnect(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	up := startUpstream(t)
 	hostKey, hostLine := newKey(t)
 	first := e2eAgentKey(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token, hostKey, hostLine)
+	serveUpstream(t, ctx, first, up)
 	var add tunnel.PortalAddResponse
-	if err := first.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: 3000}, &add); err != nil {
+	if err := first.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: up.port()}, &add); err != nil {
 		t.Fatal(err)
 	}
 	if body, _ := get(t, srv.HTTPAddr(), "web.box.example.com"); body != "pong" {
@@ -92,7 +257,8 @@ func TestPortalWaitsForReconnect(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	second := e2eAgentKey(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token, hostKey, hostLine)
 	defer second.Close()
-	if err := second.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: 3000}, &add); err != nil {
+	serveUpstream(t, ctx, second, up)
+	if err := second.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: up.port()}, &add); err != nil {
 		t.Fatal(err)
 	}
 	got := <-done
@@ -130,17 +296,24 @@ func TestPortalOfflineAborts(t *testing.T) {
 }
 
 // TestPortalGateReachesComputer checks that the access gate still strips
-// the token header before the request crosses the tunnel, and that the
-// computer's own status and headers come back as it sent them.
+// the token header before the request crosses the tunnel.
 func TestPortalGateReachesComputer(t *testing.T) {
 	srv, _, signer := e2eBind(t)
 	token := e2eJoin(t, srv, signer, "home")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var saw atomic.Bool
+	ln := countingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Box-Token") != "" || r.Header.Get("Authorization") != "" {
+			saw.Store(true)
+		}
+		fmt.Fprint(w, "pong")
+	}))
 	sess := e2eAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
+	serveUpstream(t, ctx, sess, ln)
 	var add tunnel.PortalAddResponse
-	if err := sess.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: 3000}, &add); err != nil {
+	if err := sess.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: ln.port()}, &add); err != nil {
 		t.Fatal(err)
 	}
 	req := portalRequest(t, srv.HTTPAddr(), "web.box.example.com")
@@ -154,7 +327,7 @@ func TestPortalGateReachesComputer(t *testing.T) {
 	if resp.StatusCode != 200 || string(body) != "pong" {
 		t.Fatalf("portal: %d %q", resp.StatusCode, body)
 	}
-	if got := resp.Header.Get("X-Saw-Gate"); got != "no" {
-		t.Fatalf("the token header reached the computer: X-Saw-Gate %q", got)
+	if saw.Load() {
+		t.Fatal("the token header reached the computer")
 	}
 }

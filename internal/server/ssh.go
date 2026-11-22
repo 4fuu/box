@@ -37,25 +37,19 @@ type sshServer struct {
 
 func newSSH(s *Server, hostKey string) (*sshServer, error) {
 	h := &sshServer{s: s}
-	// One server config per connection is used for the whole handshake, so
-	// MaxAuthTries counts keys here as it does in sshd. wish's own auth
-	// builds a fresh config for every callback, and that never counts.
 	srv, err := wish.NewServer(
 		wish.WithAddress(s.cfg.SSHAddr),
 		wish.WithHostKeyPath(hostKey),
-		func(srv *ssh.Server) error {
-			srv.PublicKeyHandler = h.publicKey
-			return nil
-		},
+		wish.WithPublicKeyAuth(h.publicKey),
 	)
 	if err != nil {
 		return nil, err
 	}
-	// Six keys per connection is sshd's own default: a key ring offers its
-	// own keys first and the bound key last, on one connection. Every
-	// refused key counts, so fewer than that would drop the connection
-	// before the bound key arrives. Failures past this still cost a new
-	// handshake, which the limiter then refuses.
+	// Six keys per connection is sshd's own default. A key ring offers its
+	// own keys first and the bound key last, all on one connection, and the
+	// config built for that connection counts every refused key. Fewer tries
+	// would drop the connection before the bound key arrives. Failures past
+	// this still cost a new handshake, which the limiter then refuses.
 	srv.ServerConfigCallback = func(ssh.Context) *gossh.ServerConfig {
 		return &gossh.ServerConfig{MaxAuthTries: 6}
 	}

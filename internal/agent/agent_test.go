@@ -570,30 +570,19 @@ func TestRunKeepsStateOnNetworkError(t *testing.T) {
 }
 
 // TestRunResetsBackoffAfterATunnel lets two failed tries grow the delay,
-// then serves a tunnel that stays up. The try after it must wait the first
-// step again, not the step the outage had grown to.
+// then serves a tunnel that stays up past tunnel.Lived and drops. The try
+// after it must wait the first step again, not the step the outage grew to.
+// The dial target comes from the SSH bootstrap reply, so the test switches
+// that reply from a closed port to the live tunnel between tries.
 func TestRunResetsBackoffAfterATunnel(t *testing.T) {
 	dir := t.TempDir()
 	setHome(t, dir)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var mu sync.Mutex
-	var waits []int
-	stop := errors.New("stop")
-	prev := waitBackoff
-	waitBackoff = func(ctx context.Context, attempt int) error {
-		mu.Lock()
-		waits = append(waits, attempt)
-		n := len(waits)
-		mu.Unlock()
-		// The first two waits follow failed tries. The third follows the
-		// try that had the tunnel, and ends the test.
-		if n == 3 {
-			return stop
-		}
-		return nil
-	}
-	t.Cleanup(func() { waitBackoff = prev })
+
+	lived := tunnel.Lived
+	tunnel.Lived = 100 * time.Millisecond
+	t.Cleanup(func() { tunnel.Lived = lived })
 
 	cert, fp, err := tunnel.NewCertificate()
 	if err != nil {
@@ -605,68 +594,75 @@ func TestRunResetsBackoffAfterATunnel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The tunnel comes up once and stays up until the test ends.
-	up := make(chan struct{})
-	go func() {
-		c, err := srv.Accept(context.Background())
-		if err != nil {
-			return
-		}
-		close(up)
-		<-ctx.Done()
-		_ = c.Close()
-	}()
-	// The server leaves with the test. Nothing else closes it, and a
-	// blocked accept would hang the test on exit.
 	t.Cleanup(func() { _ = srv.Close() })
+
+	// quicAddr is what the bootstrap reply tells the agent to dial. It starts
+	// closed so the first tries fail, then points at the live tunnel.
+	var mu sync.Mutex
+	quicAddr := freeLocal(t)
+	setQuic := func(addr string) {
+		mu.Lock()
+		quicAddr = addr
+		mu.Unlock()
+	}
 	sshAddr := startSSH(t, func(user, credential string) (string, error) {
+		mu.Lock()
+		addr := quicAddr
+		mu.Unlock()
 		raw, err := json.Marshal(map[string]any{
-			"quic":        srv.Addr(),
+			"quic":        addr,
 			"fingerprint": fp,
 			"domain":      "box.example.com",
 		})
 		return string(raw), err
 	})
-	// The first tries dial a closed port, so the delay grows before the
-	// tunnel exists.
+
+	var waits []int
+	stop := errors.New("stop")
+	prev := waitBackoff
+	waitBackoff = func(ctx context.Context, attempt int) error {
+		mu.Lock()
+		waits = append(waits, attempt)
+		n := len(waits)
+		mu.Unlock()
+		switch n {
+		case 2:
+			// The outage grew the delay; now let the next try reach the tunnel.
+			setQuic(srv.Addr())
+			return nil
+		case 3:
+			return stop
+		default:
+			return nil
+		}
+	}
+	t.Cleanup(func() { waitBackoff = prev })
+
+	// Accept the one tunnel, hold it up past Lived, then drop it so the try
+	// that had it returns and the next wait is the one the test reads.
+	go func() {
+		c, err := srv.Accept(context.Background())
+		if err != nil {
+			return
+		}
+		time.Sleep(tunnel.Lived + 100*time.Millisecond)
+		_ = c.Close()
+	}()
+
 	if err := writeComputer(dir, computer{
-		Name: "home", Token: "tok", QUIC: freeLocal(t), Fingerprint: fp,
+		Name: "home", Token: "tok", QUIC: quicAddr, Fingerprint: fp,
 		User: "alice", SSH: sshAddr,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	setSSHDial(t, freeLocal(t))
-	// After the second wait, point the computer at the tunnel. The try that
-	// comes up is the one this test reads.
-	go func() {
-		mu.Lock()
-		for len(waits) < 2 {
-			mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
-			mu.Lock()
-		}
-		mu.Unlock()
-		select {
-		case <-up:
-		case <-time.After(time.Minute):
-			t.Error("the tunnel never came up")
-			return
-		}
-		if err := writeComputer(dir, computer{
-			Name: "home", Token: "tok", QUIC: srv.Addr(), Fingerprint: fp,
-			User: "alice", SSH: sshAddr,
-		}); err != nil {
-			t.Errorf("write: %v", err)
-		}
-	}()
 	if err := Run(ctx, dir); !errors.Is(err, stop) {
 		t.Fatalf("run: %v", err)
 	}
-	_ = srv.Close()
 	mu.Lock()
 	defer mu.Unlock()
 	if len(waits) != 3 {
-		t.Fatalf("waits %v", waits)
+		t.Fatalf("waits %v, want three", waits)
 	}
 	if waits[1] < 1 {
 		t.Fatalf("waits %v: the outage never grew the delay", waits)

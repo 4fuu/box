@@ -588,9 +588,9 @@ func (s *Server) portalProxy(p store.Portal) *httputil.ReverseProxy {
 // computer may keep it open far longer; this is the server's side.
 const portalIdle = 30 * time.Second
 
-// portalProxies returns the forwarder for host, building it on first use.
-// A portal claimed again is a new row, so a port change gets a new
-// forwarder; callers close the old one's idle connections.
+// portalProxyFor returns the forwarder for host, building it on first use.
+// A reclaimed portal is a new row, so callers drop the old forwarder and the
+// next request builds one with the current port and computer.
 func (s *Server) portalProxyFor(p store.Portal) *httputil.ReverseProxy {
 	s.proxyMu.Lock()
 	defer s.proxyMu.Unlock()
@@ -602,17 +602,21 @@ func (s *Server) portalProxyFor(p store.Portal) *httputil.ReverseProxy {
 	return rp
 }
 
-// closePortalIdle closes the idle connections behind one portal host.
+// closePortalIdle drops one portal host's forwarder: it closes the idle
+// connections and forgets the proxy, so the next request rebuilds it from
+// the current portal row. Keeping the proxy would keep the port and computer
+// its dialer was built with, even after the label is reclaimed on a new port.
 func (s *Server) closePortalIdle(host string) {
 	s.proxyMu.Lock()
 	defer s.proxyMu.Unlock()
 	if rp := s.proxies[host]; rp != nil {
 		rp.Transport.(*http.Transport).CloseIdleConnections()
+		delete(s.proxies, host)
 	}
 }
 
-// dropPortalIdle closes the idle connections of every portal on a computer.
-// The forwarder stays, so the next request dials the tunnel afresh.
+// dropPortalIdle drops the forwarders of every portal on a computer, so the
+// next request dials the tunnel afresh and reads the current port.
 func (s *Server) dropPortalIdle(computer string) {
 	list, err := s.store.PortalsByComputer(computer)
 	if err != nil {

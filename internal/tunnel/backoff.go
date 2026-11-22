@@ -4,8 +4,9 @@ import "time"
 
 // Lived is how long a tunnel must stay up before the agent counts it as a
 // reconnect and starts its backoff over. A server that accepts and drops at
-// once keeps the delay growing instead of becoming a tight loop.
-const Lived = 5 * time.Second
+// once keeps the delay growing instead of becoming a tight loop. It is a var
+// so a test can watch the reset without waiting out five seconds.
+var Lived = 5 * time.Second
 
 // Backoff is the reconnect delay for attempt, starting at 1s and capped at 30s.
 // jitter is in [0, 1). The same jitter always yields the same delay.

@@ -779,3 +779,42 @@ func TestSpliceDisabledWithoutHostKey(t *testing.T) {
 		t.Fatalf("ls does not show the disabled state:\n%s", out)
 	}
 }
+
+// TestAuthTriesAllowAKeyRing offers four unbound keys before the bound one,
+// all in a single publickey method the way ssh-agent does. Five attempts must
+// fit inside MaxAuthTries so the bound key still authenticates; a smaller
+// limit drops the connection before it arrives.
+func TestAuthTriesAllowAKeyRing(t *testing.T) {
+	srv, _, signer := e2eBind(t)
+	signers := make([]gossh.Signer, 0, 5)
+	for i := 0; i < 4; i++ {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := gossh.NewSignerFromKey(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signers = append(signers, s)
+	}
+	signers = append(signers, signer)
+	client, err := gossh.Dial("tcp", srv.SSHAddr(), &gossh.ClientConfig{
+		User:            "box",
+		Auth:            []gossh.AuthMethod{gossh.PublicKeys(signers...)},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("bound key after a key ring: %v", err)
+	}
+	defer client.Close()
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if out, err := sess.Output("whoami"); err != nil || !strings.HasPrefix(string(out), "SHA256:") {
+		t.Fatalf("whoami: %q %v", out, err)
+	}
+}

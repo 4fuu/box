@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -186,7 +187,7 @@ func TestPortalReusesConnection(t *testing.T) {
 	defer cancel()
 
 	up := startUpstream(t)
-	sess := e2eAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
+	sess := bareAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
 	serveUpstream(t, ctx, sess, up)
 	var add tunnel.PortalAddResponse
 	if err := sess.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: up.port()}, &add); err != nil {
@@ -310,7 +311,7 @@ func TestPortalGateReachesComputer(t *testing.T) {
 		}
 		fmt.Fprint(w, "pong")
 	}))
-	sess := e2eAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
+	sess := bareAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
 	serveUpstream(t, ctx, sess, ln)
 	var add tunnel.PortalAddResponse
 	if err := sess.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: ln.port()}, &add); err != nil {
@@ -329,5 +330,85 @@ func TestPortalGateReachesComputer(t *testing.T) {
 	}
 	if saw.Load() {
 		t.Fatal("the token header reached the computer")
+	}
+}
+
+// bareAgent is a fake computer that says hello but does not accept streams
+// itself, so the test's own handler is the only one serving portals. e2eAgent
+// answers portals with httpPong on its own, which would race a test handler.
+func bareAgent(t *testing.T, ctx context.Context, addr, fingerprint, token string) *tunnel.Session {
+	t.Helper()
+	_, hostLine := newKey(t)
+	sess, err := tunnel.Dial(ctx, addr, fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.Hello(ctx, tunnel.Identity{
+		Name: "home", Token: token, User: "alice", HostKey: hostLine, AgentVersion: "e2e",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess.Handle(func(string, json.RawMessage) (any, error) { return nil, nil })
+	return sess
+}
+
+// serveByPort is a fake computer that forwards each portal stream to the
+// loopback port the stream names, so a test can serve different ports.
+func serveByPort(t *testing.T, ctx context.Context, sess *tunnel.Session) {
+	t.Helper()
+	go func() {
+		for {
+			kind, port, conn, err := sess.Accept(ctx)
+			if err != nil {
+				return
+			}
+			if kind != tunnel.KindPortal {
+				conn.Close()
+				continue
+			}
+			go func() {
+				defer conn.Close()
+				back, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+				if err != nil {
+					return
+				}
+				defer back.Close()
+				done := make(chan struct{})
+				go func() {
+					_, _ = io.Copy(back, conn)
+					close(done)
+				}()
+				_, _ = io.Copy(conn, back)
+				<-done
+			}()
+		}
+	}()
+}
+
+// TestPortalPortChange reclaims a portal label on a new port. The forwarder
+// is cached per host, so it must pick up the new port rather than keep
+// dialing the one it was built with.
+func TestPortalPortChange(t *testing.T) {
+	srv, _, signer := e2eBind(t)
+	token := e2eJoin(t, srv, signer, "home")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	upA := countingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "A") }))
+	upB := countingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "B") }))
+	sess := bareAgent(t, ctx, srv.QUICAddr(), srv.QUICFingerprint(), token)
+	serveByPort(t, ctx, sess)
+	var add tunnel.PortalAddResponse
+	if err := sess.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: upA.port()}, &add); err != nil {
+		t.Fatal(err)
+	}
+	if body, _ := get(t, srv.HTTPAddr(), "web.box.example.com"); body != "A" {
+		t.Fatalf("before the port change: %q", body)
+	}
+	if err := sess.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: upB.port()}, &add); err != nil {
+		t.Fatal(err)
+	}
+	if body, _ := get(t, srv.HTTPAddr(), "web.box.example.com"); body != "B" {
+		t.Fatalf("after the port change: %q, want B (the forwarder kept the old port)", body)
 	}
 }

@@ -74,8 +74,12 @@ func (m *model) viewBody() string {
 
 func (m *model) viewHeader() string {
 	line := m.styles.title.Render("box")
-	if m.snap.Domain != "" {
-		domain := "  " + m.snap.Domain
+	domains := m.snap.Domains
+	if len(domains) == 0 && m.snap.Domain != "" {
+		domains = []string{m.snap.Domain}
+	}
+	if len(domains) > 0 {
+		domain := "  " + strings.Join(domains, ", ")
 		if m.width > 0 {
 			domain = trunc(domain, m.width-4)
 		}

@@ -13,7 +13,7 @@ This computer is a machine. `box` talks to the local agent on this machine. This
 box domain
 ```
 
-Prints the parent domain, such as `box.example.com`. Portal labels join it.
+Prints every parent domain the server serves, one per line, such as `box.example.com` and `second.example`. A portal label joins one of them.
 
 ## Portals
 
@@ -23,11 +23,12 @@ Claim a hostname for a process that listens on `127.0.0.1`:
 box portal check web
 box portal add web 3000
 box portal add lock 3000 private
+box portal add web 3000 --domain second.example
 box portal ls
 box portal rm web
 ```
 
-`web` becomes `web.box.example.com` and routes to port 3000. A label has no dot; `event` and `auth` are reserved. `add` is public by default; `private` needs an access token created on the server — this machine does not create tokens.
+With one configured domain, `--domain` is optional. With several, `check`, `add`, and `rm` require it. `web` on `second.example` becomes `web.second.example` and routes to port 3000. A label has no dot; `event` and `auth` are reserved. `add` is public by default; `private` needs an access token created on the server — this machine does not create tokens.
 
 ## Events
 

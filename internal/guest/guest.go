@@ -38,6 +38,12 @@ func Run(ctx context.Context, socket string, args []string, stdin io.Reader, std
 		if err := call(context.Background(), socket, rpc.OpDomain, nil, &out); err != nil {
 			return err
 		}
+		if len(out.Domains) > 0 {
+			for _, domain := range out.Domains {
+				fmt.Fprintln(stdout, domain)
+			}
+			return nil
+		}
 		fmt.Fprintln(stdout, out.Domain)
 		return nil
 	case "portal":
@@ -64,13 +70,16 @@ const helpText = `box on a computer: guest commands, over the agent socket
 
 usage: box <command> [args]
 
-  domain   print the server's domain; portal labels join it
-  portal check <label>   report whether a portal label is free or who holds it
-  portal add <label> <port> [public|private]   claim a label for a loopback
-      port; public needs nothing, private needs an access token, and claiming
-      again changes the access
+  domain   print the domains this server serves, one per line
+  portal check <label> [--domain <domain>]   report whether a portal label is
+      free on that domain or who holds it
+  portal add <label> <port> [public|private] [--domain <domain>]   claim a
+      label for a loopback port on that domain; public needs nothing, private
+      needs an access token, and claiming again changes the access
   portal ls   list this computer's portals and their access
-  portal rm <label>   release a portal
+  portal rm <label> [--domain <domain>]   release a portal
+    --domain <domain>   which configured domain to use; required when the
+                        server serves more than one
   event pub <topic> [text...] [--key k]   publish an event as this computer;
       with no text the body is stdin; --key dedups, so the same from and key
       returns the original event
@@ -97,11 +106,12 @@ func portal(socket string, args []string, stdout io.Writer) error {
 	}
 	switch args[0] {
 	case "check":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: box portal check <label>")
+		pos, domain, err := portalArgs(args[1:])
+		if err != nil || len(pos) != 1 {
+			return fmt.Errorf("usage: box portal check <label> [--domain <domain>]")
 		}
 		var out rpc.PortalResult
-		if err := call(context.Background(), socket, rpc.OpPortalCheck, rpc.PortalBody{Label: args[1]}, &out); err != nil {
+		if err := call(context.Background(), socket, rpc.OpPortalCheck, rpc.PortalBody{Label: pos[0], Domain: domain}, &out); err != nil {
 			return err
 		}
 		if out.Free {
@@ -115,25 +125,26 @@ func portal(socket string, args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "taken")
 		return nil
 	case "add":
-		if len(args) != 3 && len(args) != 4 {
-			return fmt.Errorf("usage: box portal add <label> <port> [public|private]")
+		pos, domain, err := portalArgs(args[1:])
+		if err != nil || (len(pos) != 2 && len(pos) != 3) {
+			return fmt.Errorf("usage: box portal add <label> <port> [public|private] [--domain <domain>]")
 		}
-		port, err := parsePort(args[2])
+		port, err := parsePort(pos[1])
 		if err != nil {
 			return err
 		}
 		private := false
-		if len(args) == 4 {
-			switch args[3] {
+		if len(pos) == 3 {
+			switch pos[2] {
 			case "public":
 			case "private":
 				private = true
 			default:
-				return fmt.Errorf("usage: box portal add <label> <port> [public|private]")
+				return fmt.Errorf("usage: box portal add <label> <port> [public|private] [--domain <domain>]")
 			}
 		}
 		var out rpc.PortalResult
-		if err := call(context.Background(), socket, rpc.OpPortalAdd, rpc.PortalBody{Label: args[1], Port: port, Private: private}, &out); err != nil {
+		if err := call(context.Background(), socket, rpc.OpPortalAdd, rpc.PortalBody{Label: pos[0], Domain: domain, Port: port, Private: private}, &out); err != nil {
 			return err
 		}
 		fmt.Fprintln(stdout, out.URL)
@@ -145,21 +156,48 @@ func portal(socket string, args []string, stdout io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "HOST\tPORT\tACCESS\n")
 		for _, p := range out.Portals {
+			host := p.Label
+			if p.Domain != "" {
+				host = p.Label + "." + p.Domain
+			}
 			access := "public"
 			if p.Private {
 				access = "private"
 			}
-			fmt.Fprintf(stdout, "%s\t%d\t%s\n", p.Label, p.Port, access)
+			fmt.Fprintf(stdout, "%s\t%d\t%s\n", host, p.Port, access)
 		}
 		return nil
 	case "rm":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: box portal rm <label>")
+		pos, domain, err := portalArgs(args[1:])
+		if err != nil || len(pos) != 1 {
+			return fmt.Errorf("usage: box portal rm <label> [--domain <domain>]")
 		}
-		return call(context.Background(), socket, rpc.OpPortalRm, rpc.PortalBody{Label: args[1]}, nil)
+		return call(context.Background(), socket, rpc.OpPortalRm, rpc.PortalBody{Label: pos[0], Domain: domain}, nil)
 	default:
 		return fmt.Errorf("usage: box portal check|add|ls|rm")
 	}
+}
+
+// portalArgs pulls --domain out of a portal command's arguments and leaves
+// the positionals in order.
+func portalArgs(args []string) ([]string, string, error) {
+	pos := make([]string, 0, len(args))
+	domain := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] != "--domain" {
+			pos = append(pos, args[i])
+			continue
+		}
+		if domain != "" {
+			return nil, "", fmt.Errorf("--domain given twice")
+		}
+		if i+1 >= len(args) {
+			return nil, "", fmt.Errorf("missing value for --domain")
+		}
+		i++
+		domain = args[i]
+	}
+	return pos, domain, nil
 }
 
 const eventUsage = "usage: box event pub <topic> [text...] [--key k] | box event get [--since n] [--topic t]... [--from f]... [--limit n] [--wait s] [--json] [--follow]"

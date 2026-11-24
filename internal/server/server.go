@@ -36,10 +36,11 @@ import (
 )
 
 // Config is how the server process is started.
-// Domain is required the first time. Later starts reuse the stored domain
-// and the stored listen addresses; flags are ignored once those exist.
+// Domains are required the first time. Later starts keep the stored domains,
+// append new ones, and reuse the stored listen addresses; address flags are
+// ignored once those exist.
 type Config struct {
-	Domain     string
+	Domains    []string
 	DataDir    string
 	SSHAddr    string
 	HTTPAddr   string
@@ -118,7 +119,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	domain, err := persistedDomain(st, cfg.Domain)
+	domains, err := persistedDomains(st, cfg.Domains)
 	if err != nil {
 		st.Close()
 		return nil, err
@@ -163,7 +164,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	svc := &control.Service{
 		Store:        st,
-		Domain:       domain,
+		Domains:      domains,
 		SplicePublic: strings.TrimSpace(spliceLine),
 		Queue:        approve.New(),
 		Live:         control.NewLive(),
@@ -197,25 +198,57 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	return s, nil
 }
 
-func persistedDomain(st *store.Store, flag string) (string, error) {
-	stored, ok, err := st.Meta("domain")
+// persistedDomains returns the stored domains plus any new ones named by
+// flags. The first domain is the primary and never changes once stored.
+func persistedDomains(st *store.Store, flags []string) ([]string, error) {
+	stored, err := storedDomains(st)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if ok && stored != "" {
-		return stored, nil
+	all := append(append([]string{}, stored...), flags...)
+	if len(all) == 0 {
+		return nil, errors.New("domain is set when the server starts: box serve --domain <domain>")
 	}
-	if strings.TrimSpace(flag) == "" {
-		return "", errors.New("domain is set when the server starts: box serve --domain <domain>")
-	}
-	domain, err := ident.Domain(flag)
+	domains, err := ident.Domains(all)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if err := st.SetMeta("domain", domain); err != nil {
-		return "", err
+	raw, err := json.Marshal(domains)
+	if err != nil {
+		return nil, err
 	}
-	return domain, nil
+	if err := st.SetMeta("domains", string(raw)); err != nil {
+		return nil, err
+	}
+	// Keep the primary under the old key so a downgrade still has one.
+	if err := st.SetMeta("domain", domains[0]); err != nil {
+		return nil, err
+	}
+	return domains, nil
+}
+
+func storedDomains(st *store.Store) ([]string, error) {
+	raw, ok, err := st.Meta("domains")
+	if err != nil {
+		return nil, err
+	}
+	if ok && strings.TrimSpace(raw) != "" {
+		var list []string
+		if err := json.Unmarshal([]byte(raw), &list); err != nil {
+			return nil, fmt.Errorf("stored domains: %w", err)
+		}
+		if len(list) > 0 {
+			return ident.Domains(list)
+		}
+	}
+	one, ok, err := st.Meta("domain")
+	if err != nil {
+		return nil, err
+	}
+	if ok && strings.TrimSpace(one) != "" {
+		return ident.Domains([]string{one})
+	}
+	return nil, nil
 }
 
 func persistedAddrs(st *store.Store, sshAddr, httpAddr, quicAddr string) (string, string, string, error) {
@@ -351,7 +384,7 @@ func (s *Server) onHello(id tunnel.Identity) (tunnel.HelloResult, error) {
 			return tunnel.HelloResult{}, errors.New("unauthorized")
 		}
 	}
-	return tunnel.HelloResult{Domain: s.svc.Domain}, nil
+	return tunnel.HelloResult{Domain: s.svc.PrimaryDomain(), Domains: s.svc.Domains}, nil
 }
 
 func (s *Server) attach(c *tunnel.Conn) {
@@ -395,13 +428,13 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 		name := s.svc.Live.CurrentName(c)
 		switch op {
 		case rpc.OpDomain:
-			return rpc.DomainBody{Domain: s.svc.Domain}, nil
+			return rpc.DomainBody{Domain: s.svc.PrimaryDomain(), Domains: s.svc.Domains}, nil
 		case tunnel.OpPortalCheck:
 			var req tunnel.PortalCheckRequest
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, errors.New("bad request")
 			}
-			return s.svc.CheckPortal(req.Label)
+			return s.svc.CheckPortal(req.Label, req.Domain)
 		case tunnel.OpPortalAdd:
 			var req tunnel.PortalAddRequest
 			if err := json.Unmarshal(body, &req); err != nil {
@@ -409,14 +442,14 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 			}
 			// A new row may be a new port behind the same host.
 			s.dropPortalIdle(name)
-			return s.svc.AddPortal(name, req.Label, req.Port, req.Private)
+			return s.svc.AddPortal(name, req.Label, req.Domain, req.Port, req.Private)
 		case tunnel.OpPortalRm:
 			var req tunnel.PortalRmRequest
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, errors.New("bad request")
 			}
 			s.dropPortalIdle(name)
-			return nil, s.svc.RemovePortal(name, req.Label)
+			return nil, s.svc.RemovePortal(name, req.Label, req.Domain)
 		case tunnel.OpPortalLs:
 			return s.svc.ListPortals(name)
 		case tunnel.OpEventPub:
@@ -457,7 +490,7 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 }
 
 func (s *Server) quicEndpoint() string {
-	return fmt.Sprintf("%s:%d", s.svc.Domain, s.quicPort)
+	return fmt.Sprintf("%s:%d", s.svc.PrimaryDomain(), s.quicPort)
 }
 
 // HTTPAddr is the HTTP port that was bound.

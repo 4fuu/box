@@ -14,7 +14,8 @@ sit behind NAT.
 `ssh box.example.com` opens the control REPL. `ssh web@box.example.com`
 opens a shell on the computer named `web`, at that machine's own sshd — so
 `scp`, rsync, SFTP, and VS Code Remote-SSH work too. A site on a machine
-gets a hostname: `box portal add web 3000` claims `web.<domain>`.
+gets a hostname: `box portal add web 3000` claims `web.<domain>`; when the
+server serves several domains, pass `--domain` to choose one.
 
 > [!WARNING]
 > This is not a multi-tenant host. The HTTP port is plain HTTP; TLS, if
@@ -39,9 +40,9 @@ The installer asks for English or Chinese, then server or computer, and
 installs the `box` binary.
 
 A server install can add a systemd unit. Open SSH (`:22`), HTTP (`:80`),
-and QUIC (`:7443`, UDP), then run `box serve --domain box.example.com`.
-The first start prints a one-time password; the first SSH client to
-present it binds its key.
+and QUIC (`:7443`, UDP), then run `box serve --domain box.example.com`
+(repeat `--domain` for more). The first start prints a one-time password;
+the first SSH client to present it binds its key.
 
 A computer install runs `box join <domain>`. Approve the printed code at
 the server, and keep `box agent` running (systemd user unit).

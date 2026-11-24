@@ -61,4 +61,17 @@ func TestDomain(t *testing.T) {
 	if _, err := Domain("http://box.example.com"); err == nil {
 		t.Fatal("scheme")
 	}
+	if _, err := Domain("one.example,two.example"); err == nil {
+		t.Fatal("comma")
+	}
+}
+
+func TestDomains(t *testing.T) {
+	got, err := Domains([]string{"Box.Example.com.", "second.example", "box.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "box.example.com" || got[1] != "second.example" {
+		t.Fatalf("%v", got)
+	}
 }

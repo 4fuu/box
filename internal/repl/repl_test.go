@@ -156,12 +156,12 @@ func TestPlainAndJSONLists(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 	svc := &control.Service{
-		Store: st, Domain: "box.example.com", Queue: approve.New(), Live: control.NewLive(),
+		Store: st, Domains: []string{"box.example.com"}, Queue: approve.New(), Live: control.NewLive(),
 	}
 	if err := st.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddPortal("home", "web", 3000, false); err != nil {
+	if _, err := svc.AddPortal("home", "web", "", 3000, false); err != nil {
 		t.Fatal(err)
 	}
 	const secretValue = "ghp_secret_value"
@@ -202,7 +202,7 @@ func TestPlainAndJSONLists(t *testing.T) {
 	}
 
 	check([]string{"ls"}, []string{"NAME", "ONLINE", "USER", "ADDRESS", "AGENT", "PORTALS", "home", "alice", "web"}, []string{secretValue, code})
-	check([]string{"ls", "--json"}, []string{`"name":"home"`, `"online":false`, `"user":"alice"`, `"web"`}, []string{secretValue, code, "\x1b"})
+	check([]string{"ls", "--json"}, []string{`"name":"home"`, `"online":false`, `"user":"alice"`, `"web.box.example.com"`}, []string{secretValue, code, "\x1b"})
 	check([]string{"pending"}, []string{"NAME", "ADDRESS", "laptop", "bob"}, []string{code, secret.Hash(code), secretValue})
 	check([]string{"--json", "pending"}, []string{`"name":"laptop"`, `"user":"bob"`}, []string{code, secret.Hash(code)})
 	check([]string{"env", "ls"}, []string{"GH_TOKEN"}, []string{secretValue})

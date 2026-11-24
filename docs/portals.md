@@ -4,15 +4,15 @@
 
 A portal is a hostname routed to one TCP port on one computer. The computer claims it; the REPL does not.
 
-`check` and `add` take a label; the server joins it to the domain set at server start (`box domain` prints it). A label cannot contain a dot; `event` and `auth` are reserved. `add` claims atomically or refuses and names the holder. A computer can hold several labels, each on one port. Hostnames are globally unique and not derived from the computer's name.
+`check`, `add`, and `rm` take a label and a domain. The server serves one or more parent domains (`box domain` lists them), and the portal host is the label joined to the chosen domain. With one domain the choice is implied; with several, pass `--domain <domain>`. A label cannot contain a dot; `event` and `auth` are reserved. `add` claims atomically or refuses and names the holder. A computer can hold several labels, each on one port, and the same label can live on different domains under different computers. Hostnames are globally unique and not derived from the computer's name.
 
-`box portal add <label> <port>` is public; appending `private` requires an access token. Claiming the label again changes that. Existing rows stay public.
+`box portal add <label> <port> [public|private] [--domain <domain>]` is public; appending `private` requires an access token. Claiming the same label on the same domain again changes that. Existing rows stay public. `box portal ls` prints each claim's full hostname, so a claim is unambiguous when the server serves several domains.
 
 A request with a claimed `Host` opens a `portal` stream, which the agent connects to `127.0.0.1:<port>`, so the process only needs loopback. The route exists before anything listens. The printed URL carries no port; the edge decides the reachable one.
 
 The server forwards the request as the client sent it and answers with what the computer sends. When no stream can be opened, the request is aborted instead of answered, so the client sees the connection end and the server invents no status. If the stream fails while forwarding a request, the server does not resend it; the client decides whether to try again. Before forwarding, the server waits up to 3 seconds if the computer has no live tunnel.
 
-A private portal checks the token before opening the stream. A browser navigation (`Accept` contains `text/html`) without one is redirected to `http://auth.<domain>/`, which sets an HttpOnly cookie on the parent domain once a valid token is submitted. Other clients send `X-Box-Token` or `Authorization: Bearer` and get 401 without it. The server strips that cookie, and a bearer token that is one of its access tokens, before forwarding. One token opens every private portal.
+A private portal checks the token before opening the stream. A browser navigation (`Accept` contains `text/html`) without one is redirected to `http://auth.<domain>/` for that portal's domain, which sets an HttpOnly cookie on the same parent domain once a valid token is submitted. Other clients send `X-Box-Token` or `Authorization: Bearer` and get 401 without it. The server strips that cookie, and a bearer token that is one of its access tokens, before forwarding. One token opens every private portal; a browser signs in once per parent domain.
 
 Removing a computer drops its portals. Claims live on the server; routes live while the tunnel does.
 

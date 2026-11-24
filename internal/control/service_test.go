@@ -21,7 +21,7 @@ func newSvc(t *testing.T) *Service {
 	}
 	t.Cleanup(func() { st.Close() })
 	return &Service{
-		Store: st, Domain: "box.example.com", Queue: approve.New(), Live: NewLive(),
+		Store: st, Domains: []string{"box.example.com"}, Queue: approve.New(), Live: NewLive(),
 		SplicePublic: "ssh-ed25519 AAAASPLICE box-splice",
 	}
 }
@@ -94,17 +94,17 @@ func TestPortalHoldRenameRemove(t *testing.T) {
 	if err := svc.Store.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddPortal("home", "web.other", 80, false); err == nil {
+	if _, err := svc.AddPortal("home", "web.other", "", 80, false); err == nil {
 		t.Fatal("dot label")
 	}
-	res, err := svc.AddPortal("home", "web", 3000, false)
+	res, err := svc.AddPortal("home", "web", "", 3000, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.URL != "http://web.box.example.com" || res.Host != "web.box.example.com" || res.Port != 3000 {
 		t.Fatalf("%+v", res)
 	}
-	res, err = svc.AddPortal("home", "api", 4000, true)
+	res, err = svc.AddPortal("home", "api", "", 4000, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,17 +114,17 @@ func TestPortalHoldRenameRemove(t *testing.T) {
 	if err := svc.Store.CreateComputer("other", secret.Hash("tok2"), "bob"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddPortal("other", "web", 1, false); err == nil || !strings.Contains(err.Error(), "held by home") {
+	if _, err := svc.AddPortal("other", "web", "", 1, false); err == nil || !strings.Contains(err.Error(), "held by home") {
 		t.Fatal(err)
 	}
-	check, err := svc.CheckPortal("web")
+	check, err := svc.CheckPortal("web", "")
 	if err != nil || check.Free || check.Holder != "home" {
 		t.Fatalf("%+v %v", check, err)
 	}
 	if err := svc.Rename("home", "house"); err != nil {
 		t.Fatal(err)
 	}
-	check, err = svc.CheckPortal("web")
+	check, err = svc.CheckPortal("web", "")
 	if err != nil || check.Holder != "house" {
 		t.Fatalf("%+v %v", check, err)
 	}
@@ -144,14 +144,58 @@ func TestPortalHoldRenameRemove(t *testing.T) {
 	if err := svc.Remove("house"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CheckPortal("web"); err != nil {
+	if _, err := svc.CheckPortal("web", ""); err != nil {
 		t.Fatal(err)
 	}
-	free, err := svc.CheckPortal("web")
+	free, err := svc.CheckPortal("web", "")
 	if err != nil || !free.Free {
 		t.Fatalf("%+v %v", free, err)
 	}
 	if _, err := svc.Stat(context.Background(), "house"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatal(err)
+	}
+}
+
+func TestPortalDomainChoice(t *testing.T) {
+	svc := newSvc(t)
+	svc.Domains = []string{"box.example.com", "other.example"}
+	for _, name := range []string{"home", "other"} {
+		if err := svc.Store.CreateComputer(name, secret.Hash("tok-"+name), "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := svc.AddPortal("home", "web", "", 3000, false); err == nil || !strings.Contains(err.Error(), "choose a domain") {
+		t.Fatalf("missing domain: %v", err)
+	}
+	if _, err := svc.AddPortal("home", "web", "unknown.example", 3000, false); err == nil || !strings.Contains(err.Error(), "unknown domain") {
+		t.Fatalf("unknown domain: %v", err)
+	}
+	res, err := svc.AddPortal("home", "web", "other.example", 3000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Host != "web.other.example" || res.URL != "http://web.other.example" {
+		t.Fatalf("%+v", res)
+	}
+	check, err := svc.CheckPortal("web", "box.example.com")
+	if err != nil || !check.Free {
+		t.Fatalf("same label on another domain: %+v %v", check, err)
+	}
+	if _, err := svc.AddPortal("other", "web", "box.example.com", 4000, false); err != nil {
+		t.Fatal(err)
+	}
+	check, err = svc.CheckPortal("web", "other.example")
+	if err != nil || check.Free || check.Holder != "home" {
+		t.Fatalf("check on chosen domain: %+v %v", check, err)
+	}
+	list, err := svc.ListPortals("home")
+	if err != nil || len(list.Portals) != 1 || list.Portals[0].Label != "web" || list.Portals[0].Domain != "other.example" {
+		t.Fatalf("list %+v %v", list, err)
+	}
+	if err := svc.RemovePortal("home", "web", "box.example.com"); err == nil || !strings.Contains(err.Error(), "not claimed") {
+		t.Fatalf("removed the wrong domain: %v", err)
+	}
+	if err := svc.RemovePortal("home", "web", "other.example"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -240,7 +284,7 @@ func TestSnapshotOmitsSecrets(t *testing.T) {
 	if err := svc.Store.CreateComputer("home", secret.Hash("tok"), "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddPortal("home", "web", 3000, false); err != nil {
+	if _, err := svc.AddPortal("home", "web", "", 3000, false); err != nil {
 		t.Fatal(err)
 	}
 	code := "a3Kf9Q"

@@ -320,14 +320,14 @@ func TestRun(t *testing.T) {
 		seenMu.Unlock()
 		switch op {
 		case rpc.OpDomain:
-			return rpc.DomainBody{Domain: "from-handler.example"}, nil
+			return rpc.DomainBody{Domain: "from-handler.example", Domains: []string{"from-handler.example", "second.example"}}, nil
 		case tunnel.OpPortalCheck:
 			var req tunnel.PortalCheckRequest
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, err
 			}
-			if req.Label != "web" {
-				return nil, errors.New("bad label")
+			if req.Label != "web" || req.Domain != "second.example" {
+				return nil, errors.New("bad check")
 			}
 			return tunnel.PortalCheckResponse{Free: false, Holder: "other"}, nil
 		case tunnel.OpPortalAdd:
@@ -335,18 +335,18 @@ func TestRun(t *testing.T) {
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, err
 			}
-			if req.Label != "web" || req.Port != 3000 {
+			if req.Label != "web" || req.Domain != "second.example" || req.Port != 3000 {
 				return nil, errors.New("bad add")
 			}
-			return tunnel.PortalAddResponse{URL: "http://web.box.example.com", Host: "web.box.example.com", Port: 3000}, nil
+			return tunnel.PortalAddResponse{URL: "http://web.second.example", Host: "web.second.example", Port: 3000}, nil
 		case tunnel.OpPortalLs:
-			return tunnel.PortalList{Portals: []tunnel.Portal{{Label: "web", Port: 3000}}}, nil
+			return tunnel.PortalList{Portals: []tunnel.Portal{{Label: "web", Domain: "second.example", Port: 3000}}}, nil
 		case tunnel.OpPortalRm:
 			var req tunnel.PortalRmRequest
 			if err := json.Unmarshal(body, &req); err != nil {
 				return nil, err
 			}
-			if req.Label != "web" {
+			if req.Label != "web" || req.Domain != "second.example" {
 				return nil, errors.New("bad rm")
 			}
 			return nil, nil
@@ -356,19 +356,19 @@ func TestRun(t *testing.T) {
 	})
 
 	sock := filepath.Join(dir, "agent.sock")
-	if got := guestRetry(t, sock, "domain"); got != "from-handler.example\n" {
+	if got := guestRetry(t, sock, "domain"); got != "from-handler.example\nsecond.example\n" {
 		t.Fatalf("domain %q", got)
 	}
-	if got := guestOnce(t, sock, "portal", "check", "web"); got != "taken by other\n" {
+	if got := guestOnce(t, sock, "portal", "check", "web", "--domain", "second.example"); got != "taken by other\n" {
 		t.Fatalf("check %q", got)
 	}
-	if got := guestOnce(t, sock, "portal", "add", "web", "3000"); got != "http://web.box.example.com\n" {
+	if got := guestOnce(t, sock, "portal", "add", "web", "3000", "--domain", "second.example"); got != "http://web.second.example\n" {
 		t.Fatalf("add %q", got)
 	}
-	if got := guestOnce(t, sock, "portal", "ls"); got != "HOST\tPORT\tACCESS\nweb\t3000\tpublic\n" {
+	if got := guestOnce(t, sock, "portal", "ls"); got != "HOST\tPORT\tACCESS\nweb.second.example\t3000\tpublic\n" {
 		t.Fatalf("ls %q", got)
 	}
-	if got := guestOnce(t, sock, "portal", "rm", "web"); got != "" {
+	if got := guestOnce(t, sock, "portal", "rm", "web", "--domain", "second.example"); got != "" {
 		t.Fatalf("rm %q", got)
 	}
 	seenMu.Lock()

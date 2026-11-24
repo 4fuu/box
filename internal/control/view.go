@@ -161,7 +161,11 @@ func FormatStatus(st Status, asJSON bool) (string, error) {
 	if asJSON {
 		return asJSONString(st)
 	}
-	return fmt.Sprintf("domain: %s\nkeys: %d\ncomputers: %d\n", st.Domain, st.Keys, st.Computers), nil
+	domains := st.Domains
+	if len(domains) == 0 && st.Domain != "" {
+		domains = []string{st.Domain}
+	}
+	return fmt.Sprintf("domain: %s\nkeys: %d\ncomputers: %d\n", strings.Join(domains, ", "), st.Keys, st.Computers), nil
 }
 
 func asJSONString(v any) (string, error) {

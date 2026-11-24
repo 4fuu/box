@@ -4,6 +4,7 @@ import "time"
 
 type PortalBody struct {
 	Label   string `json:"label"`
+	Domain  string `json:"domain,omitempty"`
 	Port    int    `json:"port,omitempty"`
 	Private bool   `json:"private,omitempty"`
 }
@@ -22,6 +23,7 @@ type PortalList struct {
 
 type PortalItem struct {
 	Label   string `json:"label"`
+	Domain  string `json:"domain,omitempty"`
 	Port    int    `json:"port"`
 	Private bool   `json:"private,omitempty"`
 }
@@ -71,7 +73,8 @@ type EventList struct {
 }
 
 type DomainBody struct {
-	Domain string `json:"domain"`
+	Domain  string   `json:"domain"`
+	Domains []string `json:"domains,omitempty"`
 }
 
 // SSHDEnableResult reports what box sshd enable did. Output is the

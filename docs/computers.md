@@ -50,11 +50,12 @@ On a computer, `box` is the guest CLI on the agent socket `~/.box/agent.sock` (a
 ```
 box domain
 box.example.com
-box portal check web
+second.example
+box portal check web --domain second.example
 free
-box portal add web 3000
-http://web.box.example.com
-box portal add lock 3000 private
+box portal add web 3000 --domain second.example
+http://web.second.example
+box portal add lock 3000 private --domain box.example.com
 box event pub door open
 box event get --since 0
 box event get --follow --topic door
@@ -62,4 +63,4 @@ box sshd enable
 box help
 ```
 
-`box help` prints the guest help, and bare `box` prints it too. See [portals](portals.md) and [events](events.md) for what the commands do.
+`box domain` prints every parent domain the server serves, one per line. When it serves one, `--domain` is optional; when it serves several, `check`, `add`, and `rm` require it. `box help` prints the guest help, and bare `box` prints it too. See [portals](portals.md) and [events](events.md) for what the commands do.

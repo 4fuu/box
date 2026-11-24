@@ -215,7 +215,7 @@ func (h *sshServer) serveBootstrap(sess ssh.Session) {
 	_ = json.NewEncoder(sess).Encode(map[string]any{
 		"quic":        h.s.quicEndpoint(),
 		"fingerprint": h.s.fingerprint,
-		"domain":      h.s.svc.Domain,
+		"domain":      h.s.svc.PrimaryDomain(),
 	})
 	_ = sess.Exit(0)
 }

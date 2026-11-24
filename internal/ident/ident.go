@@ -65,17 +65,36 @@ func Env(name string) error {
 	return nil
 }
 
-// Domain is the parent domain set when the server starts.
+// Domain is one parent domain set when the server starts.
 func Domain(d string) (string, error) {
 	d = strings.ToLower(strings.TrimSpace(d))
 	d = strings.TrimSuffix(d, ".")
-	if d == "" || strings.ContainsAny(d, " /\\:@") || strings.Contains(d, "..") {
+	if d == "" || strings.ContainsAny(d, " /\\:@,") || strings.Contains(d, "..") {
 		return "", errors.New("invalid domain")
 	}
 	return d, nil
 }
 
-// Hostname joins a label to the configured domain.
+// Domains normalizes parent domains in order. The first is the primary.
+// Duplicates are dropped.
+func Domains(list []string) ([]string, error) {
+	out := make([]string, 0, len(list))
+	seen := make(map[string]bool, len(list))
+	for _, raw := range list {
+		d, err := Domain(raw)
+		if err != nil {
+			return nil, err
+		}
+		if seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// Hostname joins a label to a configured domain.
 func Hostname(label, domain string) string {
 	return label + "." + domain
 }

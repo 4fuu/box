@@ -46,7 +46,7 @@ func TestLoopbackComputers(t *testing.T) {
 	dir := t.TempDir()
 	var greet bytes.Buffer
 	srv, err := server.Start(context.Background(), server.Config{
-		Domain: "127.0.0.1", DataDir: dir,
+		Domains: []string{"127.0.0.1", "localhost"}, DataDir: dir,
 		SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", QUICAddr: "127.0.0.1:0",
 		SocketPath: filepath.Join(dir, "box.sock"), Stdout: &greet,
 	})
@@ -71,7 +71,7 @@ func TestLoopbackComputers(t *testing.T) {
 	startAgent(t, homeDir)
 	startAgent(t, workDir)
 
-	if got := guestRetry(t, filepath.Join(workDir, "agent.sock"), "domain"); got != "127.0.0.1\n" {
+	if got := guestRetry(t, filepath.Join(workDir, "agent.sock"), "domain"); got != "127.0.0.1\nlocalhost\n" {
 		t.Fatalf("work domain %q", got)
 	}
 
@@ -83,11 +83,11 @@ func TestLoopbackComputers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	added := guestRetry(t, filepath.Join(homeDir, "agent.sock"), "portal", "add", "web", portalURL.Port())
-	if !strings.Contains(added, "web.127.0.0.1") {
+	added := guestRetry(t, filepath.Join(homeDir, "agent.sock"), "portal", "add", "web", portalURL.Port(), "--domain", "localhost")
+	if !strings.Contains(added, "web.localhost") {
 		t.Fatalf("portal %q", added)
 	}
-	body, status := httpGet(t, srv.HTTPAddr(), "web.127.0.0.1")
+	body, status := httpGet(t, srv.HTTPAddr(), "web.localhost")
 	if status != 200 || body != "from-home" {
 		t.Fatalf("portal http %d %q", status, body)
 	}

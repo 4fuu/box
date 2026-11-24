@@ -19,7 +19,7 @@ import (
 
 func TestEventAPIAndPrivatePortal(t *testing.T) {
 	dir := t.TempDir()
-	srv, _ := start(t, dir, "box.example.com", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
+	srv, _ := startDomains(t, dir, []string{"box.example.com", "other.example"}, "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
 	defer srv.Close()
 	sock := filepath.Join(dir, "box.sock")
 
@@ -61,6 +61,12 @@ func TestEventAPIAndPrivatePortal(t *testing.T) {
 	if status := getHost(t, srv.HTTPAddr(), "nope.box.example.com"); status != 421 {
 		t.Fatalf("unknown %d", status)
 	}
+	if status, _ := do(t, srv.HTTPAddr(), http.MethodGet, "event.other.example", "/api/events?since=0", created.Token, nil); status != 200 {
+		t.Fatalf("event on the second domain %d", status)
+	}
+	if status := getHost(t, srv.HTTPAddr(), "event.nope.example"); status != 421 {
+		t.Fatalf("unknown event domain %d", status)
+	}
 
 	st, err := store.Open(filepath.Join(dir, "box.db"))
 	if err != nil {
@@ -93,12 +99,15 @@ func TestEventAPIAndPrivatePortal(t *testing.T) {
 	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "auth", Port: 1}, nil); err == nil {
 		t.Fatal("auth label was claimed")
 	}
+	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "nodomain", Port: 1}, nil); err == nil || !strings.Contains(err.Error(), "choose a domain") {
+		t.Fatalf("domain choice: %v", err)
+	}
 	var add tunnel.PortalAddResponse
-	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "lock", Port: 9, Private: true}, &add); err != nil {
+	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "lock", Domain: "box.example.com", Port: 9, Private: true}, &add); err != nil {
 		t.Fatal(err)
 	}
 	var pub tunnel.PortalAddResponse
-	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Port: 9}, &pub); err != nil {
+	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "web", Domain: "box.example.com", Port: 9}, &pub); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,6 +189,58 @@ func TestEventAPIAndPrivatePortal(t *testing.T) {
 	cb, _ := io.ReadAll(cresp.Body)
 	if cresp.StatusCode != 200 || string(cb) != "pong" || cresp.Header.Get("X-Saw-Gate") != "no" {
 		t.Fatalf("cookie proxy %d %q saw %s", cresp.StatusCode, cb, cresp.Header.Get("X-Saw-Gate"))
+	}
+
+	var other tunnel.PortalAddResponse
+	if err := agent.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{Label: "door", Domain: "other.example", Port: 9, Private: true}, &other); err != nil {
+		t.Fatal(err)
+	}
+	if other.Host != "door.other.example" {
+		t.Fatalf("second-domain portal %+v", other)
+	}
+	status, loc = doAccept(t, srv.HTTPAddr(), "door.other.example", "text/html", "")
+	if status != 302 || !strings.Contains(loc, "auth.other.example") {
+		t.Fatalf("second-domain gate redirect %d %s", status, loc)
+	}
+	form = "token=" + created.Token + "&next=http%3A%2F%2Fdoor.other.example%2F"
+	req, err = http.NewRequest(http.MethodPost, "http://"+srv.HTTPAddr()+"/", strings.NewReader(form))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "auth.other.example"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err = (&http.Client{CheckRedirect: stopRedirect, Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 302 {
+		t.Fatalf("second-domain login %d", resp.StatusCode)
+	}
+	gate = nil
+	for _, c := range resp.Cookies() {
+		if c.Name == "box_token" {
+			gate = c
+		}
+	}
+	if gate == nil || gate.Domain != "other.example" {
+		t.Fatalf("second-domain cookie %+v", gate)
+	}
+	creq, err = http.NewRequest(http.MethodGet, "http://"+srv.HTTPAddr()+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creq.Host = "door.other.example"
+	creq.Header.Set("Accept", "text/html")
+	creq.AddCookie(gate)
+	cresp2, err := (&http.Client{Timeout: 5 * time.Second}).Do(creq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb2, _ := io.ReadAll(cresp2.Body)
+	cresp2.Body.Close()
+	if cresp2.StatusCode != 200 || string(cb2) != "pong" {
+		t.Fatalf("second-domain cookie proxy %d %q", cresp2.StatusCode, cb2)
 	}
 
 	var published tunnel.EventResult

@@ -23,7 +23,7 @@ The other docs describe each part: [install](install.md), [computers](computers.
 
 ## Ports
 
-Set at first start and stored in the database; later starts reuse the stored values.
+Set at first start and stored in the database; later starts reuse the stored values. `--domain` may be repeated: the first domain is the primary, later starts keep the stored list, and any new domains passed on the command line are appended. The primary is the name advertised as the QUIC endpoint at join, so every configured domain should resolve to this server.
 
 | Port | Transport | Flag | Default | Use |
 | --- | --- | --- | --- | --- |
@@ -33,7 +33,7 @@ Set at first start and stored in the database; later starts reuse the stored val
 
 The firewall must allow all three. A computer only ever types the SSH address; it learns the QUIC endpoint during the handshake.
 
-On the HTTP port, `event.<domain>` is the event API and `auth.<domain>` is the sign-in page; neither label can be claimed. Any other unknown `Host` gets 421. TLS, if any, is terminated by an edge the operator runs in front. box issues no certificates, and a private portal's token is an access check, not encryption.
+On the HTTP port, every configured domain serves `event.<domain>` for the event API and `auth.<domain>` for the sign-in page; neither label can be claimed. A private portal's sign-in host and cookie belong to the portal's own domain. Any other unknown `Host` gets 421. TLS, if any, is terminated by an edge the operator runs in front. box issues no certificates, and a private portal's token is an access check, not encryption.
 
 ## The tunnel
 
@@ -90,7 +90,7 @@ One SQLite file in the data directory (default `/var/lib/box`, `%ProgramData%\bo
 - `env`: name, value. List commands never return the value
 - `events`: id (AUTOINCREMENT, int64), topic, body (any bytes), from label, token id, dedup key, created at. Indexed on (topic, id) and (from, id); a partial unique index on (from, dedup key) makes dedup race-free. At most 100000 rows, none older than 7 days
 - `blobs`: id (AUTOINCREMENT, int64), size, content type, from label, token id, backend, created at. Indexed on created_at. At most 4 GiB together, none older than 7 days; the bytes live in the backend, not in this file
-- `meta`: domain, the three listen addresses, server keys, schema version
+- `meta`: domains (the primary is also kept as `domain`), the three listen addresses, server keys, schema version
 
 Pending joins and TUI counters live in memory only. The agent keeps `~/.box/computer.json`: token, QUIC endpoint, server fingerprint, name, login user.
 

@@ -95,6 +95,20 @@ func TestUnknownHost421(t *testing.T) {
 	}
 }
 
+func TestNestedDomainsRouteTheirOwnHosts(t *testing.T) {
+	dir := t.TempDir()
+	srv, _ := startDomains(t, dir, []string{"example.com", "sub.example.com"}, "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
+	if status := getHost(t, srv.HTTPAddr(), "event.sub.example.com"); status != 401 {
+		t.Fatalf("nested event host %d", status)
+	}
+	if status := getHost(t, srv.HTTPAddr(), "auth.sub.example.com"); status != 200 {
+		t.Fatalf("nested auth host %d", status)
+	}
+	if status := getHost(t, srv.HTTPAddr(), "event.example.com"); status != 401 {
+		t.Fatalf("parent event host %d", status)
+	}
+}
+
 func TestJoinRejectsBadCredentialAndReservedName(t *testing.T) {
 	dir := t.TempDir()
 	srv, greet := start(t, dir, "box.example.com", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0")
@@ -130,7 +144,7 @@ func TestComputersTunnel(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 	srv, err := server.Start(context.Background(), server.Config{
-		Domain: "box.example.com", DataDir: dir,
+		Domains: []string{"box.example.com"}, DataDir: dir,
 		SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", QUICAddr: "127.0.0.1:0",
 		SocketPath: filepath.Join(dir, "box.sock"), Stdout: &buf,
 	})
@@ -509,7 +523,7 @@ func TestPairOverPTY(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 	srv, err := server.Start(context.Background(), server.Config{
-		Domain:     "box.example.com",
+		Domains:    []string{"box.example.com"},
 		DataDir:    dir,
 		SSHAddr:    "127.0.0.1:0",
 		HTTPAddr:   "127.0.0.1:0",
@@ -578,9 +592,14 @@ func TestPairOverPTY(t *testing.T) {
 
 func start(t *testing.T, dir, domain, sshAddr, httpAddr, quicAddr string) (*server.Server, string) {
 	t.Helper()
+	return startDomains(t, dir, []string{domain}, sshAddr, httpAddr, quicAddr)
+}
+
+func startDomains(t *testing.T, dir string, domains []string, sshAddr, httpAddr, quicAddr string) (*server.Server, string) {
+	t.Helper()
 	var buf bytes.Buffer
 	srv, err := server.Start(context.Background(), server.Config{
-		Domain: domain, DataDir: dir,
+		Domains: domains, DataDir: dir,
 		SSHAddr: sshAddr, HTTPAddr: httpAddr, QUICAddr: quicAddr,
 		SocketPath: filepath.Join(dir, "box.sock"), Stdout: &buf,
 	})

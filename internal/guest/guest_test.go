@@ -125,7 +125,7 @@ func TestGuestHelpNeedsNoAgent(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"domain", "portal check", "portal add", "portal ls", "portal rm",
+		"domain", "portal check", "portal add", "portal ls", "portal rm", "--domain",
 		"event pub", "event get", "--since", "--topic", "--from", "--limit",
 		"--wait", "--json", "--follow", "sshd enable",
 	} {

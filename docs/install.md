@@ -28,7 +28,7 @@ A server install can add a systemd unit. Open three ports: SSH (default `:22`), 
 box serve --domain box.example.com
 ```
 
-The first start prints a one-time password, valid for five minutes; the first SSH client to present it binds its key. Later starts reuse the stored domain and ports. See [control](control.md) for binding more clients.
+The first start prints a one-time password, valid for five minutes; the first SSH client to present it binds its key. Repeat `--domain` to serve more than one parent domain. Later starts reuse the stored domains and ports, and append any new domains passed with `--domain`. See [control](control.md) for binding more clients.
 
 ### Computer
 

@@ -27,12 +27,31 @@ func TestDefaultListenAddrsStick(t *testing.T) {
 	if sshAddr != ":22" || httpAddr != ":80" || quicAddr != ":7443" {
 		t.Fatalf("flags replaced stored addrs: %s %s %s", sshAddr, httpAddr, quicAddr)
 	}
-	domain, err := persistedDomain(st, "Box.Example.com.")
-	if err != nil || domain != "box.example.com" {
-		t.Fatalf("domain %s %v", domain, err)
+	domains, err := persistedDomains(st, []string{"Box.Example.com.", "second.example"})
+	if err != nil || len(domains) != 2 || domains[0] != "box.example.com" || domains[1] != "second.example" {
+		t.Fatalf("domains %v %v", domains, err)
 	}
-	domain, err = persistedDomain(st, "other.example")
-	if err != nil || domain != "box.example.com" {
-		t.Fatalf("domain changed to %s %v", domain, err)
+	domains, err = persistedDomains(st, []string{"box.example.com", "third.example"})
+	if err != nil || len(domains) != 3 || domains[0] != "box.example.com" || domains[2] != "third.example" {
+		t.Fatalf("domains changed or were not appended: %v %v", domains, err)
+	}
+	domains, err = persistedDomains(st, nil)
+	if err != nil || len(domains) != 3 {
+		t.Fatalf("stored domains not reused: %v %v", domains, err)
+	}
+}
+
+func TestStoredDomainFallback(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "box.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMeta("domain", "old.example"); err != nil {
+		t.Fatal(err)
+	}
+	domains, err := persistedDomains(st, nil)
+	if err != nil || len(domains) != 1 || domains[0] != "old.example" {
+		t.Fatalf("legacy domain %v %v", domains, err)
 	}
 }

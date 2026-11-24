@@ -8,7 +8,7 @@
 
 box 把你自己的机器放在同一个 SSH 入口后面。计算机是一整台机器：工作站、家用服务器或虚拟机，不是容器。客户端就是到处都有的 `ssh`。计算机主动向外连接，所以可以放在 NAT 后面。
 
-`ssh box.example.com` 打开控制 REPL。`ssh web@box.example.com` 在名为 `web` 的计算机上打开 shell，终点是那台机器自己的 sshd —— 所以 `scp`、rsync、SFTP、VS Code Remote-SSH 也都能用。机器上的网站有主机名：`box portal add web 3000` 声明 `web.<域名>`。
+`ssh box.example.com` 打开控制 REPL。`ssh web@box.example.com` 在名为 `web` 的计算机上打开 shell，终点是那台机器自己的 sshd —— 所以 `scp`、rsync、SFTP、VS Code Remote-SSH 也都能用。机器上的网站有主机名：`box portal add web 3000` 声明 `web.<域名>`；服务器服务多个域名时，用 `--domain` 选择其中一个。
 
 > [!WARNING]
 > 这不是多租户主机。HTTP 端口是明文 HTTP；如果需要 TLS，由你放在前面的边缘来终结。box 不签发证书。私有门户检查令牌，并不加密这条连接。拦截 UDP 的网络无法运行计算机。
@@ -27,7 +27,7 @@ sh install.sh
 
 安装脚本会询问 English 或中文，然后询问这台机器是服务器还是计算机，并安装 `box` 二进制。
 
-服务器安装可以加上 systemd 单元。放行 SSH（`:22`）、HTTP（`:80`）和 QUIC（`:7443`，UDP），然后运行 `box serve --domain box.example.com`。第一次启动会打印一次性密码；第一个出示它的 SSH 客户端绑定自己的密钥。
+服务器安装可以加上 systemd 单元。放行 SSH（`:22`）、HTTP（`:80`）和 QUIC（`:7443`，UDP），然后运行 `box serve --domain box.example.com`（多个域名就重复 `--domain`）。第一次启动会打印一次性密码；第一个出示它的 SSH 客户端绑定自己的密钥。
 
 计算机安装会运行 `box join <域名>`。在服务器上批准它打印的验证码，并让 `box agent` 保持运行（systemd 用户单元）。
 

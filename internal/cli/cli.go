@@ -138,8 +138,9 @@ usage: box <command> [args]
 
 server: run on the machine clients reach
   serve   run the ssh entry, http portals, event api, quic tunnels, and the tui
-    --domain <domain>          this server's domain; required on the first start,
-                               and later starts reuse the stored value
+    --domain <domain>          a domain this server serves; repeat for more.
+                               Required on the first start. Later starts keep
+                               the stored list and add any new domains
     --data-dir <dir>           state directory, default /var/lib/box
     --ssh-addr <addr>          ssh listen address, default :22; stored at first start
     --http-addr <addr>         http listen address, default :80; stored at first start
@@ -171,13 +172,16 @@ computer: run on the machine that joins a server
   agent   run the tunnel after join; no root needed
   sshd enable   configure sshd, probe it, and enable ssh for this computer only
                 when the probe succeeds
-  domain   print the server's domain; portal labels join it
-  portal check <label>   report whether a portal label is free or who holds it
-  portal add <label> <port> [public|private]   claim a label for a loopback port;
-      public needs nothing, private needs an access token, and claiming again
-      changes the access
+  domain   print the domains this server serves, one per line
+  portal check <label> [--domain <domain>]   report whether a portal label is
+      free on that domain or who holds it
+  portal add <label> <port> [public|private] [--domain <domain>]   claim a
+      label for a loopback port on that domain; public needs nothing, private
+      needs an access token, and claiming again changes the access
   portal ls   list this computer's portals and their access
-  portal rm <label>   release a portal
+  portal rm <label> [--domain <domain>]   release a portal
+    --domain <domain>   which configured domain to use; required when the
+                        server serves more than one
   event pub <topic> [text...] [--key k]   publish an event as this computer;
       with no text the body is stdin; --key dedups, so the same from and key
       returns the original event
@@ -199,7 +203,8 @@ on a computer, box with no command prints the guest help.
 `
 
 func serve(o Options) error {
-	domain, sshAddr, httpAddr, quicAddr := "", "", "", ""
+	var domains []string
+	sshAddr, httpAddr, quicAddr := "", "", ""
 	blobCfg := server.BlobConfig{}
 	args := o.Args[1:]
 	// Run names the localhost socket after the data directory before the
@@ -220,7 +225,7 @@ func serve(o Options) error {
 			i++
 			switch flag {
 			case "--domain":
-				domain = args[i]
+				domains = append(domains, args[i])
 			case "--ssh-addr":
 				sshAddr = args[i]
 			case "--http-addr":
@@ -249,7 +254,7 @@ func serve(o Options) error {
 		}
 	}
 	srv, err := server.Start(o.Context, server.Config{
-		Domain: domain, DataDir: o.DataDir, Stdout: o.Stdout,
+		Domains: domains, DataDir: o.DataDir, Stdout: o.Stdout,
 		SSHAddr: sshAddr, HTTPAddr: httpAddr, QUICAddr: quicAddr,
 		SocketPath: o.ServerSocket,
 		Blob:       blobCfg,

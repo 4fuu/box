@@ -10,7 +10,7 @@ A durable log in the server's SQLite file. An event has an id, topic, body, from
 
 | Door | `from` |
 | --- | --- |
-| `http://event.<domain>/api/events` — a device that speaks HTTP. Access token required | the token's comment, when it is a valid label; else `token-<id>` |
+| `http://event.<domain>/api/events` — a device that speaks HTTP, for any configured domain. Access token required | the token's comment, when it is a valid label; else `token-<id>` |
 | `event pub` / `event get` — the control REPL | `ssh` |
 | `box event` on the server, over the localhost socket | `server` |
 | `box event` on a computer — agent socket, then the control stream | the computer's name |
@@ -39,7 +39,7 @@ A body that is valid UTF-8 is a JSON string in `body`; any other bytes are base6
 - `POST /api/events/<topic>` with any body and any content type: the request bytes are stored verbatim. This is the one-line path for tiny devices. The key rides `Idempotency-Key` or `?key=`. Same answers.
 - A body over 1 MiB is 413. A bad topic, key, or filter value is 400 with a one-line reason. Larger payloads belong in a blob, named in the body; see Blobs below.
 
-`event.<domain>` answers only `/api/events`, `/api/events/...`, `/api/blobs`, and `/api/blobs/...`, and never redirects to sign-in. Computers use `box event`, not the HTTP API.
+For every configured domain, `event.<domain>` answers only `/api/events`, `/api/events/...`, `/api/blobs`, and `/api/blobs/...`, and never redirects to sign-in. Computers use `box event`, not the HTTP API.
 
 ### Small devices
 

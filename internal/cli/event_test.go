@@ -19,7 +19,7 @@ func TestLocalEventRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "box.sock")
 	srv, err := server.Start(context.Background(), server.Config{
-		Domain: "box.example.com", DataDir: dir, SocketPath: sock,
+		Domains: []string{"box.example.com"}, DataDir: dir, SocketPath: sock,
 		SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", QUICAddr: "127.0.0.1:0",
 		Stdout: io.Discard,
 	})

@@ -23,13 +23,15 @@ const gateCookie = "box_token"
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := hostname(r.Host)
-	switch host {
-	case ident.Hostname("event", s.svc.Domain):
-		s.serveEvent(w, r)
-		return
-	case ident.Hostname("auth", s.svc.Domain):
-		s.serveAuth(w, r)
-		return
+	for _, domain := range s.svc.Domains {
+		switch host {
+		case ident.Hostname("event", domain):
+			s.serveEvent(w, r)
+			return
+		case ident.Hostname("auth", domain):
+			s.serveAuth(w, r, domain)
+			return
+		}
 	}
 	p, err := s.store.PortalByHost(host)
 	if err != nil {
@@ -260,7 +262,7 @@ func writeEventError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (s *Server) serveAuth(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveAuth(w http.ResponseWriter, r *http.Request, domain string) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
@@ -284,8 +286,8 @@ func (s *Server) serveAuth(w http.ResponseWriter, r *http.Request) {
 			s.writeAuth(w, http.StatusUnauthorized, next, "rejected")
 			return
 		}
-		s.setGateCookie(w, r, tok)
-		if dest := safeNext(s.svc.Domain, next); dest != "" {
+		s.setGateCookie(w, r, tok, domain)
+		if dest := safeNext(s.svc.Domains, next); dest != "" {
 			http.Redirect(w, r, dest, http.StatusFound)
 			return
 		}
@@ -319,12 +321,12 @@ func authPage(next, message string) string {
 	return b.String()
 }
 
-func (s *Server) setGateCookie(w http.ResponseWriter, r *http.Request, tok store.Token) {
+func (s *Server) setGateCookie(w http.ResponseWriter, r *http.Request, tok store.Token, domain string) {
 	c := &http.Cookie{
 		Name:     gateCookie,
 		Value:    tok.Token,
 		Path:     "/",
-		Domain:   s.svc.Domain,
+		Domain:   domain,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   requestSecure(r),
@@ -342,7 +344,11 @@ func (s *Server) setGateCookie(w http.ResponseWriter, r *http.Request, tok store
 }
 
 func (s *Server) authURL(r *http.Request) string {
-	host := ident.Hostname("auth", s.svc.Domain)
+	domain, ok := s.svc.DomainForHost(hostname(r.Host))
+	if !ok {
+		domain = s.svc.PrimaryDomain()
+	}
+	host := ident.Hostname("auth", domain)
 	if _, port, err := net.SplitHostPort(r.Host); err == nil && port != "" && port != "80" && port != "443" {
 		host = net.JoinHostPort(host, port)
 	}
@@ -365,8 +371,9 @@ func requestSecure(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-// safeNext accepts an absolute URL on this server's domain. Anything else is empty.
-func safeNext(domain, raw string) string {
+// safeNext accepts an absolute URL on one of this server's domains.
+// Anything else is empty.
+func safeNext(domains []string, raw string) string {
 	if raw == "" || len(raw) > 2048 || strings.ContainsAny(raw, "\r\n\\") {
 		return ""
 	}
@@ -378,10 +385,12 @@ func safeNext(domain, raw string) string {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname())
-	if host != domain && !strings.HasSuffix(host, "."+domain) {
-		return ""
+	for _, domain := range domains {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return u.Scheme + "://" + u.Host + u.RequestURI()
+		}
 	}
-	return u.Scheme + "://" + u.Host + u.RequestURI()
+	return ""
 }
 
 func wantsHTML(r *http.Request) bool {

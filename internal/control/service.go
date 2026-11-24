@@ -24,8 +24,10 @@ const PairingTTL = 5 * time.Minute
 
 // Service is the control plane.
 type Service struct {
-	Store        *store.Store
-	Domain       string
+	Store *store.Store
+	// Domains are the parent domains this server serves, in order. The first
+	// is the primary. A portal host is its label joined to one of them.
+	Domains      []string
 	SplicePublic string
 	Queue        *approve.Queue
 	Live         *Live
@@ -44,6 +46,51 @@ func (s *Service) ttl() time.Duration {
 		return PairingTTL
 	}
 	return s.PairingTTL
+}
+
+// PrimaryDomain is the first configured domain.
+func (s *Service) PrimaryDomain() string {
+	if len(s.Domains) == 0 {
+		return ""
+	}
+	return s.Domains[0]
+}
+
+// resolveDomain picks the configured domain named by raw. Empty picks the
+// primary only when this server serves one domain; with several, the caller
+// has to choose.
+func (s *Service) resolveDomain(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		if len(s.Domains) == 1 {
+			return s.Domains[0], nil
+		}
+		if len(s.Domains) == 0 {
+			return "", errors.New("no domain is configured")
+		}
+		return "", fmt.Errorf("choose a domain with --domain: %s", strings.Join(s.Domains, ", "))
+	}
+	d, err := ident.Domain(raw)
+	if err != nil {
+		return "", err
+	}
+	for _, configured := range s.Domains {
+		if configured == d {
+			return d, nil
+		}
+	}
+	return "", fmt.Errorf("unknown domain %s; choose one of: %s", d, strings.Join(s.Domains, ", "))
+}
+
+// DomainForHost returns the configured domain that host belongs to. The
+// longest match wins, so a domain under another one is not shadowed.
+func (s *Service) DomainForHost(host string) (string, bool) {
+	best := ""
+	for _, d := range s.Domains {
+		if (host == d || strings.HasSuffix(host, "."+d)) && len(d) > len(best) {
+			best = d
+		}
+	}
+	return best, best != ""
 }
 
 type Pairing struct {
@@ -223,13 +270,14 @@ func (s *Service) DeleteEnv(name string) error {
 }
 
 type Status struct {
-	Domain    string `json:"domain"`
-	Keys      int    `json:"keys"`
-	Computers int    `json:"computers"`
+	Domain    string   `json:"domain"`
+	Domains   []string `json:"domains,omitempty"`
+	Keys      int      `json:"keys"`
+	Computers int      `json:"computers"`
 }
 
 func (s *Service) Status() (Status, error) {
-	st := Status{Domain: s.Domain}
+	st := Status{Domain: s.PrimaryDomain(), Domains: s.Domains}
 	keys, err := s.Store.ListKeys()
 	if err != nil {
 		return st, err
@@ -282,12 +330,12 @@ func (s *Service) ListComputers() ([]ComputerView, error) {
 		if err != nil {
 			return nil, err
 		}
-		labels := make([]string, 0, len(ports))
+		hosts := make([]string, 0, len(ports))
 		for _, p := range ports {
-			labels = append(labels, portalLabel(p.Hostname, s.Domain))
+			hosts = append(hosts, p.Hostname)
 		}
 		view := ComputerView{
-			Name: c.Name, User: c.LoginUser, Portals: labels,
+			Name: c.Name, User: c.LoginUser, Portals: hosts,
 		}
 		liveKey := ""
 		if conn := s.liveGet(c.Name); conn != nil {
@@ -328,6 +376,7 @@ type TokenView struct {
 // Tokens are included so the TUI can copy them. Do not log a snapshot.
 type Snapshot struct {
 	Domain    string         `json:"domain"`
+	Domains   []string       `json:"domains,omitempty"`
 	Computers []ComputerView `json:"computers"`
 	Pending   []PendingView  `json:"pending"`
 	Portals   []PortalView   `json:"portals"`
@@ -338,7 +387,7 @@ type Snapshot struct {
 
 // Snapshot gathers the lists the TUI shows. Env values stay out. Tokens stay in.
 func (s *Service) Snapshot() (Snapshot, error) {
-	snap := Snapshot{Domain: s.Domain}
+	snap := Snapshot{Domain: s.PrimaryDomain(), Domains: s.Domains}
 	comps, err := s.ListComputers()
 	if err != nil {
 		return snap, err
@@ -356,7 +405,7 @@ func (s *Service) Snapshot() (Snapshot, error) {
 	snap.Portals = make([]PortalView, 0, len(ports))
 	for _, p := range ports {
 		snap.Portals = append(snap.Portals, PortalView{
-			Label: portalLabel(p.Hostname, s.Domain), Host: p.Hostname,
+			Label: portalLabel(p.Hostname, s.Domains), Host: p.Hostname,
 			Computer: p.Computer, Port: p.Port, Private: p.Private,
 		})
 	}
@@ -508,11 +557,15 @@ func (s *Service) Approve(code, fromAddr string) (string, error) {
 	return "approved " + p.Name, nil
 }
 
-func (s *Service) CheckPortal(label string) (tunnel.PortalCheckResponse, error) {
+func (s *Service) CheckPortal(label, domain string) (tunnel.PortalCheckResponse, error) {
 	if err := ident.Label(label); err != nil {
 		return tunnel.PortalCheckResponse{}, err
 	}
-	p, err := s.Store.PortalByHost(ident.Hostname(label, s.Domain))
+	d, err := s.resolveDomain(domain)
+	if err != nil {
+		return tunnel.PortalCheckResponse{}, err
+	}
+	p, err := s.Store.PortalByHost(ident.Hostname(label, d))
 	if errors.Is(err, store.ErrNotFound) {
 		return tunnel.PortalCheckResponse{Free: true}, nil
 	}
@@ -522,7 +575,7 @@ func (s *Service) CheckPortal(label string) (tunnel.PortalCheckResponse, error) 
 	return tunnel.PortalCheckResponse{Free: false, Holder: p.Computer}, nil
 }
 
-func (s *Service) AddPortal(computer, label string, port int, private bool) (tunnel.PortalAddResponse, error) {
+func (s *Service) AddPortal(computer, label, domain string, port int, private bool) (tunnel.PortalAddResponse, error) {
 	if err := ident.Label(label); err != nil {
 		return tunnel.PortalAddResponse{}, err
 	}
@@ -532,11 +585,15 @@ func (s *Service) AddPortal(computer, label string, port int, private bool) (tun
 	if _, err := s.needComputer(computer); err != nil {
 		return tunnel.PortalAddResponse{}, err
 	}
-	host := ident.Hostname(label, s.Domain)
-	err := s.Store.ClaimPortal(host, computer, port, private)
+	d, err := s.resolveDomain(domain)
+	if err != nil {
+		return tunnel.PortalAddResponse{}, err
+	}
+	host := ident.Hostname(label, d)
+	err = s.Store.ClaimPortal(host, computer, port, private)
 	var held *store.HeldError
 	if errors.As(err, &held) {
-		return tunnel.PortalAddResponse{}, fmt.Errorf("%s is held by %s", label, held.Holder)
+		return tunnel.PortalAddResponse{}, fmt.Errorf("%s is held by %s", host, held.Holder)
 	}
 	if err != nil {
 		return tunnel.PortalAddResponse{}, err
@@ -544,14 +601,18 @@ func (s *Service) AddPortal(computer, label string, port int, private bool) (tun
 	return tunnel.PortalAddResponse{URL: s.portalURL(host), Host: host, Port: port}, nil
 }
 
-func (s *Service) RemovePortal(computer, label string) error {
+func (s *Service) RemovePortal(computer, label, domain string) error {
 	if err := ident.Label(label); err != nil {
 		return err
 	}
-	host := ident.Hostname(label, s.Domain)
+	d, err := s.resolveDomain(domain)
+	if err != nil {
+		return err
+	}
+	host := ident.Hostname(label, d)
 	if err := s.Store.ReleasePortal(host, computer); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%s is not claimed", label)
+			return fmt.Errorf("%s is not claimed", host)
 		}
 		return err
 	}
@@ -569,7 +630,8 @@ func (s *Service) ListPortals(computer string) (tunnel.PortalList, error) {
 	out := tunnel.PortalList{Portals: make([]tunnel.Portal, 0, len(list))}
 	for _, p := range list {
 		out.Portals = append(out.Portals, tunnel.Portal{
-			Label:   portalLabel(p.Hostname, s.Domain),
+			Label:   portalLabel(p.Hostname, s.Domains),
+			Domain:  portalDomain(p.Hostname, s.Domains),
 			Port:    p.Port,
 			Private: p.Private,
 		})
@@ -591,10 +653,19 @@ func (s *Service) needComputer(name string) (store.Computer, error) {
 	return c, err
 }
 
-func portalLabel(host, domain string) string {
-	suf := "." + domain
-	if domain != "" && strings.HasSuffix(host, suf) {
-		return strings.TrimSuffix(host, suf)
+func portalDomain(host string, domains []string) string {
+	best := ""
+	for _, d := range domains {
+		if strings.HasSuffix(host, "."+d) && len(d) > len(best) {
+			best = d
+		}
+	}
+	return best
+}
+
+func portalLabel(host string, domains []string) string {
+	if d := portalDomain(host, domains); d != "" {
+		return strings.TrimSuffix(host, "."+d)
 	}
 	return host
 }

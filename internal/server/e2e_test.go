@@ -39,7 +39,7 @@ func e2eBind(t *testing.T) (*server.Server, string, gossh.Signer) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 	srv, err := server.Start(context.Background(), server.Config{
-		Domain: "box.example.com", DataDir: dir,
+		Domains: []string{"box.example.com"}, DataDir: dir,
 		SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", QUICAddr: "127.0.0.1:0",
 		SocketPath: filepath.Join(dir, "box.sock"), Stdout: &buf,
 	})
@@ -594,7 +594,7 @@ func TestAgentInterruption(t *testing.T) {
 	// the listeners all survive; a fresh dial works again.
 	srv.Close()
 	srv2, err := server.Start(context.Background(), server.Config{
-		Domain: "box.example.com", DataDir: dir,
+		Domains: []string{"box.example.com"}, DataDir: dir,
 		SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", QUICAddr: "127.0.0.1:0",
 		SocketPath: sock, Stdout: io.Discard,
 	})

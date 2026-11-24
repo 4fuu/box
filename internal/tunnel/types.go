@@ -33,8 +33,10 @@ type Identity struct {
 }
 
 // HelloResult is the server's reply to a successful hello.
+// Domain is the primary; Domains lists every domain the server serves.
 type HelloResult struct {
-	Domain string `json:"domain"`
+	Domain  string   `json:"domain"`
+	Domains []string `json:"domains,omitempty"`
 }
 
 // HelloBody is the first control frame, sent by the computer.
@@ -47,9 +49,10 @@ type HelloBody struct {
 	AgentVersion string `json:"agent_version"`
 }
 
-// PortalCheckRequest asks whether a label is free.
+// PortalCheckRequest asks whether a label is free on one domain.
 type PortalCheckRequest struct {
-	Label string `json:"label"`
+	Label  string `json:"label"`
+	Domain string `json:"domain,omitempty"`
 }
 
 // PortalCheckResponse names the holder when the label is taken.
@@ -58,10 +61,11 @@ type PortalCheckResponse struct {
 	Holder string `json:"holder"`
 }
 
-// PortalAddRequest claims a label for a TCP port on the computer.
-// Private requires an access token on later HTTP requests.
+// PortalAddRequest claims a label on one domain for a TCP port on the
+// computer. Private requires an access token on later HTTP requests.
 type PortalAddRequest struct {
 	Label   string `json:"label"`
+	Domain  string `json:"domain,omitempty"`
 	Port    int    `json:"port"`
 	Private bool   `json:"private,omitempty"`
 }
@@ -73,14 +77,16 @@ type PortalAddResponse struct {
 	Port int    `json:"port"`
 }
 
-// PortalRmRequest releases a label.
+// PortalRmRequest releases a label on one domain.
 type PortalRmRequest struct {
-	Label string `json:"label"`
+	Label  string `json:"label"`
+	Domain string `json:"domain,omitempty"`
 }
 
 // Portal is one claim.
 type Portal struct {
 	Label   string `json:"label"`
+	Domain  string `json:"domain,omitempty"`
 	Port    int    `json:"port"`
 	Private bool   `json:"private,omitempty"`
 }

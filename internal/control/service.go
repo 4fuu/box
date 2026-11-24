@@ -37,8 +37,9 @@ type Service struct {
 	Metrics *Metrics
 	// Grant finishes an approved join. The server parks the SSH session and
 	// sends the token there. Approve does not hold the queue lock across Grant.
-	Grant      func(approve.Pending) error
-	PairingTTL time.Duration
+	Grant       func(approve.Pending) error
+	RevokeToken func(int64) error
+	PairingTTL  time.Duration
 }
 
 func (s *Service) ttl() time.Duration {

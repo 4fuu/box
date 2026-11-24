@@ -19,6 +19,12 @@ type computer struct {
 	Domain      string `json:"domain"`
 	User        string `json:"user"`
 	SSH         string `json:"ssh,omitempty"`
+	Nodes       []node `json:"nodes,omitempty"`
+}
+
+type node struct {
+	QUIC        string `json:"quic"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 func (c computer) sshAddress() (string, error) {
@@ -57,6 +63,12 @@ func readComputer(dir string) (computer, error) {
 	}
 	if c.Name == "" || c.Token == "" {
 		return computer{}, errors.New("computer.json missing name or token")
+	}
+	for _, n := range c.Nodes {
+		host, port, err := net.SplitHostPort(n.QUIC)
+		if err != nil || host == "" || port == "" || strings.TrimSpace(n.Fingerprint) == "" {
+			return computer{}, errors.New("computer.json nodes require a QUIC host:port and fingerprint")
+		}
 	}
 	return c, nil
 }

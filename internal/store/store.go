@@ -220,6 +220,10 @@ CREATE TABLE IF NOT EXISTS tokens (
   expiry TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS token_revocations (
+  hash TEXT PRIMARY KEY,
+  pending INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS env (
   name TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -725,10 +729,16 @@ func (s *Store) AddToken(token, comment string, expiry time.Time) (Token, error)
 		expiry = expiry.UTC()
 		exp = expiry.Format(time.RFC3339Nano)
 	}
-	res, err := s.db.Exec(`INSERT INTO tokens(token, comment, expiry, created_at) VALUES(?, ?, ?, ?)`,
-		token, comment, exp, now.Format(time.RFC3339Nano))
+	res, err := s.db.Exec(`INSERT INTO tokens(token, comment, expiry, created_at)
+		SELECT ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM token_revocations WHERE hash = ?)`,
+		token, comment, exp, now.Format(time.RFC3339Nano), secret.Hash(token))
 	if err != nil {
 		return Token{}, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return Token{}, err
+	} else if n == 0 {
+		return Token{}, errors.New("token was revoked")
 	}
 	id, err := res.LastInsertId()
 	if err != nil {

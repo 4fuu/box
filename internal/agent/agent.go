@@ -149,38 +149,11 @@ func Run(ctx context.Context, stateDir string) error {
 // flapping server: resetting the backoff for one that drops at once would
 // turn a broken server into a tight loop of SSH exchanges.
 func (a *agent) once(ctx context.Context) (up bool, err error) {
-	if err := a.bootstrap(ctx); err != nil {
-		return false, err
-	}
-	a.mu.Lock()
-	comp := a.comp
-	a.mu.Unlock()
-	sess, err := tunnel.Dial(ctx, comp.QUIC, comp.Fingerprint)
+	sess, res, err := a.connect(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer sess.Close()
-	sess.Handle(a.onControl)
-
-	hctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	res, err := sess.Hello(hctx, tunnel.Identity{
-		Name:         comp.Name,
-		Token:        comp.Token,
-		User:         comp.User,
-		HostKey:      hostKey(),
-		AgentVersion: agentVersion,
-	})
-	cancel()
-	if err != nil {
-		_ = sess.Close()
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		if tokenRefused(err) {
-			return false, fmt.Errorf("%w", ErrRejected)
-		}
-		return false, err
-	}
 	a.mu.Lock()
 	a.sess = sess
 	a.mu.Unlock()
@@ -207,6 +180,87 @@ func (a *agent) once(ctx context.Context) (up bool, err error) {
 		}
 		go proxyStream(ctx, kind, port, conn)
 	}
+}
+
+func (a *agent) connect(ctx context.Context) (*tunnel.Session, tunnel.HelloResult, error) {
+	a.mu.Lock()
+	comp := a.comp
+	a.mu.Unlock()
+	if len(comp.Nodes) > 0 {
+		return a.connectNodes(ctx, comp)
+	}
+	if err := a.bootstrap(ctx); err != nil {
+		return nil, tunnel.HelloResult{}, err
+	}
+	a.mu.Lock()
+	comp = a.comp
+	a.mu.Unlock()
+	sess, err := tunnel.Dial(ctx, comp.QUIC, comp.Fingerprint)
+	if err != nil {
+		return nil, tunnel.HelloResult{}, err
+	}
+	res, err := a.hello(ctx, sess, comp, 20*time.Second)
+	if err != nil {
+		_ = sess.Close()
+		if tokenRefused(err) {
+			err = ErrRejected
+		}
+		return nil, tunnel.HelloResult{}, err
+	}
+	return sess, res, nil
+}
+
+const nodeTimeout = 5 * time.Second
+
+func (a *agent) connectNodes(ctx context.Context, comp computer) (*tunnel.Session, tunnel.HelloResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	dialCtx, stopDial := context.WithTimeout(ctx, nodeTimeout)
+	defer stopDial()
+	candidates := make(chan *tunnel.Session)
+	for _, n := range comp.Nodes {
+		go func() {
+			sess, _ := tunnel.Dial(dialCtx, n.QUIC, n.Fingerprint)
+			select {
+			case candidates <- sess:
+			case <-ctx.Done():
+				if sess != nil {
+					_ = sess.Close()
+				}
+			}
+		}()
+	}
+	// Race handshakes, not hellos: only the chosen node should attach the computer.
+	for range comp.Nodes {
+		select {
+		case <-ctx.Done():
+			return nil, tunnel.HelloResult{}, ctx.Err()
+		case sess := <-candidates:
+			if sess == nil {
+				continue
+			}
+			res, err := a.hello(ctx, sess, comp, nodeTimeout)
+			if err == nil {
+				return sess, res, nil
+			}
+			_ = sess.Close()
+		}
+	}
+	// With independent node state, a refusal does not authorize wiping the computer.
+	return nil, tunnel.HelloResult{}, errors.New("no configured node accepted the computer")
+}
+
+func (a *agent) hello(ctx context.Context, sess *tunnel.Session, comp computer, timeout time.Duration) (tunnel.HelloResult, error) {
+	sess.Handle(a.onControl)
+	hctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return sess.Hello(hctx, tunnel.Identity{
+		Name:         comp.Name,
+		Token:        comp.Token,
+		User:         comp.User,
+		HostKey:      hostKey(),
+		AgentVersion: agentVersion,
+	})
 }
 
 func (a *agent) bootstrap(ctx context.Context) error {

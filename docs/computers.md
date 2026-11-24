@@ -29,6 +29,21 @@ The login user is whoever ran `box join`, unless `--user <name>` names another e
 
 The agent manages one file, `~/.ssh/box_authorized_keys`, kept in sync with the server's bound keys. The user's own `authorized_keys` is untouched. `box join` adds the file to sshd's `AuthorizedKeysFile` when it can write the config, prints each change, and reloads sshd when it can; otherwise it prints the lines and the reload command. On Windows the config is `C:\ProgramData\ssh\sshd_config` (OpenSSH Server is an optional capability; when it is missing `box join` prints the install command and still succeeds, and the computer shows ssh disabled), editing the config and restarting the service need an elevated PowerShell — there is no reload — and the default `Match Group administrators` block sends administrator accounts to `administrators_authorized_keys` instead of `~/.ssh`; box prints that note whenever the block is present.
 
+### Experimental multi-node reconnect
+
+For a lab with independent servers, add a `nodes` array to the existing `~/.box/computer.json` while the agent is stopped. Keep the rest of the file unchanged, including the computer token, and keep permissions at 0600. Each entry needs the server's direct QUIC address and its certificate fingerprint, verified out of band:
+
+```json
+"nodes": [
+  {"quic": "node-a.example.com:7443", "fingerprint": "<node-a certificate fingerprint>"},
+  {"quic": "node-b.example.com:7443", "fingerprint": "<node-b certificate fingerprint>"}
+]
+```
+
+With `nodes` configured, the agent skips SSH bootstrap. It races pinned QUIC handshakes at startup and on reconnect, tries the computer login one node at a time, and stays with the first node that accepts it until the tunnel closes. All listed nodes must already know the computer under the same name and token. No state is replicated: pre-provision the matching records in the lab, and do not use this mode as production failover. A refusal is retried rather than treated as authorization to wipe the agent's state. Removing `nodes` restores the single-server path.
+
+Requests must reach the node holding the live tunnel. There is no node-to-node forwarding, CDN integration, or session migration. A silent network failure can take about 30 seconds for QUIC to detect before the agent starts reconnecting.
+
 ## Enabling ssh
 
 Until sshd is installed, configured, and answering, the server shows that computer's ssh as disabled and a splice fails with that state. `box sshd enable` runs the same config edit, then checks that the sshd host public key reads and parses as an authorized key and that sshd answers on its local address with an SSH identification line. Only when both pass does it close the current tunnel so the next hello carries the host key; a failed probe leaves ssh disabled. When the tunnel is already down, a passing probe still stands and the key reaches the server at the next reconnect.

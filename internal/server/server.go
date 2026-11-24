@@ -40,14 +40,15 @@ import (
 // append new ones, and reuse the stored listen addresses; address flags are
 // ignored once those exist.
 type Config struct {
-	Domains    []string
-	DataDir    string
-	SSHAddr    string
-	HTTPAddr   string
-	QUICAddr   string
-	SocketPath string
-	Blob       BlobConfig
-	Stdout     io.Writer
+	Domains     []string
+	DataDir     string
+	SSHAddr     string
+	HTTPAddr    string
+	QUICAddr    string
+	SocketPath  string
+	Blob        BlobConfig
+	Revocations *RevocationPeerConfig
+	Stdout      io.Writer
 }
 
 // BlobConfig picks the blob backend. Store is "disk" or "s3"; empty is
@@ -66,22 +67,24 @@ type BlobConfig struct {
 
 // Server is a running box serve.
 type Server struct {
-	cfg         Config
-	store       *store.Store
-	svc         *control.Service
-	limits      *ratelimit.Limiter
-	blobs       blob.Backend
-	spoolDir    string
-	httpLn      net.Listener
-	sshLn       net.Listener
-	sockLn      net.Listener
-	httpSrv     *http.Server
-	sshSrv      *sshServer
-	quic        *tunnel.Server
-	splice      ssh.Signer
-	fingerprint string
-	httpPort    int
-	quicPort    int
+	cfg            Config
+	store          *store.Store
+	svc            *control.Service
+	limits         *ratelimit.Limiter
+	blobs          blob.Backend
+	spoolDir       string
+	httpLn         net.Listener
+	sshLn          net.Listener
+	sockLn         net.Listener
+	httpSrv        *http.Server
+	revocationSrv  *http.Server
+	revocationDone <-chan struct{}
+	sshSrv         *sshServer
+	quic           *tunnel.Server
+	splice         ssh.Signer
+	fingerprint    string
+	httpPort       int
+	quicPort       int
 
 	mu       sync.Mutex
 	waiters  map[string]*joinWaiter
@@ -191,6 +194,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	svc.Grant = s.grant
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
+	if cfg.Revocations != nil {
+		if err := s.startRevocations(ctx, cert, *cfg.Revocations); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
 	if err := s.listen(ctx, hostKey, cert); err != nil {
 		s.Close()
 		return nil, err
@@ -529,6 +538,12 @@ func (s *Server) Close() error {
 		}
 		if s.cancel != nil {
 			s.cancel()
+		}
+		if s.revocationSrv != nil {
+			_ = s.revocationSrv.Close()
+		}
+		if s.revocationDone != nil {
+			<-s.revocationDone
 		}
 		if s.httpSrv != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

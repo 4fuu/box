@@ -73,13 +73,15 @@ func (s *Service) Tokens() ([]TokenView, error) {
 
 // RemoveToken deletes one access token. A missing id is an error.
 func (s *Service) RemoveToken(id int64) error {
-	if err := s.Store.DeleteToken(id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("token %d not found", id)
-		}
+	revoke := s.RevokeToken
+	if revoke == nil {
+		revoke = s.Store.DeleteToken
+	}
+	if err := revoke(id); errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("token %d not found", id)
+	} else {
 		return err
 	}
-	return nil
 }
 
 func tokenView(row store.Token) TokenView {

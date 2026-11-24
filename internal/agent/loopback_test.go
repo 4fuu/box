@@ -3,11 +3,13 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,7 +19,9 @@ import (
 	"time"
 
 	"github.com/4fuu/box/internal/keys"
+	"github.com/4fuu/box/internal/secret"
 	"github.com/4fuu/box/internal/server"
+	"github.com/4fuu/box/internal/store"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -99,6 +103,131 @@ func TestLoopbackComputers(t *testing.T) {
 	if out != "out:echo box-e2e\n" {
 		t.Fatalf("stdout %q", out)
 	}
+}
+
+func TestLoopbackNodeFailover(t *testing.T) {
+	setSSHDPath(t, filepath.Join(t.TempDir(), "missing-sshd-config"))
+	setHome(t, t.TempDir())
+	portal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "from-home")
+	}))
+	t.Cleanup(portal.Close)
+	port := portal.Listener.Addr().(*net.TCPAddr).Port
+	const token = "loopback-computer-token"
+	startNode := func(computerToken string) *server.Server {
+		dir := t.TempDir()
+		db, err := store.Open(filepath.Join(dir, "box.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if err := db.CreateComputer("home", secret.Hash(computerToken), "alice"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ClaimPortal("web.127.0.0.1", "home", port, false); err != nil {
+			t.Fatal(err)
+		}
+		srv, err := server.Start(t.Context(), server.Config{
+			Domains: []string{"127.0.0.1"}, DataDir: dir,
+			SSHAddr: "127.0.0.1:0", HTTPAddr: "127.0.0.1:0", QUICAddr: "127.0.0.1:0",
+			SocketPath: filepath.Join(dir, "box.sock"), Stdout: io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = srv.Close() })
+		return srv
+	}
+	a, b := startNode(token), startNode(token)
+	// This node can complete TLS but refuses the computer token.
+	rejecting := startNode(token + "-different")
+	// A slower, first-listed node must not win just because of list order.
+	backup := slowQUIC(t, b.QUICAddr())
+	dir := t.TempDir()
+	state := struct {
+		computer
+		Nodes []map[string]string `json:"nodes"`
+	}{
+		computer: computer{Name: "home", User: "alice", Token: token, SSH: a.SSHAddr()},
+		Nodes: []map[string]string{
+			{"quic": backup, "fingerprint": b.QUICFingerprint()},
+			{"quic": rejecting.QUICAddr(), "fingerprint": rejecting.QUICFingerprint()},
+			{"quic": a.QUICAddr(), "fingerprint": a.QUICFingerprint()},
+		},
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "computer.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	startAgent(t, dir)
+	if body, status := httpGet(t, a.HTTPAddr(), "web.127.0.0.1"); status != 200 || body != "from-home" {
+		t.Fatalf("initial portal via A: %d %q", status, body)
+	}
+	t.Log("initial portal via fast node A: HTTP 200")
+	start := time.Now()
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), start.Add(8*time.Second))
+	defer cancel()
+	client := &http.Client{Timeout: time.Second}
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+b.HTTPAddr()+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "web.127.0.0.1"
+		if res, err := client.Do(req); err == nil {
+			body, err := io.ReadAll(res.Body)
+			res.Body.Close()
+			if err == nil && res.StatusCode == http.StatusOK && string(body) == "from-home" {
+				break
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("portal via B did not recover within 8s")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	t.Logf("portal via B recovered after %s: HTTP 200", time.Since(start).Round(time.Millisecond))
+}
+
+func slowQUIC(t *testing.T, addr string) string {
+	t.Helper()
+	backend, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	go func() {
+		buf := make([]byte, 64<<10)
+		var client netip.AddrPort
+		for {
+			n, from, err := pc.ReadFromUDPAddrPort(buf)
+			if err != nil {
+				return
+			}
+			if from.Port() == uint16(backend.Port) && from.Addr().Unmap() == backend.AddrPort().Addr().Unmap() {
+				if client.IsValid() {
+					to := client
+					pkt := bytes.Clone(buf[:n])
+					time.AfterFunc(150*time.Millisecond, func() { _, _ = pc.WriteToUDPAddrPort(pkt, to) })
+				}
+			} else {
+				client = from
+				_, _ = pc.WriteToUDP(buf[:n], backend)
+			}
+		}
+	}()
+	return pc.LocalAddr().String()
 }
 
 func joinApproved(t *testing.T, addr string, signer ssh.Signer, name, dir string) {

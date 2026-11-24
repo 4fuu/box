@@ -14,6 +14,8 @@ The server forwards the request as the client sent it and answers with what the 
 
 A private portal checks the token before opening the stream. A browser navigation (`Accept` contains `text/html`) without one is redirected to `http://auth.<domain>/` for that portal's domain, which sets an HttpOnly cookie on the same parent domain once a valid token is submitted. Other clients send `X-Box-Token` or `Authorization: Bearer` and get 401 without it. The server strips that cookie, and a bearer token that is one of its access tokens, before forwarding. One token opens every private portal; a browser signs in once per parent domain.
 
+With two nodes, an entry that does not hold the computer's tunnel forwards the request once to its peer over the private node link. The peer applies the same access rule and proxies to the computer. The request keeps its `Host`, body, and streaming response; the entry does not retry after forwarding. When neither node has the tunnel, the entry returns 503. A portal claim made by a computer attached to the replica is forwarded to the writer, and the replica serves it after the next snapshot.
+
 Removing a computer drops its portals. Claims live on the server; routes live while the tunnel does.
 
 ## Access tokens

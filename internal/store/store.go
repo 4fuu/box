@@ -76,11 +76,11 @@ type Store struct {
 
 // Key is a bound client public key. The splice key is not a row.
 type Key struct {
-	ID          int64
-	Public      string
-	Comment     string
-	Fingerprint string
-	BoundAt     time.Time
+	ID          int64     `json:"id"`
+	Public      string    `json:"public_key"`
+	Comment     string    `json:"comment"`
+	Fingerprint string    `json:"fingerprint"`
+	BoundAt     time.Time `json:"bound_at"`
 }
 
 // Computer is one joined machine. TokenHash is secret.Hash of the raw token.
@@ -95,20 +95,20 @@ type Computer struct {
 
 // Portal is one claimed hostname. Private requires an access token.
 type Portal struct {
-	Hostname  string
-	Computer  string
-	Port      int
-	Private   bool
-	ClaimedAt time.Time
+	Hostname  string    `json:"hostname"`
+	Computer  string    `json:"computer"`
+	Port      int       `json:"port"`
+	Private   bool      `json:"private"`
+	ClaimedAt time.Time `json:"claimed_at"`
 }
 
 // Token is a server-issued access token. Token is the secret. Do not log it.
 type Token struct {
-	ID      int64
-	Token   string
-	Comment string
-	Expiry  time.Time
-	Created time.Time
+	ID      int64     `json:"id"`
+	Token   string    `json:"token"`
+	Comment string    `json:"comment"`
+	Expiry  time.Time `json:"expiry"`
+	Created time.Time `json:"created_at"`
 }
 
 func Open(path string) (*Store, error) {
@@ -219,10 +219,6 @@ CREATE TABLE IF NOT EXISTS tokens (
   comment TEXT NOT NULL DEFAULT '',
   expiry TEXT NOT NULL,
   created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS token_revocations (
-  hash TEXT PRIMARY KEY,
-  pending INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS env (
   name TEXT PRIMARY KEY,
@@ -729,16 +725,10 @@ func (s *Store) AddToken(token, comment string, expiry time.Time) (Token, error)
 		expiry = expiry.UTC()
 		exp = expiry.Format(time.RFC3339Nano)
 	}
-	res, err := s.db.Exec(`INSERT INTO tokens(token, comment, expiry, created_at)
-		SELECT ?, ?, ?, ? WHERE NOT EXISTS(SELECT 1 FROM token_revocations WHERE hash = ?)`,
-		token, comment, exp, now.Format(time.RFC3339Nano), secret.Hash(token))
+	res, err := s.db.Exec(`INSERT INTO tokens(token, comment, expiry, created_at) VALUES(?, ?, ?, ?)`,
+		token, comment, exp, now.Format(time.RFC3339Nano))
 	if err != nil {
 		return Token{}, err
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return Token{}, err
-	} else if n == 0 {
-		return Token{}, errors.New("token was revoked")
 	}
 	id, err := res.LastInsertId()
 	if err != nil {

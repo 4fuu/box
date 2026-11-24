@@ -7,24 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/4fuu/box/internal/tunnel"
 )
 
 // computer is ~/.box/computer.json. SSH is the bootstrap address: the QUIC
 // port can change, and SSH is how the agent learns the new endpoint.
 type computer struct {
-	Name        string `json:"name"`
-	Token       string `json:"token"`
-	QUIC        string `json:"quic"`
-	Fingerprint string `json:"fingerprint"`
-	Domain      string `json:"domain"`
-	User        string `json:"user"`
-	SSH         string `json:"ssh,omitempty"`
-	Nodes       []node `json:"nodes,omitempty"`
-}
-
-type node struct {
-	QUIC        string `json:"quic"`
-	Fingerprint string `json:"fingerprint"`
+	Name        string                `json:"name"`
+	Token       string                `json:"token"`
+	QUIC        string                `json:"quic"`
+	Fingerprint string                `json:"fingerprint"`
+	Domain      string                `json:"domain"`
+	User        string                `json:"user"`
+	SSH         string                `json:"ssh,omitempty"`
+	Nodes       []tunnel.NodeEndpoint `json:"nodes,omitempty"`
 }
 
 func (c computer) sshAddress() (string, error) {

@@ -26,7 +26,9 @@ One executable. The subcommand selects the role. There is no `boxd`, no `box-nod
 | `box domain`, `box portal …`, `box event …` | computer | guest CLI. Talks only to the agent socket |
 | `box token …`, `box event …` | server | localhost socket. `box token` creates access tokens. On a computer, `box event` is the guest command above |
 
-The server listens on three ports: SSH, HTTP, and QUIC. Computers dial out. The SSH username is the computer's registered name. The session account is whoever ran `box join` on that machine; the two names do not have to match. An empty username, or `box`, opens the control REPL. `web` is spliced to the computer named `web`, and the session ends at that machine's sshd. `box join` updates sshd when the config is writable, prints each change, and reloads sshd when it can.
+The server listens on three public ports: SSH, HTTP, and QUIC; two-node mode adds a private peer port. Computers dial out. The SSH username is the computer's registered name. The session account is whoever ran `box join` on that machine; the two names do not have to match. An empty username, or `box`, opens the control REPL. `web` is spliced to the computer named `web`, and the session ends at that machine's sshd. `box join` updates sshd when the config is writable, prints each change, and reloads sshd when it can.
+
+`box serve` can also join a two-node pair. One node is the fixed configuration writer (`--config-writer`); the other replicates its configuration and forwards portal writes and HTTP requests over a private mutual-TLS link (`--peer-listen`, `--peer-addr`, `--peer-fingerprint`, `--peer-quic`, `--quic-advertise`). Computers receive both QUIC endpoints and keep one tunnel. Single-node behavior is unchanged. See `docs/architecture.md`.
 
 A portal is a label the computer claims and attaches to one of the server's domains. Portals are HTTP only. The computer reads the domains with `box domain`. It does not invent one. The process listens on `127.0.0.1`. `box portal add <label> <port>` is public. `box portal add <label> <port> private` requires an access token. With more than one configured domain, `check`, `add`, and `rm` take `--domain <domain>`; a label is unique per domain. Labels `event` and `auth` are reserved: `event.<domain>` is the event API, `auth.<domain>` is the sign-in page. Events are a durable log in the server's SQLite file: at most 100000 rows, none older than 7 days, filterable and long-pollable. Computers publish with `box event`. Devices that are not computers `POST` and `GET` `http://event.<domain>/api/events` with the token.
 
@@ -44,7 +46,7 @@ The first version leaves these out. Do not start them:
 - moving a computer's identity between machines
 - resource limits on a computer; it is a whole machine
 - CDN
-- Podman, frp, a node/controller split, or a container runtime
+- Podman, frp, or a container runtime. Two-node mode has a fixed configuration writer; it is not a general node/controller split.
 - a second binary
 
 ## Secrets

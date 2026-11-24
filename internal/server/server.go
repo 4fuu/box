@@ -40,15 +40,15 @@ import (
 // append new ones, and reuse the stored listen addresses; address flags are
 // ignored once those exist.
 type Config struct {
-	Domains     []string
-	DataDir     string
-	SSHAddr     string
-	HTTPAddr    string
-	QUICAddr    string
-	SocketPath  string
-	Blob        BlobConfig
-	Revocations *RevocationPeerConfig
-	Stdout      io.Writer
+	Domains    []string
+	DataDir    string
+	SSHAddr    string
+	HTTPAddr   string
+	QUICAddr   string
+	SocketPath string
+	Blob       BlobConfig
+	Peer       PeerConfig
+	Stdout     io.Writer
 }
 
 // BlobConfig picks the blob backend. Store is "disk" or "s3"; empty is
@@ -67,24 +67,32 @@ type BlobConfig struct {
 
 // Server is a running box serve.
 type Server struct {
-	cfg            Config
-	store          *store.Store
-	svc            *control.Service
-	limits         *ratelimit.Limiter
-	blobs          blob.Backend
-	spoolDir       string
-	httpLn         net.Listener
-	sshLn          net.Listener
-	sockLn         net.Listener
-	httpSrv        *http.Server
-	revocationSrv  *http.Server
-	revocationDone <-chan struct{}
-	sshSrv         *sshServer
-	quic           *tunnel.Server
-	splice         ssh.Signer
-	fingerprint    string
-	httpPort       int
-	quicPort       int
+	cfg          Config
+	store        *store.Store
+	svc          *control.Service
+	limits       *ratelimit.Limiter
+	blobs        blob.Backend
+	spoolDir     string
+	httpLn       net.Listener
+	sshLn        net.Listener
+	sockLn       net.Listener
+	httpSrv      *http.Server
+	sshSrv       *sshServer
+	quic         *tunnel.Server
+	splice       ssh.Signer
+	fingerprint  string
+	httpPort     int
+	quicPort     int
+	peer         *peerLink
+	peerSrv      *http.Server
+	peerWG       sync.WaitGroup
+	configWriter bool
+	configMu     sync.Mutex
+	configWake   chan struct{}
+	configWarned bool
+	configDirty  atomic.Uint64
+	configSent   atomic.Uint64
+	configFailed atomic.Bool
 
 	mu       sync.Mutex
 	waiters  map[string]*joinWaiter
@@ -174,9 +182,15 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Events:       event.NewLog(st),
 		Metrics:      control.NewMetrics(),
 	}
-	if err := printFirstPassword(svc, st, cfg.Stdout); err != nil {
-		st.Close()
-		return nil, err
+	svc.Replica = cfg.Peer.enabled() && !cfg.Peer.Writer
+	// A replica has no first password of its own: its keys arrive from the
+	// writer. Printing one here would only hand out a password that cannot
+	// bind anything.
+	if !svc.Replica {
+		if err := printFirstPassword(svc, st, cfg.Stdout); err != nil {
+			st.Close()
+			return nil, err
+		}
 	}
 	s := &Server{
 		cfg:         cfg,
@@ -189,13 +203,17 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		fingerprint: fp,
 		waiters:     map[string]*joinWaiter{},
 		proxies:     map[string]portalForwarder{},
+		configWake:  make(chan struct{}, 1),
 		done:        make(chan struct{}),
 	}
 	svc.Grant = s.grant
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
-	if cfg.Revocations != nil {
-		if err := s.startRevocations(ctx, cert, *cfg.Revocations); err != nil {
+	if cfg.Peer.enabled() {
+		if cfg.Peer.Writer {
+			svc.Changed = s.configChanged
+		}
+		if err := s.startPeer(ctx, cert, cfg.Peer); err != nil {
 			s.Close()
 			return nil, err
 		}
@@ -393,7 +411,9 @@ func (s *Server) onHello(id tunnel.Identity) (tunnel.HelloResult, error) {
 			return tunnel.HelloResult{}, errors.New("unauthorized")
 		}
 	}
-	return tunnel.HelloResult{Domain: s.svc.PrimaryDomain(), Domains: s.svc.Domains}, nil
+	return tunnel.HelloResult{
+		Domain: s.svc.PrimaryDomain(), Domains: s.svc.Domains, Nodes: s.nodeEndpoints(),
+	}, nil
 }
 
 func (s *Server) attach(c *tunnel.Conn) {
@@ -451,6 +471,11 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 			}
 			// A new row may be a new port behind the same host.
 			s.dropPortalIdle(name)
+			if s.peer != nil && !s.configWriter {
+				return s.peer.AddPortal(controlCtx(c), peerPortalAddRequest{
+					Computer: name, Label: req.Label, Domain: req.Domain, Port: req.Port, Private: req.Private,
+				})
+			}
 			return s.svc.AddPortal(name, req.Label, req.Domain, req.Port, req.Private)
 		case tunnel.OpPortalRm:
 			var req tunnel.PortalRmRequest
@@ -458,6 +483,9 @@ func (s *Server) onControl(c *tunnel.Conn) tunnel.Handler {
 				return nil, errors.New("bad request")
 			}
 			s.dropPortalIdle(name)
+			if s.peer != nil && !s.configWriter {
+				return nil, s.peer.RemovePortal(controlCtx(c), name, req.Label, req.Domain)
+			}
 			return nil, s.svc.RemovePortal(name, req.Label, req.Domain)
 		case tunnel.OpPortalLs:
 			return s.svc.ListPortals(name)
@@ -502,6 +530,27 @@ func (s *Server) quicEndpoint() string {
 	return fmt.Sprintf("%s:%d", s.svc.PrimaryDomain(), s.quicPort)
 }
 
+// advertisedQUIC is the address computers should dial for this node.
+func (s *Server) advertisedQUIC() string {
+	if s.cfg.Peer.Advertise != "" {
+		return s.cfg.Peer.Advertise
+	}
+	return s.quicEndpoint()
+}
+
+// nodeEndpoints is the node list a computer receives at join and hello. It is
+// empty outside two-node mode, where the single quic endpoint is the list.
+func (s *Server) nodeEndpoints() []tunnel.NodeEndpoint {
+	if s.peer == nil {
+		return nil
+	}
+	out := []tunnel.NodeEndpoint{{QUIC: s.advertisedQUIC(), Fingerprint: s.fingerprint}}
+	if q := s.cfg.Peer.QUIC; q != "" {
+		out = append(out, tunnel.NodeEndpoint{QUIC: q, Fingerprint: s.cfg.Peer.Fingerprint})
+	}
+	return out
+}
+
 // HTTPAddr is the HTTP port that was bound.
 func (s *Server) HTTPAddr() string {
 	if s.httpLn == nil {
@@ -539,12 +588,10 @@ func (s *Server) Close() error {
 		if s.cancel != nil {
 			s.cancel()
 		}
-		if s.revocationSrv != nil {
-			_ = s.revocationSrv.Close()
+		if s.peerSrv != nil {
+			_ = s.peerSrv.Close()
 		}
-		if s.revocationDone != nil {
-			<-s.revocationDone
-		}
+		s.peerWG.Wait()
 		if s.httpSrv != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			s.closeErr = s.httpSrv.Shutdown(ctx)
@@ -683,6 +730,17 @@ func (s *Server) closePortalIdle(host string) {
 	s.proxyMu.Lock()
 	defer s.proxyMu.Unlock()
 	if f, ok := s.proxies[host]; ok {
+		f.proxy.Transport.(*http.Transport).CloseIdleConnections()
+		delete(s.proxies, host)
+	}
+}
+
+// dropAllPortalIdle drops every cached forwarder. A replicated configuration
+// change can move or remove any portal.
+func (s *Server) dropAllPortalIdle() {
+	s.proxyMu.Lock()
+	defer s.proxyMu.Unlock()
+	for host, f := range s.proxies {
 		f.proxy.Transport.(*http.Transport).CloseIdleConnections()
 		delete(s.proxies, host)
 	}

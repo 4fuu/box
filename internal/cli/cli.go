@@ -151,6 +151,14 @@ server: run on the machine clients reach
     --blob-s3-bucket <name>    s3 bucket
     --blob-s3-region <region>  s3 region
     --blob-s3-pathstyle        path-style requests, needed by minio and on-prem
+    two-node mode: two peer entries share one configuration. The writer owns
+    changes; the replica mirrors them and forwards portal writes.
+    --config-writer            this node is the fixed configuration writer
+    --peer-addr <host:port>    the other node's private peer address
+    --peer-listen <addr>       this node's private peer listen address
+    --peer-fingerprint <hash>  the other node's certificate sha256 fingerprint
+    --peer-quic <host:port>    the other node's public quic address
+    --quic-advertise <host:port>  this node's public quic address
   pair    print a one-time password that adds another client's ssh key
   key ls  list paired ssh keys
   key rm <fingerprint>   revoke an ssh key
@@ -206,6 +214,7 @@ func serve(o Options) error {
 	var domains []string
 	sshAddr, httpAddr, quicAddr := "", "", ""
 	blobCfg := server.BlobConfig{}
+	peerCfg := server.PeerConfig{}
 	args := o.Args[1:]
 	// Run names the localhost socket after the data directory before the
 	// flags are read, so --data-dir has to move a socket still at the default.
@@ -215,9 +224,12 @@ func serve(o Options) error {
 		switch flag {
 		case "--blob-s3-pathstyle":
 			blobCfg.S3PathStyle = true
+		case "--config-writer":
+			peerCfg.Writer = true
 		case "--domain", "--ssh-addr", "--http-addr", "--quic-addr", "--data-dir",
 			"--blob-store", "--blob-dir",
-			"--blob-s3-endpoint", "--blob-s3-bucket", "--blob-s3-region":
+			"--blob-s3-endpoint", "--blob-s3-bucket", "--blob-s3-region",
+			"--peer-addr", "--peer-listen", "--peer-fingerprint", "--peer-quic", "--quic-advertise":
 			if i+1 >= len(args) {
 				fmt.Fprint(o.Stderr, hostHelp)
 				return errUsage
@@ -247,6 +259,16 @@ func serve(o Options) error {
 				blobCfg.S3Bucket = args[i]
 			case "--blob-s3-region":
 				blobCfg.S3Region = args[i]
+			case "--peer-addr":
+				peerCfg.Address = args[i]
+			case "--peer-listen":
+				peerCfg.Listen = args[i]
+			case "--peer-fingerprint":
+				peerCfg.Fingerprint = args[i]
+			case "--peer-quic":
+				peerCfg.QUIC = args[i]
+			case "--quic-advertise":
+				peerCfg.Advertise = args[i]
 			}
 		default:
 			fmt.Fprint(o.Stderr, hostHelp)
@@ -258,6 +280,7 @@ func serve(o Options) error {
 		SSHAddr: sshAddr, HTTPAddr: httpAddr, QUICAddr: quicAddr,
 		SocketPath: o.ServerSocket,
 		Blob:       blobCfg,
+		Peer:       peerCfg,
 	})
 	if err != nil {
 		fmt.Fprintln(o.Stderr, err.Error())

@@ -39,6 +39,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "unknown host\n")
 		return
 	}
+	s.servePortal(w, r, p, true)
+}
+
+// servePortal applies the portal's access rule and then proxies it. An entry
+// node that does not hold the computer's tunnel forwards the request once to
+// its peer; the peer runs this same function with allowPeer false.
+func (s *Server) servePortal(w http.ResponseWriter, r *http.Request, p store.Portal, allowPeer bool) {
 	s.svc.Metrics.Request()
 	if p.Private {
 		if _, ok := s.presented(r); !ok {
@@ -51,6 +58,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, "unauthorized\n")
 			return
 		}
+	}
+	if allowPeer && s.peer != nil && s.svc.Live != nil && s.svc.Live.Get(p.Computer) == nil {
+		s.forwardPortal(w, r)
+		return
 	}
 	s.proxyPortal(w, r, p)
 }

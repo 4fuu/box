@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -330,85 +329,6 @@ func TestAccessTokenRoundTrip(t *testing.T) {
 	s.SetNow(func() time.Time { return time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC) })
 	if _, ok, err := s.ValidToken(raw + "x"); err != nil || !ok {
 		t.Fatal("token with no expiry was refused")
-	}
-}
-
-func TestTokenRevocationRecovery(t *testing.T) {
-	ctx := t.Context()
-	writer, replica := open(t), open(t)
-	add := func(s *Store, raw string) Token {
-		t.Helper()
-		tok, err := s.AddToken(raw, "", time.Time{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return tok
-	}
-	valid := func(s *Store, raw string, want bool) {
-		t.Helper()
-		if _, ok, err := s.ValidToken(raw); err != nil || ok != want {
-			t.Fatalf("token validity = %v, want %v: %v", ok, want, err)
-		}
-	}
-	reopen := func(s *Store) *Store {
-		t.Helper()
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
-		next, err := Open(s.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { next.Close() })
-		return next
-	}
-	pending := func(s *Store, want ...string) {
-		t.Helper()
-		got, err := s.PendingTokenRevocations(ctx)
-		if err != nil || !slices.Equal(got, want) {
-			t.Fatalf("pending revocations = %d, want %d: %v", len(got), len(want), err)
-		}
-	}
-	const revoked = "revoked-lab-token"
-	const unrelated = "unrelated-lab-token"
-	tok := add(writer, revoked)
-	add(replica, unrelated)
-	add(replica, revoked)
-	valid(writer, revoked, true)
-	valid(replica, revoked, true)
-
-	hash, err := writer.QueueTokenRevocation(ctx, tok.ID)
-	if err != nil || hash != secret.Hash(revoked) {
-		t.Fatalf("queue revocation: %v", err)
-	}
-	// Restart the writer before it has sent anything over the link.
-	writer = reopen(writer)
-	pending(writer, hash)
-	valid(writer, revoked, false)
-	valid(replica, revoked, true)
-	add(writer, unrelated)
-
-	if err := replica.ApplyTokenRevocation(ctx, hash); err != nil {
-		t.Fatal(err)
-	}
-	// Lose the acknowledgement and restart both nodes before replaying it.
-	replica, writer = reopen(replica), reopen(writer)
-	pending(writer, hash)
-	valid(replica, revoked, false)
-	if err := replica.ApplyTokenRevocation(ctx, hash); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.ConfirmTokenRevocation(ctx, hash); err != nil {
-		t.Fatal(err)
-	}
-	writer = reopen(writer)
-	pending(writer)
-	for _, s := range []*Store{writer, replica} {
-		if _, err := s.AddToken(revoked, "stale update", time.Time{}); err == nil {
-			t.Fatal("stale update recreated the revoked token")
-		}
-		valid(s, revoked, false)
-		valid(s, unrelated, true)
 	}
 }
 

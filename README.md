@@ -42,7 +42,9 @@ installs the `box` binary.
 A server install can add a systemd unit. Open SSH (`:22`), HTTP (`:80`),
 and QUIC (`:7443`, UDP), then run `box serve --domain box.example.com`
 (repeat `--domain` for more). The first start prints a one-time password;
-the first SSH client to present it binds its key.
+the first SSH client to present it binds its key. Two servers can share
+one domain with a fixed configuration writer; see
+[Two nodes](docs/architecture.md#two-nodes).
 
 A computer install runs `box join <domain>`. Approve the printed code at
 the server, and keep `box agent` running (systemd user unit).

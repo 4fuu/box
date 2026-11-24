@@ -212,10 +212,11 @@ func (h *sshServer) serveBootstrap(sess ssh.Session) {
 		writeJoinError(sess, "rejected")
 		return
 	}
-	_ = json.NewEncoder(sess).Encode(map[string]any{
-		"quic":        h.s.quicEndpoint(),
-		"fingerprint": h.s.fingerprint,
-		"domain":      h.s.svc.PrimaryDomain(),
+	_ = json.NewEncoder(sess).Encode(credentialReply{
+		QUIC:        h.s.advertisedQUIC(),
+		Fingerprint: h.s.fingerprint,
+		Domain:      h.s.svc.PrimaryDomain(),
+		Nodes:       h.s.nodeEndpoints(),
 	})
 	_ = sess.Exit(0)
 }

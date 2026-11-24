@@ -37,9 +37,31 @@ type Service struct {
 	Metrics *Metrics
 	// Grant finishes an approved join. The server parks the SSH session and
 	// sends the token there. Approve does not hold the queue lock across Grant.
-	Grant       func(approve.Pending) error
-	RevokeToken func(int64) error
-	PairingTTL  time.Duration
+	Grant      func(approve.Pending) error
+	PairingTTL time.Duration
+
+	// Replica marks a node that mirrors configuration from the fixed writer.
+	// Its mutating methods refuse to run.
+	Replica bool
+	// Changed runs after a configuration write commits. Nil means this node
+	// has no replica to tell.
+	Changed func()
+}
+
+// ErrReplica is returned when configuration is changed on a replica.
+var ErrReplica = errors.New("configuration is written on the writer")
+
+func (s *Service) writable() error {
+	if s.Replica {
+		return ErrReplica
+	}
+	return nil
+}
+
+func (s *Service) changed() {
+	if s.Changed != nil {
+		s.Changed()
+	}
 }
 
 func (s *Service) ttl() time.Duration {
@@ -100,6 +122,9 @@ type Pairing struct {
 }
 
 func (s *Service) PairClient() (Pairing, error) {
+	if err := s.writable(); err != nil {
+		return Pairing{}, err
+	}
 	raw, err := secret.ClientPassword()
 	if err != nil {
 		return Pairing{}, err
@@ -113,6 +138,9 @@ func (s *Service) PairClient() (Pairing, error) {
 
 // ConsumeClient checks a one-time password. The password is not retained.
 func (s *Service) ConsumeClient(raw string) error {
+	if err := s.writable(); err != nil {
+		return err
+	}
 	raw = secret.NormalizePassword(raw)
 	err := s.Store.ConsumePairing(raw)
 	if err == nil {
@@ -126,12 +154,19 @@ func (s *Service) ConsumeClient(raw string) error {
 
 // Bind stores a client public key. A second bind of the same key is a no-op.
 func (s *Service) Bind(pub ssh.PublicKey, comment string) error {
+	if err := s.writable(); err != nil {
+		return err
+	}
 	fp := keys.Fingerprint(pub)
 	if _, err := s.Store.FindKeyByFingerprint(fp); err == nil {
 		return nil
 	}
 	line := keys.Line(pub, comment)
-	return s.Store.BindKey(line, comment, fp)
+	if err := s.Store.BindKey(line, comment, fp); err != nil {
+		return err
+	}
+	s.changed()
+	return nil
 }
 
 func (s *Service) HasKey(pub ssh.PublicKey) (bool, error) {
@@ -168,6 +203,9 @@ func (s *Service) Keys() ([]KeyView, error) {
 }
 
 func (s *Service) RemoveKey(match string) error {
+	if err := s.writable(); err != nil {
+		return err
+	}
 	k, err := s.Store.FindKeyByFingerprint(strings.TrimSpace(match))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -179,6 +217,7 @@ func (s *Service) RemoveKey(match string) error {
 		return err
 	}
 	s.PushKeys(context.Background())
+	s.changed()
 	return nil
 }
 
@@ -249,24 +288,32 @@ func (s *Service) WhoAmI(pub ssh.PublicKey) (string, error) {
 }
 
 func (s *Service) SetEnv(name, value string) (string, error) {
+	if err := s.writable(); err != nil {
+		return "", err
+	}
 	if err := ident.Env(name); err != nil {
 		return "", err
 	}
 	if err := s.Store.SetEnv(name, value); err != nil {
 		return "", err
 	}
+	s.changed()
 	return name + " set. new sessions receive it", nil
 }
 
 func (s *Service) EnvNames() ([]string, error) { return s.Store.EnvNames() }
 
 func (s *Service) DeleteEnv(name string) error {
+	if err := s.writable(); err != nil {
+		return err
+	}
 	if err := s.Store.DeleteEnv(name); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("env %s is not set", name)
 		}
 		return err
 	}
+	s.changed()
 	return nil
 }
 
@@ -446,6 +493,9 @@ func (s *Service) liveGet(name string) *tunnel.Conn {
 
 // Remove deletes the computer, revokes its token, and closes a live tunnel.
 func (s *Service) Remove(name string) error {
+	if err := s.writable(); err != nil {
+		return err
+	}
 	var conn *tunnel.Conn
 	err := s.withLive(func() error {
 		if err := s.Store.DeleteComputer(name); err != nil {
@@ -462,14 +512,20 @@ func (s *Service) Remove(name string) error {
 	if conn != nil {
 		_ = conn.Close()
 	}
+	if err == nil {
+		s.changed()
+	}
 	return err
 }
 
 func (s *Service) Rename(oldName, newName string) error {
+	if err := s.writable(); err != nil {
+		return err
+	}
 	if err := ident.Computer(newName); err != nil {
 		return err
 	}
-	return s.withLive(func() error {
+	err := s.withLive(func() error {
 		if _, err := s.Store.Computer(oldName); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return fmt.Errorf("computer %s not found", oldName)
@@ -495,6 +551,10 @@ func (s *Service) Rename(oldName, newName string) error {
 		}
 		return nil
 	})
+	if err == nil {
+		s.changed()
+	}
+	return err
 }
 
 func (s *Service) withLive(fn func() error) error {
@@ -542,6 +602,9 @@ func (s *Service) Pending() []PendingView {
 // Approve checks the code and completes the parked join.
 // Queue errors are returned as themselves.
 func (s *Service) Approve(code, fromAddr string) (string, error) {
+	if err := s.writable(); err != nil {
+		return "", err
+	}
 	if s.Queue == nil {
 		return "", approve.ErrNotFound
 	}
@@ -577,6 +640,9 @@ func (s *Service) CheckPortal(label, domain string) (tunnel.PortalCheckResponse,
 }
 
 func (s *Service) AddPortal(computer, label, domain string, port int, private bool) (tunnel.PortalAddResponse, error) {
+	if err := s.writable(); err != nil {
+		return tunnel.PortalAddResponse{}, err
+	}
 	if err := ident.Label(label); err != nil {
 		return tunnel.PortalAddResponse{}, err
 	}
@@ -599,10 +665,14 @@ func (s *Service) AddPortal(computer, label, domain string, port int, private bo
 	if err != nil {
 		return tunnel.PortalAddResponse{}, err
 	}
+	s.changed()
 	return tunnel.PortalAddResponse{URL: s.portalURL(host), Host: host, Port: port}, nil
 }
 
 func (s *Service) RemovePortal(computer, label, domain string) error {
+	if err := s.writable(); err != nil {
+		return err
+	}
 	if err := ident.Label(label); err != nil {
 		return err
 	}
@@ -617,6 +687,7 @@ func (s *Service) RemovePortal(computer, label, domain string) error {
 		}
 		return err
 	}
+	s.changed()
 	return nil
 }
 

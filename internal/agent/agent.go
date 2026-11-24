@@ -187,7 +187,28 @@ func (a *agent) connect(ctx context.Context) (*tunnel.Session, tunnel.HelloResul
 	comp := a.comp
 	a.mu.Unlock()
 	if len(comp.Nodes) > 0 {
-		return a.connectNodes(ctx, comp)
+		sess, res, err := a.connectNodes(ctx, comp)
+		if err == nil {
+			return sess, res, nil
+		}
+		if ctx.Err() != nil {
+			return nil, tunnel.HelloResult{}, ctx.Err()
+		}
+		// A pinned endpoint may have moved. SSH is the channel that carries
+		// the new list, and it also reports a revoked token.
+		if berr := a.bootstrap(ctx); berr != nil {
+			if errors.Is(berr, ErrRejected) {
+				return nil, tunnel.HelloResult{}, berr
+			}
+			return nil, tunnel.HelloResult{}, err
+		}
+		a.mu.Lock()
+		comp = a.comp
+		a.mu.Unlock()
+		if len(comp.Nodes) > 0 {
+			return a.connectNodes(ctx, comp)
+		}
+		return a.dialOne(ctx, comp)
 	}
 	if err := a.bootstrap(ctx); err != nil {
 		return nil, tunnel.HelloResult{}, err
@@ -195,6 +216,10 @@ func (a *agent) connect(ctx context.Context) (*tunnel.Session, tunnel.HelloResul
 	a.mu.Lock()
 	comp = a.comp
 	a.mu.Unlock()
+	return a.dialOne(ctx, comp)
+}
+
+func (a *agent) dialOne(ctx context.Context, comp computer) (*tunnel.Session, tunnel.HelloResult, error) {
 	sess, err := tunnel.Dial(ctx, comp.QUIC, comp.Fingerprint)
 	if err != nil {
 		return nil, tunnel.HelloResult{}, err
@@ -289,6 +314,11 @@ func (a *agent) noteHello(res tunnel.HelloResult) error {
 		if res.Domain != "" {
 			c.Domain = res.Domain
 		}
+		// A single-node server sends no list. Keep the pinned one rather than
+		// forgetting a peer during a rolling upgrade.
+		if len(res.Nodes) > 0 {
+			c.Nodes = res.Nodes
+		}
 	})
 }
 
@@ -365,8 +395,28 @@ func applyPresent(c *computer, probe map[string]json.RawMessage, join bool) erro
 		}
 		c.Domain = s
 	}
+	if raw, ok := probe["nodes"]; ok {
+		var list []tunnel.NodeEndpoint
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return err
+		}
+		if err := validNodes(list); err != nil {
+			return err
+		}
+		c.Nodes = list
+	}
 	if join && (c.QUIC == "" || c.Fingerprint == "") {
 		return errors.New("incomplete join reply")
+	}
+	return nil
+}
+
+func validNodes(list []tunnel.NodeEndpoint) error {
+	for _, n := range list {
+		host, port, err := net.SplitHostPort(n.QUIC)
+		if err != nil || host == "" || port == "" || strings.TrimSpace(n.Fingerprint) == "" {
+			return errors.New("invalid node list")
+		}
 	}
 	return nil
 }

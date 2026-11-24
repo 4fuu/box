@@ -30,6 +30,32 @@ box serve --domain box.example.com
 
 The first start prints a one-time password, valid for five minutes; the first SSH client to present it binds its key. Repeat `--domain` to serve more than one parent domain. Later starts reuse the stored domains and ports, and append any new domains passed with `--domain`. See [control](control.md) for binding more clients.
 
+### Two nodes
+
+Two servers can share one domain, with one fixed configuration writer and one replica. Each node keeps its own data directory, has its own public QUIC hostname, and reaches the other over a private address.
+
+Open the peer port (for example `:8443` TCP) only between the two machines. Start the writer:
+
+```bash
+box serve --domain box.example.com --config-writer \
+  --quic-advertise a.box.example.com:7443 \
+  --peer-listen 10.0.0.1:8443 \
+  --peer-addr 10.0.0.2:8443 --peer-quic b.box.example.com:7443 \
+  --peer-fingerprint <node-b fingerprint>
+```
+
+and the replica:
+
+```bash
+box serve --domain box.example.com \
+  --quic-advertise b.box.example.com:7443 \
+  --peer-listen 10.0.0.2:8443 \
+  --peer-addr 10.0.0.1:8443 --peer-quic a.box.example.com:7443 \
+  --peer-fingerprint <node-a fingerprint>
+```
+
+Each start in peer mode prints its own certificate fingerprint; put it in the other node's `--peer-fingerprint`. Both nodes must use the same `--domain` list. Point the shared SSH and HTTP name at both nodes, and `a.`/`b.` at their QUIC addresses. Join computers at the writer's hostname (`box join a.box.example.com`): the join reply carries both QUIC endpoints, and the agent fails over between them. Configuration changes are accepted only at the writer; the replica serves the replicated configuration and forwards portal claims. See [architecture](architecture.md#two-nodes) for what does not fail over.
+
 ### Computer
 
 A computer install runs `box join <domain>` and can add a systemd user unit for `box agent`. Approve the printed code at the server: enter it in the TUI (pending screen), or run `approve <code>` from a bound client.

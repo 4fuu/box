@@ -36,6 +36,9 @@ func ParseTTL(s string) (time.Duration, error) {
 
 // AddToken creates an access token. The view includes the secret. Do not log it.
 func (s *Service) AddToken(comment string, ttl time.Duration) (TokenView, error) {
+	if err := s.writable(); err != nil {
+		return TokenView{}, err
+	}
 	comment = strings.TrimSpace(comment)
 	if strings.ContainsAny(comment, "\r\n") || len(comment) > 80 {
 		return TokenView{}, errors.New("invalid comment")
@@ -55,6 +58,7 @@ func (s *Service) AddToken(comment string, ttl time.Duration) (TokenView, error)
 	if err != nil {
 		return TokenView{}, err
 	}
+	s.changed()
 	return tokenView(row), nil
 }
 
@@ -73,15 +77,16 @@ func (s *Service) Tokens() ([]TokenView, error) {
 
 // RemoveToken deletes one access token. A missing id is an error.
 func (s *Service) RemoveToken(id int64) error {
-	revoke := s.RevokeToken
-	if revoke == nil {
-		revoke = s.Store.DeleteToken
-	}
-	if err := revoke(id); errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("token %d not found", id)
-	} else {
+	if err := s.writable(); err != nil {
 		return err
 	}
+	if err := s.Store.DeleteToken(id); errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("token %d not found", id)
+	} else if err != nil {
+		return err
+	}
+	s.changed()
+	return nil
 }
 
 func tokenView(row store.Token) TokenView {

@@ -12,6 +12,7 @@ import (
 	"github.com/4fuu/box/internal/approve"
 	"github.com/4fuu/box/internal/secret"
 	"github.com/4fuu/box/internal/store"
+	"github.com/4fuu/box/internal/tunnel"
 	"github.com/charmbracelet/ssh"
 )
 
@@ -95,8 +96,10 @@ func (s *Server) grant(p approve.Pending) error {
 	// before Approve tells the operator the join succeeded.
 	if err := <-w.ack; err != nil {
 		_ = s.store.DeleteComputer(p.Name)
+		s.configChanged()
 		return err
 	}
+	s.configChanged()
 	return nil
 }
 
@@ -104,6 +107,10 @@ func (h *sshServer) serveJoin(sess ssh.Session) {
 	class, name := classifyUser(sess.User())
 	if class != classJoin || name == "" {
 		writeJoinError(sess, "rejected")
+		return
+	}
+	if h.s.svc.Replica {
+		writeJoinMessage(sess, "join this computer at the configuration writer")
 		return
 	}
 	hash := readSessionLine(sess, 30*time.Second)
@@ -201,11 +208,12 @@ func (h *sshServer) abortJoin(sess ssh.Session, w *joinWaiter, reason string) {
 }
 
 func (s *Server) writeJoinToken(sess ssh.Session, token string) error {
-	if err := json.NewEncoder(sess).Encode(map[string]any{
-		"token":       token,
-		"quic":        s.quicEndpoint(),
-		"fingerprint": s.fingerprint,
-		"domain":      s.svc.PrimaryDomain(),
+	if err := json.NewEncoder(sess).Encode(credentialReply{
+		Token:       token,
+		QUIC:        s.advertisedQUIC(),
+		Fingerprint: s.fingerprint,
+		Domain:      s.svc.PrimaryDomain(),
+		Nodes:       s.nodeEndpoints(),
 	}); err != nil {
 		return err
 	}
@@ -213,10 +221,23 @@ func (s *Server) writeJoinToken(sess ssh.Session, token string) error {
 	return nil
 }
 
+// credentialReply is the join and boot reply. Token is omitted at boot.
+type credentialReply struct {
+	Token       string                `json:"token,omitempty"`
+	QUIC        string                `json:"quic"`
+	Fingerprint string                `json:"fingerprint"`
+	Domain      string                `json:"domain"`
+	Nodes       []tunnel.NodeEndpoint `json:"nodes,omitempty"`
+}
+
 func writeJoinError(sess ssh.Session, kind string) {
 	if kind != "expired" {
 		kind = "rejected"
 	}
-	_ = json.NewEncoder(sess).Encode(map[string]string{"error": kind})
+	writeJoinMessage(sess, kind)
+}
+
+func writeJoinMessage(sess ssh.Session, msg string) {
+	_ = json.NewEncoder(sess).Encode(map[string]string{"error": msg})
 	_ = sess.Exit(0)
 }

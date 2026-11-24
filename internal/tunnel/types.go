@@ -34,9 +34,18 @@ type Identity struct {
 
 // HelloResult is the server's reply to a successful hello.
 // Domain is the primary; Domains lists every domain the server serves.
+// Nodes, when set, is the list a computer may tunnel to.
 type HelloResult struct {
-	Domain  string   `json:"domain"`
-	Domains []string `json:"domains,omitempty"`
+	Domain  string         `json:"domain"`
+	Domains []string       `json:"domains,omitempty"`
+	Nodes   []NodeEndpoint `json:"nodes,omitempty"`
+}
+
+// NodeEndpoint is one node a computer can dial. Fingerprint is the node's
+// self-signed QUIC certificate, pinned before the handshake.
+type NodeEndpoint struct {
+	QUIC        string `json:"quic"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // HelloBody is the first control frame, sent by the computer.

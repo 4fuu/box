@@ -23,17 +23,37 @@ The other docs describe each part: [install](install.md), [computers](computers.
 
 ## Ports
 
-Set at first start and stored in the database; later starts reuse the stored values. `--domain` may be repeated: the first domain is the primary, later starts keep the stored list, and any new domains passed on the command line are appended. The primary is the name advertised as the QUIC endpoint at join, so every configured domain should resolve to this server.
+Set at first start and stored in the database; later starts reuse the stored values. `--domain` may be repeated: the first domain is the primary, later starts keep the stored list, and any new domains passed on the command line are appended. A single server advertises the primary domain as the QUIC endpoint at join, so every configured domain should resolve to it. In two-node mode `--quic-advertise` names this node's endpoint instead, and the peer port is passed on every start rather than stored.
 
 | Port | Transport | Flag | Default | Use |
 | --- | --- | --- | --- | --- |
 | SSH | TCP | `--ssh-addr` | `:22` | Client entry, computer bootstrap, REPL |
 | HTTP | TCP | `--http-addr` | `:80` | Portals, the event API, blobs, the sign-in page. Plain HTTP |
 | QUIC | UDP | `--quic-addr` | `:7443` | Computer tunnels |
+| Peer | TCP | `--peer-listen` | none | Two-node link: configuration and cross-node portal forwarding. Private |
 
-The firewall must allow all three. A computer only ever types the SSH address; it learns the QUIC endpoint during the handshake.
+The firewall must allow the three public ports. A computer only ever types the SSH address; it learns the QUIC endpoint during the handshake. The peer port is opened only between the two nodes, and is protected by mutual TLS with a pinned certificate.
 
 On the HTTP port, every configured domain serves `event.<domain>` for the event API and `auth.<domain>` for the sign-in page; neither label can be claimed. A private portal's sign-in host and cookie belong to the portal's own domain. Any other unknown `Host` gets 421. TLS, if any, is terminated by an edge the operator runs in front. box issues no certificates, and a private portal's token is an access check, not encryption.
+
+## Two nodes
+
+Two `box serve` processes can share one domain. They are peers for HTTP entry, but only one changes configuration.
+
+| Role | Flag | Does |
+| --- | --- | --- |
+| writer | `--config-writer` | owns configuration, accepts joins, pushes every change to the replica |
+| replica | none | mirrors the writer's configuration, forwards portal claims to the writer, serves with the configuration it has |
+
+Each node keeps its own SQLite file. After every configuration change the writer sends a full snapshot — computers, portals, access tokens, keys, env — at a new revision. The replica applies a snapshot only when its revision is higher, in one transaction. A lost acknowledgement, a crash, or a replica restart costs another copy, never a partial apply. Events and blobs are not in the snapshot.
+
+The private link uses the nodes' QUIC certificates, pinned by fingerprint, over mutual TLS. `--peer-listen` is this node's address; `--peer-addr` and `--peer-fingerprint` name the other node. `--quic-advertise` and `--peer-quic` are the public QUIC endpoints handed to computers. Keep the peer port on a private network or behind a firewall.
+
+A computer receives both QUIC endpoints at join and on every hello, races the handshakes, and keeps one tunnel. A portal request that lands on the node without that tunnel is forwarded once to the peer with the original `Host`, body, and streaming response. The peer re-checks access and proxies locally; it never forwards again. A request is not replayed after the application may have run. Each node's computer list and `online` flag describe only the tunnels it holds, so a computer attached to the peer appears offline there.
+
+The writer is fixed. If it is down, computers reconnect to the replica and portals already configured keep serving there, but configuration changes wait: joins, portal claims, token changes, key changes, and env changes fail until the writer returns. The replica never promotes itself; with two nodes there is no partition-safe arbitrator. Joins must reach the writer, so point `box join` at the writer's hostname.
+
+SSH entry is not forwarded: `ssh computer@<domain>` works only when the request reaches the node holding that computer's tunnel. Events and blobs belong to the node that received the request. Put a load balancer or CDN in front if one name must reach both nodes; box does not run one.
 
 ## The tunnel
 

@@ -86,6 +86,9 @@ func (s *Service) RemoveToken(id int64) error {
 		return err
 	}
 	s.changed()
+	if s.ConfirmRevocation != nil {
+		return s.ConfirmRevocation()
+	}
 	return nil
 }
 

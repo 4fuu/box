@@ -170,7 +170,7 @@ func TestTwoNodeConfigAndForwarding(t *testing.T) {
 	const token = "two-node-computer-token"
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		fmt.Fprintf(w, "method=%s path=%s body=%s host=%s", r.Method, r.URL.Path, body, r.Host)
+		fmt.Fprintf(w, "method=%s path=%s body=%s host=%s uri=%s", r.Method, r.URL.Path, body, r.Host, r.RequestURI)
 	}))
 	t.Cleanup(app.Close)
 	appPort := app.Listener.Addr().(*net.TCPAddr).Port
@@ -216,6 +216,13 @@ func TestTwoNodeConfigAndForwarding(t *testing.T) {
 	}
 	if status, body := doHTTP(t, a.http, "web."+domain, http.MethodGet, "/", "", nil); status != http.StatusOK || !strings.Contains(body, "method=GET") {
 		t.Fatalf("local portal: %d %q", status, body)
+	}
+	for _, path := range []string{"/objects/team%2Fnotes", "/objects//notes?view=raw"} {
+		localStatus, localBody := doHTTP(t, a.http, "web."+domain, http.MethodGet, path, "", nil)
+		peerStatus, peerBody := doHTTP(t, b.http, "web."+domain, http.MethodGet, path, "", nil)
+		if localStatus != 200 || peerStatus != 200 || !strings.Contains(localBody, "uri="+path) || peerBody != localBody {
+			t.Fatalf("object URL differs: local %d %q, forwarded %d %q", localStatus, localBody, peerStatus, peerBody)
+		}
 	}
 
 	// A computer attached to the replica asks for a claim. The replica
@@ -285,9 +292,7 @@ func TestTwoNodeConfigAndForwarding(t *testing.T) {
 	}
 	sessAfter := dialComputer(t, ctx, b, token)
 	servePortalStreams(ctx, sessAfter)
-	if status, body := doHTTP(t, b.http, "web."+domain, http.MethodGet, "/", "", nil); status != http.StatusOK || !strings.Contains(body, "method=GET") {
-		t.Fatalf("portal on replica after writer exit: %d %q", status, body)
-	}
+	waitHTTP(t, b.http, "web."+domain, http.StatusOK, "method=GET")
 	err = sessAfter.Call(ctx, tunnel.OpPortalAdd, tunnel.PortalAddRequest{
 		Label: "later", Domain: domain, Port: appPort,
 	}, &added)
@@ -297,6 +302,91 @@ func TestTwoNodeConfigAndForwarding(t *testing.T) {
 	if err := localCall(t, b.socket, "token_add", map[string]string{"comment": "replica"}, &tok); err == nil || !strings.Contains(err.Error(), "writer") {
 		t.Fatalf("token add on replica: %v", err)
 	}
+}
+
+func TestTwoNodeRevocationConfirmation(t *testing.T) {
+	const domain = "127.0.0.1"
+	dirA, dirB := t.TempDir(), t.TempDir()
+	fpA, fpB := seedCert(t, dirA), seedCert(t, dirB)
+	a, b := newNode(t, dirA), newNode(t, dirB)
+	a.start(t, domain, server.PeerConfig{Writer: true, Fingerprint: fpB, Address: b.peer, QUIC: b.quic, Advertise: a.quic})
+	bConfig := server.PeerConfig{Fingerprint: fpA, Address: a.peer, QUIC: a.quic, Advertise: b.quic}
+	b.start(t, domain, bConfig)
+	for _, offline := range []bool{false, true} {
+		var tok struct {
+			ID    int64  `json:"id"`
+			Token string `json:"token"`
+		}
+		if err := localCall(t, a.socket, "token_add", nil, &tok); err != nil {
+			t.Fatal(err)
+		}
+		status := func(n *node) int {
+			code, _ := doHTTP(t, n.http, "event."+domain, http.MethodGet, "/api/events", "", map[string]string{"X-Box-Token": tok.Token})
+			return code
+		}
+		deadline := time.Now().Add(8 * time.Second)
+		for status(b) != http.StatusOK {
+			if time.Now().After(deadline) {
+				t.Fatal("replica did not receive token")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if offline {
+			if err := b.srv.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := localCall(t, a.socket, "token_rm", map[string]int64{"id": tok.ID}, nil)
+		if status(a) != http.StatusUnauthorized {
+			t.Fatal("writer still accepts revoked token")
+		}
+		if !offline {
+			if err != nil || status(b) != http.StatusUnauthorized {
+				t.Fatalf("revocation did not complete on both nodes: %v", err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), "replica confirmation pending") {
+			t.Fatalf("revocation with replica offline: %v", err)
+		}
+		b.start(t, domain, bConfig)
+		deadline = time.Now().Add(8 * time.Second)
+		for status(b) != http.StatusUnauthorized {
+			if time.Now().After(deadline) {
+				t.Fatal("replica did not catch up with the revocation")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func TestTwoNodeRetriesInitialSyncTimeout(t *testing.T) {
+	dir := t.TempDir()
+	a := newNode(t, dir)
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := ln.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// The first TCP connection stalls in TLS. No new write or replica pull
+	// is allowed to trigger the second connection.
+	a.start(t, "127.0.0.1", server.PeerConfig{
+		Writer: true, Fingerprint: seedCert(t, t.TempDir()), Address: ln.Addr().String(),
+		QUIC: "127.0.0.1:7443", Advertise: a.quic,
+	})
+	first, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("no push retry after initial timeout: %v", err)
+	}
+	second.Close()
 }
 
 // TestTwoNodeJoinReplyListsBothNodes checks the list a computer is given at

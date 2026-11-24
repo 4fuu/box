@@ -112,20 +112,25 @@ func (s *Server) startPeer(ctx context.Context, cert tls.Certificate, cfg PeerCo
 	mux.HandleFunc("GET "+peerConfigPath, s.sendConfig)
 	mux.HandleFunc("POST "+peerPortalAddPath, s.receivePortalAdd)
 	mux.HandleFunc("POST "+peerPortalRmPath, s.receivePortalRm)
-	mux.Handle(peerPortalPrefix+"/", http.StripPrefix(peerPortalPrefix, http.HandlerFunc(s.servePeerPortal)))
+	portal := http.StripPrefix(peerPortalPrefix, http.HandlerFunc(s.servePeerPortal))
 
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
 	}
 	s.peerSrv = &http.Server{
-		Handler:           mux,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// ServeMux canonicalizes paths; application paths must pass through unchanged.
+			if strings.HasPrefix(r.URL.Path, peerPortalPrefix+"/") {
+				portal.ServeHTTP(w, r)
+				return
+			}
+			mux.ServeHTTP(w, r)
+		}),
 		TLSConfig:         serverTLS,
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
-	go s.peerSrv.ServeTLS(ln, "", "")
-
 	transport := &http.Transport{
 		TLSClientConfig:     clientTLS,
 		MaxIdleConnsPerHost: 8,
@@ -151,7 +156,7 @@ func (s *Server) startPeer(ctx context.Context, cert tls.Certificate, cfg PeerCo
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = cfg.Address
 			pr.Out.URL.Path = peerPortalPrefix + pr.In.URL.Path
-			pr.Out.URL.RawPath = ""
+			pr.Out.URL.RawPath = peerPortalPrefix + pr.In.URL.EscapedPath()
 			pr.Out.Host = pr.In.Host
 		},
 		Transport:     transport,
@@ -163,6 +168,7 @@ func (s *Server) startPeer(ctx context.Context, cert tls.Certificate, cfg PeerCo
 	}
 	s.peer = link
 	s.configWriter = cfg.Writer
+	go s.peerSrv.ServeTLS(ln, "", "")
 	fmt.Fprintf(s.cfg.Stdout, "peer mode: %s; this node's certificate fingerprint %s\n",
 		map[bool]string{true: "configuration writer", false: "configuration replica"}[cfg.Writer], s.fingerprint)
 	if cfg.Writer {
@@ -197,7 +203,7 @@ func (s *Server) replicateLoop(ctx context.Context) {
 	first := true
 	for {
 		if first || s.configFailed.Load() || s.configDirty.Load() != s.configSent.Load() {
-			s.syncConfig(ctx)
+			_ = s.syncConfig(ctx)
 		}
 		first = false
 		select {
@@ -212,28 +218,27 @@ func (s *Server) replicateLoop(ctx context.Context) {
 // syncConfig pushes the whole configuration at a new revision. A full
 // snapshot makes replay idempotent: a lost acknowledgement, a crash, or a
 // replica restart only costs another copy.
-func (s *Server) syncConfig(ctx context.Context) {
+func (s *Server) syncConfig(ctx context.Context) error {
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
 	// Read before the snapshot: anything that lands after this point is
 	// either included in the snapshot or left for the next pass.
 	dirty := s.configDirty.Load()
-	ctx, cancel := context.WithTimeout(ctx, peerRPCTimeout)
+	attempt, cancel := context.WithTimeout(ctx, peerRPCTimeout)
 	defer cancel()
-	rev, err := s.store.BumpConfigRevision(ctx)
+	rev, err := s.store.BumpConfigRevision(attempt)
 	if err == nil {
 		var snap store.ConfigSnapshot
-		if snap, err = s.store.ConfigSnapshot(ctx, rev); err == nil {
-			err = s.peer.PushConfig(ctx, snap)
+		if snap, err = s.store.ConfigSnapshot(attempt, rev); err == nil {
+			err = s.peer.PushConfig(attempt, snap)
 		}
 	}
 	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
 		s.configFailed.Store(true)
-		s.warnReplica(err)
-		return
+		if ctx.Err() == nil {
+			s.warnReplica(err)
+		}
+		return err
 	}
 	s.configFailed.Store(false)
 	s.configSent.Store(dirty)
@@ -241,6 +246,7 @@ func (s *Server) syncConfig(ctx context.Context) {
 		fmt.Fprintf(s.cfg.Stdout, "replica %s confirmed configuration revision %d\n", s.peer.address, rev)
 		s.configWarned = false
 	}
+	return nil
 }
 
 func (s *Server) warnReplica(err error) {
@@ -392,7 +398,7 @@ func (s *Server) receivePortalAdd(w http.ResponseWriter, r *http.Request) {
 	// tied to the caller's request: the claim is already committed.
 	ctx, cancel := context.WithTimeout(context.Background(), peerRPCTimeout)
 	defer cancel()
-	s.syncConfig(ctx)
+	_ = s.syncConfig(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(res)
 }
@@ -414,7 +420,7 @@ func (s *Server) receivePortalRm(w http.ResponseWriter, r *http.Request) {
 	s.dropPortalIdle(req.Computer)
 	ctx, cancel := context.WithTimeout(context.Background(), peerRPCTimeout)
 	defer cancel()
-	s.syncConfig(ctx)
+	_ = s.syncConfig(ctx)
 	w.WriteHeader(http.StatusNoContent)
 }
 

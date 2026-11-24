@@ -46,6 +46,8 @@ type Service struct {
 	// Changed runs after a configuration write commits. Nil means this node
 	// has no replica to tell.
 	Changed func()
+	// ConfirmRevocation waits for the replica after a local token deletion.
+	ConfirmRevocation func() error
 }
 
 // ErrReplica is returned when configuration is changed on a replica.

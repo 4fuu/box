@@ -126,7 +126,11 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, err
 	}
 	dbPath := filepath.Join(cfg.DataDir, "box.db")
-	st, err := store.Open(dbPath)
+	openStore := store.Open
+	if cfg.Peer.enabled() {
+		openStore = store.OpenDurable
+	}
+	st, err := openStore(dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -212,6 +216,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.Peer.enabled() {
 		if cfg.Peer.Writer {
 			svc.Changed = s.configChanged
+			svc.ConfirmRevocation = func() error {
+				if err := s.syncConfig(ctx); err != nil {
+					return errors.New("token revoked locally; replica confirmation pending")
+				}
+				return nil
+			}
 		}
 		if err := s.startPeer(ctx, cert, cfg.Peer); err != nil {
 			s.Close()

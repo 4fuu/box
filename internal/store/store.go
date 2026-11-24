@@ -112,13 +112,20 @@ type Token struct {
 }
 
 func Open(path string) (*Store, error) {
+	return openStore(path, "NORMAL")
+}
+
+// OpenDurable syncs each commit before a cluster node can acknowledge it.
+func OpenDurable(path string) (*Store, error) {
+	return openStore(path, "FULL")
+}
+
+func openStore(path, synchronous string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	// WAL keeps readers and the one writer off each other; NORMAL is safe
-	// with WAL and does not fsync every commit.
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)" +
-		"&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+		"&_pragma=journal_mode(WAL)&_pragma=synchronous(" + synchronous + ")"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
